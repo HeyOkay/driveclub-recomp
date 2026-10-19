@@ -725,6 +725,9 @@ bool EmulateNonGpuStore(void* context, VAddr fault, Vulkan::Rasterizer* rasteriz
 } // namespace
 #endif
 
+// bbport: the rasterizer for bbgpu_guest_read/write (Impl is private to PageManager).
+Vulkan::Rasterizer* g_memops_rasterizer = nullptr;
+
 struct PageManager::Impl {
     struct PageState {
         u8 num_write_watchers : 7;
@@ -1011,6 +1014,7 @@ private:
 public:
     UffdImpl(Vulkan::Rasterizer* rasterizer_) : Impl() {
         rasterizer = rasterizer_;
+        g_memops_rasterizer = rasterizer_; // bbgpu_guest_read/write
         uffd = syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
         if (uffd == -1) {
             LOG_ERROR(Common_Memory,
@@ -1135,6 +1139,7 @@ public:
 struct SignalImpl : public PageManager::Impl {
     SignalImpl(Vulkan::Rasterizer* rasterizer_) : Impl() {
         rasterizer = rasterizer_;
+        g_memops_rasterizer = rasterizer_; // bbgpu_guest_read/write
 
         // Should be called first.
         constexpr auto priority = std::numeric_limits<u32>::min();
@@ -1201,3 +1206,72 @@ template void PageManager::UpdatePageWatchersForRegion<false, false>(VAddr base_
                                                                      RegionBits& mask) const;
 
 } // namespace VideoCore
+
+// bbport: BB_GUEST_MEMOPS (default on, =0 off). The guest's memcpy/memset/memmove/memcmp are the host CRT's
+// (src/runtime.c). On a page that also holds GPU-written bytes, the CRT's wide stores and loads (AVX, rep stos)
+// fault and cannot be emulated, so every such call waited for a download of the page's GPU data even when it
+// touched none of those bytes (DriveClub: memsets of ~90 KB at 0x4005730020 and copies next to GPU-written
+// counters, ~40% of the main thread's waits in day races). Ranges with no GPU-written byte are done here through
+// the unprotected backing view, stores queued for the GPU copy like emulated stores (Rasterizer::StoreUntracked).
+// 0 from these: not handled (no GPU page involved, or GPU-written bytes): the caller runs the CRT function.
+namespace {
+bool GuestMemops() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_GUEST_MEMOPS");
+        // Default on: +4% uncapped at 720p render on an RTX 3070 Laptop; neutral at a 60 FPS cap (the waits moved
+        // to the trueSKY pages).
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+bool AnyGpuPage(Vulkan::Rasterizer* r, VAddr addr, u64 size) {
+    for (VAddr page = Common::AlignDown(addr, 4096); page < addr + size; page += 4096) {
+        if (r->IsPageGpuModified(page)) {
+            return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+extern "C" int bbgpu_guest_read(void* out, uintptr_t addr, uint64_t size) {
+    auto* r = VideoCore::g_memops_rasterizer;
+    if (!r || !GuestMemops() || size == 0 || r->IsGpuSideThread() || !AnyGpuPage(r, addr, size) ||
+        r->IsRangeGpuWritten(addr, size)) {
+        return 0;
+    }
+    return runtime_memory_read_backing(addr, out, size) ? 1 : 0;
+}
+
+extern "C" int bbgpu_guest_write(uintptr_t addr, const void* data, uint64_t size) {
+    auto* r = VideoCore::g_memops_rasterizer;
+    if (!r || !GuestMemops() || size == 0 || r->IsGpuSideThread() || !AnyGpuPage(r, addr, size) ||
+        r->IsRangeGpuWritten(addr, size)) {
+        return 0;
+    }
+    const auto* src = static_cast<const u8*>(data);
+    VAddr at = addr;
+    u64 left = size;
+    while (left) {
+        const u64 n = std::min<u64>(left, Common::AlignDown(at, 4096) + 4096 - at);
+        if (r->IsPageGpuModified(at)) {
+            if (!r->StoreUntracked(at, src, u32(n))) {
+                // Not eligible after all (a download in flight, ...): the rest takes the usual write faults.
+                std::memcpy(reinterpret_cast<void*>(at), src, left);
+                return 1;
+            }
+        } else {
+            std::memcpy(reinterpret_cast<void*>(at), src, n); // no GPU data on this page: at most a tracking fault
+        }
+        at += n;
+        src += n;
+        left -= n;
+    }
+    return 1;
+}
+
+// 1 when a guest memory operation over the range may need the backing path (memops on, a page with GPU data).
+extern "C" int bbgpu_guest_gpu_pages(uintptr_t addr, uint64_t size) {
+    auto* r = VideoCore::g_memops_rasterizer;
+    return r && GuestMemops() && size != 0 && !r->IsGpuSideThread() && AnyGpuPage(r, addr, size);
+}
