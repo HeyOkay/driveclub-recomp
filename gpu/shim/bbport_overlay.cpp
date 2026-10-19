@@ -236,6 +236,10 @@ void FpsCounter() {
     if (++frames % 60 == 0) {
         shown_w = BbFrame::scene_w.exchange(0);
         shown_h = BbFrame::scene_h.exchange(0);
+        if (shown_w == 0) {  // no scene of another size than the output: it is drawn at the output size
+            shown_w = BbFrame::output_w.load();
+            shown_h = BbFrame::output_h.load();
+        }
     }
     ImGui::Text("Render %ux%u  Output %ux%u  Screen %.0fx%.0f", shown_w, shown_h, BbFrame::output_w.load(), BbFrame::output_h.load(), viewport->Size.x, viewport->Size.y);
     ImGui::End();
