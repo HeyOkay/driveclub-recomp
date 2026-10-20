@@ -2933,7 +2933,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     }
     if (set_ok && image_bindings.size() == stage.images.size()) {
         // Remember the set: the same T#s resolve the same way while no image is (un)registered.
-        set_slot->generation = texture_cache.RegistryGeneration();
+        // Membership only: a form switch changes the image's backing, which the hit path checks per entry.
+        set_slot->generation = texture_cache.MembershipGeneration();
         set_slot->scene_generation = scene_targets->Generation();
         set_slot->count = static_cast<u32>(stage.images.size());
         std::copy_n(resolved.begin(), set_slot->count, set_slot->entries.begin());
@@ -3014,7 +3015,14 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
 bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
     const u32 count = static_cast<u32>(stage.images.size());
-    if (!prepared || count == 0 || count > TextureSet::MaxImages ||
+    // bbport: without a prepared draw (draw preparation is off in DriveClub) the T# hashes are
+    // computed here from the current user data, so the set memo works on its own. Opt out with
+    // BB_TEXTURE_SET_LOCAL=0.
+    static const bool local_sets = [] {
+        const char* env = std::getenv("BB_TEXTURE_SET_LOCAL");
+        return !(env && env[0] == '0');
+    }();
+    if ((!prepared && !local_sets) || count == 0 || count > TextureSet::MaxImages ||
         BbToggle::Disabled(BbToggle::TextureSetMemo) || FrameCapture::Active()) {
         return false;
     }
@@ -3023,17 +3031,24 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
             return false;
         }
     }
-    u64 key = XXH3_64bits_withSeed(prepared->image_hashes, count * sizeof(u64),
+    std::array<u64, TextureSet::MaxImages> local_hashes;
+    const u64* image_hashes = prepared ? prepared->image_hashes : local_hashes.data();
+    if (!prepared) {
+        for (u32 i = 0; i < count; ++i) {
+            local_hashes[i] = ImageDescHash(stage.images[i].GetSharp(stage), stage.images[i]);
+        }
+    }
+    u64 key = XXH3_64bits_withSeed(image_hashes, count * sizeof(u64),
                                    reinterpret_cast<u64>(&stage));
     key |= 1; // 0 marks an empty slot
     auto& set = texture_sets[key % texture_sets.size()];
     slot = &set;
-    const u64 generation = texture_cache.RegistryGeneration();
+    const u64 generation = texture_cache.MembershipGeneration();
     const bool match = set.key == key && set.stage == &stage && set.count == count &&
                        set.generation == generation &&
                        set.scene_generation == scene_targets->Generation() &&
                        std::equal(set.hashes.begin(), set.hashes.begin() + count,
-                                  prepared->image_hashes);
+                                  image_hashes);
     if (!match) {
         ++texture_set_why[set.key != key ? 0 : set.generation != generation ? 1 : 3];
         ++texture_set_misses;
@@ -3041,7 +3056,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         set.stage = &stage;
         set.count = 0;
         set.generation = ~0ull;
-        std::copy_n(prepared->image_hashes, count, set.hashes.begin());
+        std::copy_n(image_hashes, count, set.hashes.begin());
         return false;
     }
     // Every image still has the backing its view belongs to and needs no refresh.
@@ -3055,7 +3070,8 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         // BindTextures, which may sample the proxy instead.
         const bool proxies_on = !BbToggle::Disabled(BbToggle::SampleSceneProxies);
         if (image.backing != entry.backing || image.binding.needs_rebind ||
-            image.binding.is_target || !texture_cache.IsUpToDate(entry.id) ||
+            image.binding.is_target || image.binding.force_general ||
+            drive_aa->Redirects(entry.id) || !texture_cache.IsUpToDate(entry.id) ||
             (entry.proxy ? !proxies_on ||
                                !scene_targets->ProxyCurrent(image, entry.range.base.level,
                                                             entry.range.extent.levels)
