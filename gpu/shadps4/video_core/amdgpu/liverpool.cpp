@@ -492,11 +492,29 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             break;
         }
         case PM4ItOpcode::DumpConstRam: {
-            // bbport: earlier draws on the recording thread may still read constants here.
-            if (rasterizer) {
-                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
-            }
+            // bbport: earlier draws on the recording thread may still read constants here. They carry the
+            // vertex V#s read through these tables (Info::PointerRead), the other sharps in their flattened
+            // user data: a dump does not wait for them.
+            static const bool no_drain = [] {
+                const char* env = std::getenv("BB_PIPE_CE_NODRAIN");
+                // Default on (BB_PIPE_CE_NODRAIN=0: drain at every dump). Stage B and the copy threads still read
+                // some guest memory live (large buffers, vertex/index data, uploads): any of those overlapping the
+                // dumped range turns the drain back on (BbStats::CheckCeConflict).
+                return !(env && env[0] == '0');
+            }();
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+            if (rasterizer) {
+                if (!no_drain || BbStats::ce_dump_conflict.load(std::memory_order_relaxed)) {
+                    rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
+                } else {
+                    // Without the drain: a WriteData/DMA still queued for the recording thread must not land
+                    // over this dump later (write order), and the range is recorded so that any resource read
+                    // live that overlaps it turns the drain back on (BbStats::CheckCeConflict).
+                    rasterizer->WaitQueuedMemoryWrites();
+                    const u64 dst = dump_const->Address<u64>();
+                    BbStats::NoteCeDump(dst, dump_const->Size());
+                }
+            }
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
             break;

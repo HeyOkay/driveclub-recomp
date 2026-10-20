@@ -1006,6 +1006,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::RefreshImage(Image& image) {
+    BbStats::CheckCeConflict(image.info.guest_address, image.info.guest_size, "an image upload");
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }

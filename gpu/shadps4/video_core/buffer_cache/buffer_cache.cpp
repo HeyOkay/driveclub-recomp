@@ -1015,6 +1015,27 @@ bool BufferCache::CanQueueUntrackedStore(VAddr addr, u32 size) {
     return true;
 }
 
+} // namespace VideoCore
+
+namespace BbStats {
+namespace {
+VideoCore::GpuByteMap& CeDumpMap() {
+    static VideoCore::GpuByteMap map;
+    return map;
+}
+std::atomic<bool> ce_dumps_seen{false};
+} // namespace
+void NoteCeDump(std::uint64_t addr, std::uint64_t size) {
+    CeDumpMap().Mark(addr, size);
+    ce_dumps_seen.store(true, std::memory_order_relaxed);
+}
+bool CeDumpOverlaps(std::uint64_t addr, std::uint64_t size) {
+    return ce_dumps_seen.load(std::memory_order_relaxed) && CeDumpMap().Any(addr, size);
+}
+} // namespace BbStats
+
+namespace VideoCore {
+
 bool BufferCache::QueueUntrackedStore(VAddr addr, const void* data, u32 size) {
     const VAddr lo = Common::AlignDown(addr, 4);
     const VAddr hi = Common::AlignUp(addr + size, 4);
@@ -1111,6 +1132,7 @@ void BufferCache::ApplyQueuedStores() {
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     BB_PIPE_CHECK("BufferCache::ObtainBuffer");
+    BbStats::CheckCeConflict(device_addr, size, "a buffer binding");
     const bool stats = BufferStatsEnabled();
     if (stats) {
         PrintBufferStats();

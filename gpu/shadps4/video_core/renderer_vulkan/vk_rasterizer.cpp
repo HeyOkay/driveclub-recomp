@@ -425,7 +425,7 @@ struct PacketStage {
     u32 ud_size;
     u32 flat_size;
     u32 num_ring;
-    u32 pad;
+    u32 num_pointer_reads; ///< fetch V#s read through user-data pointers (Info::PointerRead)
 };
 constexpr u32 AlignPacket(u32 size) {
     return (size + 7) & ~7u;
@@ -649,6 +649,27 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     thread_local std::array<boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>,
                             Shader::MaxStageTypes>
         rings;
+    // bbport: the vertex V#s, read now through the user-data pointer: stage B binds these, so the constant
+    // engine may dump new tables over the old ones without waiting for B (BB_PIPE_CE_NODRAIN).
+    thread_local boost::container::static_vector<Shader::Info::PointerRead, 32> pointer_reads;
+    pointer_reads.clear();
+    const Shader::Info* fetch_stage = nullptr;
+    if (pipeline && !cs) {
+        const auto* graphics = static_cast<const GraphicsPipeline*>(pipeline);
+        const auto& fetch = graphics->GetFetchShader();
+        const auto* vs = stages.size() > u32(Shader::SwStage::Vertex)
+                             ? stages[u32(Shader::SwStage::Vertex)] : nullptr;
+        if (fetch && vs && fetch->attributes.size() <= pointer_reads.capacity()) {
+            fetch_stage = vs;
+            for (const auto& attrib : fetch->attributes) {
+                Shader::Info::PointerRead read{attrib.sgpr_base, attrib.dword_offset, 0, {}};
+                const auto raw = vs->ReadUdReg<AmdGpu::Buffer>(attrib.sgpr_base, attrib.dword_offset);
+                static_assert(sizeof(raw) == sizeof(read.words));
+                std::memcpy(read.words, &raw, sizeof(read.words));
+                pointer_reads.push_back(read);
+            }
+        }
+    }
     // bbport: every range a stage of this draw writes is noted before any read-only binding is copied into the
     // ring: a read copied first would no longer alias a write declared by a later binding or stage.
     if (constant_ring && !BbToggle::Disabled(BbToggle::ConstantRing)) {
@@ -683,6 +704,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
                     AlignPacket(u32(stage->user_data.size() + stage->flattened_ud_buf.size()) *
                                 sizeof(u32)) +
                     u32(ring.size() * sizeof(RingBinding));
+            if (stage == fetch_stage) {
+                size += u32(pointer_reads.size() * sizeof(Shader::Info::PointerRead));
+            }
         }
     }
     if (cs) {
@@ -731,15 +755,18 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         }
         const auto& ring = rings[stage_index++];
         auto& header = *reinterpret_cast<PacketStage*>(out);
+        const u32 num_reads = stage == fetch_stage ? u32(pointer_reads.size()) : 0;
         header = {stage,
                   stage->pgm_base,
                   static_cast<u32>(stage->user_data.size()),
                   static_cast<u32>(stage->flattened_ud_buf.size()),
                   static_cast<u32>(ring.size()),
-                  0};
+                  num_reads};
         out += sizeof(PacketStage);
         std::memcpy(out, ring.data(), ring.size() * sizeof(RingBinding));
         out += ring.size() * sizeof(RingBinding);
+        std::memcpy(out, pointer_reads.data(), num_reads * sizeof(Shader::Info::PointerRead));
+        out += num_reads * sizeof(Shader::Info::PointerRead);
         std::memcpy(out, stage->user_data.data(), stage->user_data.size_bytes());
         std::memcpy(out + stage->user_data.size_bytes(), stage->flattened_ud_buf.data(),
                     stage->flattened_ud_buf.size() * sizeof(u32));
@@ -832,9 +859,12 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
         self.ring_stages[i] = {stage.info, reinterpret_cast<const RingBinding*>(in),
                                stage.num_ring};
         in += stage.num_ring * sizeof(RingBinding);
+        const auto* reads = reinterpret_cast<const Shader::Info::PointerRead*>(in);
+        in += stage.num_pointer_reads * sizeof(Shader::Info::PointerRead);
         const auto* words = reinterpret_cast<const u32*>(in);
-        Shader::Info::ud_snapshots[i] = {stage.info, words, stage.ud_size, words + stage.ud_size,
-                                         stage.flat_size, stage.pgm_base};
+        Shader::Info::ud_snapshots[i] = {stage.info,       words,         stage.ud_size,
+                                         words + stage.ud_size, stage.flat_size, stage.pgm_base,
+                                         reads,            stage.num_pointer_reads};
         in += AlignPacket((stage.ud_size + stage.flat_size) * sizeof(u32));
     }
     Shader::Info::num_ud_snapshots = packet.num_stages;

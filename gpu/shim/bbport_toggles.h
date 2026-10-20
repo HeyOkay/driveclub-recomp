@@ -2,6 +2,7 @@
 // see runtime_memory.c), to find which one changes rendering without restarting.
 #pragma once
 #include <atomic>
+#include <cstdio>
 #include <csetjmp>
 #include <chrono>
 #include <cstdint>
@@ -88,6 +89,21 @@ inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// BB_PIPE_CE_NODRAIN: the exact guest bytes constant-RAM dumps have written (16-byte blocks, gpu_byte_map.h)
+/// and whether a resource read live by the recording thread or the copy threads ever overlapped them; once one
+/// has, dumps drain. Defined in buffer_cache.cpp.
+inline std::atomic<bool> ce_dump_conflict{false};
+void NoteCeDump(std::uint64_t addr, std::uint64_t size);
+bool CeDumpOverlaps(std::uint64_t addr, std::uint64_t size);
+/// A resource read live (buffer binding, upload): if it overlaps dumped bytes, dumps drain from now on.
+inline void CheckCeConflict(std::uint64_t addr, std::uint64_t size, const char* what) {
+    if (!ce_dump_conflict.load(std::memory_order_relaxed) && CeDumpOverlaps(addr, size) &&
+        !ce_dump_conflict.exchange(true)) {
+        std::printf("Draw pipe: %s at %llx (%llu bytes) overlaps constant-RAM dump data: dumps drain the pipe "
+                    "from now on\n",
+                    what, static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size));
+    }
+}
 /// BB_PIPE_CHECK=1 (two-stage draw pipe debugging). While draw packets are in flight, stage B owns the draw
 /// scheduler and the caches: a call from any other thread is reported (bbport_sampler.cpp). `object` restricts the
 /// scheduler checks to the draw scheduler (the presenter has its own).
