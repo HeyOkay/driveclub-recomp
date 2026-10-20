@@ -118,6 +118,7 @@ bool OnPage(const Card& card) { return card.tab == g_tab; }
 std::wstring g_status;
 std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while it is set, unless the check is skipped
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
+bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool GpuBlocked() { return !g_gpu_problem.empty() && !g_skip_gpu_check; }
 Color g_status_color = kMuted;
 RectF g_btn[3];  // reset, save, play
@@ -421,6 +422,10 @@ void BuildModel() {
   const int skipgpu = toggle(L"Skip the hardware check",
                              L"The launcher checks that your processor and graphics card can run the game (Vulkan 1.3). If it refuses hardware that does work, turn this on to start anyway.",
                              "@skipgpu", false);
+  const int overlays = toggle(L"Let overlay programs into the game",
+                              L"Steam, Epic, Discord, OBS and tuning tools add themselves to the game's graphics. "
+                              L"A part of the crashes players report comes from those additions, so the launcher keeps them "
+                              L"out. Turn this on if you want the in-game overlay while playing.", "@overlays", false);
   const int showfps = toggle(L"Show FPS counter", L"Draws the frame rate in the top right corner while playing.", "@fps", false);
   const int full = toggle(L"Fullscreen", L"Plays borderless fullscreen. Turn off for a window.", "@full", true);
   const int unlock = toggle(L"Unlock DLC content",
@@ -452,7 +457,7 @@ void BuildModel() {
   // The cards flow into as many columns as the window width allows (see LayoutPass), on the page of their tab.
   g_cards.push_back({L"FRAME RATE AND RESOLUTION", {g_preset, fps, outres, inres, wide, fov}, 0, kTabGraphics});
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_aniso}, 0, kTabGraphics});
-  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps}, 0, kTabGameplay});
+  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays}, 0, kTabGameplay});
   g_cards.push_back({L"PATCHES", {blur, reset, barrier, pcol, pproc, skipgpu}, 0, kTabGameplay,
                      L"Community patches for DriveClub version 1.28."});
   g_cards.push_back({L"BENCHMARK", {g_btrack, g_bcar, g_bmode, g_btod, g_bweather, g_brain, g_blen}, 0, kTabBench});
@@ -510,6 +515,7 @@ void LoadSettings() {
     if (line.rfind("fgen=", 0) == 0) fgen_saved = atoi(line.substr(5).c_str());
     if (line.rfind("unlocked=", 0) == 0) unlocked_saved = line.substr(9) == "1";
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
+    if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
     if (line.rfind("full=", 0) == 0) full_screen = line.substr(5) == "1";
     if (line.rfind("dlc_unlock=", 0) == 0) unlock_dlc = line.substr(11) == "1";  // the "unlock=" of earlier versions is not read: off for everyone
     if (line.rfind("bench_track=", 0) == 0) g_bench_track = FindBench(kBenchTracks, kBenchTrackCount, line.substr(12), 0);
@@ -536,6 +542,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@fast") {
       c.sel = fast_render ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@overlays") {
+      c.sel = g_allow_overlays ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@skipgpu") {
@@ -638,9 +648,10 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@full") full_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") unlock_on = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@overlays") g_allow_overlays = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
         << "\r\nbench_rain=" << g_c[g_brain].sel << "\r\nbench_length=" << g_c[g_blen].sel << "\r\n";
@@ -1384,8 +1395,15 @@ std::wstring StartGame(HANDLE* process = nullptr) {
   SetEnvironmentVariableW(L"BB_GPU_USER_DIR", user.c_str());
   SetEnvironmentVariableW(L"BB_PREFLIGHT_NOTE", g_preflight_note.empty() ? nullptr : std::wstring(g_preflight_note.begin(), g_preflight_note.end()).c_str());
   SetEnvironmentVariableW(L"BB_CRASH_DIR", (g_home + L"\\logs").c_str());
-  // The switchable-graphics layer of AMD laptops gives a black window on some of them.
-  if (GetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", nullptr, 0) == 0) SetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", L"VK_LAYER_AMD_switchable_graphics");
+  // Programs that add themselves to the Vulkan loader (Steam, Epic, Discord, OBS, tuning tools) sit under a
+  // part of the crashes players report, and the switchable-graphics layer of AMD laptops gives a black window
+  // on some of them. "~implicit~" drops every layer that installs itself; the launcher row that names the
+  // overlays back in keeps only the AMD one out.
+  if (GetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE", nullptr, 0) == 0) {
+    SetEnvironmentVariableW(L"VK_LOADER_LAYERS_DISABLE",
+                            g_allow_overlays ? L"VK_LAYER_AMD_switchable_graphics"
+                                             : L"~implicit~,VK_LAYER_AMD_switchable_graphics");
+  }
   {
     // With the deltatime patch the game times itself by the wall clock, so each frame must be shown as soon as
     // it is finished; waiting for the next 60 Hz tick alternates 16 and 33 ms frames and shakes the camera.
