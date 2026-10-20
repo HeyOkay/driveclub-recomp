@@ -867,6 +867,10 @@ int main(int argc, char **argv) {
     start_tick=GetTickCount64();
 #endif
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* The launcher sends both streams to the same log file. Buffered stderr flushed in blocks, so a
+       flush landed in the middle of a line another thread was writing and the reports came out
+       spliced. One unbuffered write per line keeps every line whole. */
+    setvbuf(stderr, NULL, _IONBF, 0);
 #ifdef _WIN32
     print_system_info();
 #endif
