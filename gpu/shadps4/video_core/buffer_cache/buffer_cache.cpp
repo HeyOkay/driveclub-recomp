@@ -18,6 +18,7 @@
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
 #include "bbport_frametrace.h"
+#include "bbport_shared_log.h"
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 extern "C" int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 #include "common/alignment.h"
@@ -441,6 +442,11 @@ unsigned long LogThreadId() {
 
 // The tick that completes the last GPU write into each readback window (hashed): a direct read waits for it.
 void BufferCache::StampGpuWrite(VAddr device_addr, u64 size) {
+    // bbport: BB_SHARED_LOG: each distinct GPU write range in the game's SystemShared heap, once.
+    static const bool shared_log = BbSharedLog::Enabled();
+    if (shared_log && size != 0) {
+        BbSharedLog::GpuWrite(device_addr, size, BbTrace::writer_tag.load(std::memory_order_relaxed));
+    }
     static const bool log = ReadbackLog() != nullptr;
     if ((!arena_host_visible && !log && !early_readback) || size == 0) {
         return;

@@ -631,6 +631,49 @@ static int patchable(Segment *segments, uint64_t count, uint64_t address, uint64
     }
     return 0;
 }
+/* BB_SHARED_LOG and BB_SHARED_PAD (default 3; gpu/shim/bbport_shared_log.cpp): the six call/jmp sites of the game's SystemShared
+ * allocator (eboot 0x753a80) and the GDS-count call of the VideoShared one (0x753b40, site 0x7584e1) go through near
+ * thunks (mov ecx, site; movabs rax, wrapper; jmp rax) to the wrapper in gpu/shim/bbport_shared_log.cpp. rcx is free at
+ * all seven: both allocators take three arguments. A site is patched only when it is exactly e8/e9 to its allocator. */
+static void patch_shared_alloc(unsigned char *image, uint64_t size) {
+    static const uint64_t alloc = 0x753a80, video_alloc = 0x753b40;
+    static const uint64_t sites[7] = {0x744379, 0x744c8c, 0x75848e, 0x7584c4, 0x100acff, 0x100ad1c, 0x7584e1};
+    const char *pad = getenv("BB_SHARED_PAD");
+    const int log = getenv("BB_SHARED_LOG") != NULL, padding = pad ? (int)strtoul(pad, NULL, 0) : 3;
+    if ((!log && !padding) || size < 0x100ad1c + 5) return;
+    uintptr_t wrapper = bbgpu_shared_alloc_hook((uintptr_t)image + alloc, (uintptr_t)image);
+    if (!wrapper) return;
+    unsigned char *thunks = allocate(page_size);
+    int patched = 0;
+    for (int c = 0; c < 7; ++c) {
+        const int payload = sites[c] == 0x75848e || sites[c] == 0x7584c4, count = sites[c] == 0x7584e1;
+        /* BB_SHARED_PAD alone patches only the sites it pads (bit 1 payloads, bit 2 counts) */
+        if (!(log && !count) && !((padding & 1) && payload) && !((padding & 2) && count)) continue;
+        const uint64_t target = count ? video_alloc : alloc;
+        unsigned char *site = image + sites[c];
+        int32_t rel;
+        memcpy(&rel, site + 1, 4);
+        if ((site[0] != 0xe8 && site[0] != 0xe9) || (int64_t)sites[c] + 5 + (int64_t)rel != (int64_t)target) {
+            printf("BB_SHARED_LOG: site %#" PRIx64 " does not call the allocator; not patched\n", sites[c]);
+            continue;
+        }
+        unsigned char *t = thunks + 32 * c;
+        uint32_t id = (uint32_t)sites[c];
+        t[0] = 0xb9; memcpy(t + 1, &id, 4);                    /* mov ecx, site */
+        t[5] = 0x48; t[6] = 0xb8; memcpy(t + 7, &wrapper, 8);  /* movabs rax, wrapper */
+        t[15] = 0xff; t[16] = 0xe0;                            /* jmp rax */
+        int64_t to = (int64_t)((uintptr_t)t - ((uintptr_t)site + 5));
+        if (to != (int32_t)to) {
+            printf("BB_SHARED_LOG: thunk out of range of %#" PRIx64 "; not patched\n", sites[c]);
+            continue;
+        }
+        rel = (int32_t)to;
+        memcpy(site + 1, &rel, 4); /* keeps e8 (call) or e9 (tail jump) */
+        ++patched;
+    }
+    protect(thunks, page_size, 5);
+    printf("BB_SHARED_LOG/PAD: %d SystemShared allocator sites patched (log %d, pad %d)\n", patched, log, padding);
+}
 /* BBPATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1113,6 +1156,7 @@ int main(int argc, char **argv) {
         memcpy(image + relocs[i].target, &value, 8);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    if (!cpu_only) patch_shared_alloc(image, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
