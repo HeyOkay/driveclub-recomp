@@ -68,17 +68,61 @@ extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64
 // page the GPU has written is read-protected, and each read of it was a synchronous GPU download. A
 // label the CPU or the fence handlers wrote is already in the backing; one written by a shader is
 // not, so every 32nd unmet poll reads through the view, which brings it up to date.
-static bool TestWaitRegMem(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, u32& polls) {
+// bbport: BB_LABEL_VIEW_GPU_ONLY (default on): the 32nd poll reads through the view only when the GPU wrote (or a download is
+// under way for) the label's bytes; for any other label the backing already holds the latest value, and the view
+// read only forced a synchronous download of the page's other GPU data.
+static bool TestWaitRegMem(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, u32& polls,
+                           Vulkan::Rasterizer* rasterizer) {
     if (wait->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {
         return wait->Test(regs);
     }
+    // Measured in a DriveClub race: GPU-thread "buffer watch" waits 17% -> 2% of its time, p99 frame ~20.5 -> ~18.9 ms.
+    // Default on; =0 reverts.
+    // Every 4096th unmet poll still reads through the view: a GPU write the byte map missed costs a delay, not a hang.
+    static const bool view_gpu_only = EmulatorSettingsImpl::Flag("BB_LABEL_VIEW_GPU_ONLY", true);
     u32 value;
-    if ((++polls & 31) == 0 ||
-        !runtime_memory_read_backing(wait->Address<uintptr_t>(), &value, sizeof(value))) {
-        return wait->Test(regs);
+    const bool backing = runtime_memory_read_backing(wait->Address<uintptr_t>(), &value, sizeof(value));
+    if (backing && view_gpu_only && rasterizer && ((polls + 1) & 4095) != 0 &&
+        !rasterizer->IsRangeGpuWritten(wait->Address<VAddr>(), sizeof(value))) {
+        ++polls;
+        return wait->TestValue(value);
+    }
+    if ((++polls & 31) == 0 || !backing) {
+        // Stats only for the real view reads: host labels (no backing) are polled 100k+ times/s.
+        if (!BbStats::enabled || (polls & 31) != 0) {
+            return wait->Test(regs);
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const bool met = wait->Test(regs);
+        BbStats::NoteWaitViewRead(wait->Address<uintptr_t>(),
+                                  (u64(wait->function.Value()) << 32) | wait->ref, met,
+                                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count());
+        return met;
     }
     return wait->TestValue(value);
 }
+
+// bbport: BB_FRAME_STATS time of a WAIT_REG_MEM whose first test failed ([0] graphics, [1] compute).
+struct WaitRegMemTimer {
+    u32 queue;
+    std::chrono::steady_clock::time_point start{};
+    void Begin() {
+        if (BbStats::enabled && start == std::chrono::steady_clock::time_point{}) {
+            start = std::chrono::steady_clock::now();
+        }
+    }
+    ~WaitRegMemTimer() {
+        if (start != std::chrono::steady_clock::time_point{}) {
+            BbStats::wrm_waits[queue].fetch_add(1, std::memory_order_relaxed);
+            BbStats::wrm_wait_ns[queue].fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                      std::chrono::steady_clock::now() - start)
+                                                      .count(),
+                                                  std::memory_order_relaxed);
+        }
+    }
+};
 
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
@@ -1266,7 +1310,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
                 u32 polls = 0;
-                while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls)) {
+                WaitRegMemTimer timer{0};
+                while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls, rasterizer)) {
+                    timer.Begin();
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
@@ -1612,7 +1658,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             u32 polls = 0;
-            while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls)) {
+            WaitRegMemTimer timer{1};
+            while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls, rasterizer)) {
+                timer.Begin();
                 YIELD_ASC(vqid);
             }
             break;

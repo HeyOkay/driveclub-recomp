@@ -630,6 +630,25 @@ void VideoOutDriver::Flip(const Request& req) {
                 std::printf("%s\n", line.c_str());
             }
             {
+                // bbport: WAIT_REG_MEM on memory: unmet waits and the polled labels read through the guest view.
+                std::string line = fmt::format(
+                    "Label waits (unmet at first test)/s: graphics {:.0f} ({:.1f} ms/s), compute {:.0f} ({:.1f} ms/s); "
+                    "view reads by label:",
+                    BbStats::wrm_waits[0].exchange(0) / window, BbStats::wrm_wait_ns[0].exchange(0) / 1e6 / window,
+                    BbStats::wrm_waits[1].exchange(0) / window, BbStats::wrm_wait_ns[1].exchange(0) / 1e6 / window);
+                for (u32 i = 0; i < 8; ++i) {
+                    if (const u64 n = BbStats::wrm_forced[i].exchange(0)) {
+                        const u64 info = BbStats::wrm_info[i].load();
+                        line += fmt::format(" {:#x} x{:.0f}/s met {:.0f}/s {:.1f} ms/s (func {} ref {:#x});",
+                                            BbStats::wrm_addr[i].load(), n / window,
+                                            BbStats::wrm_forced_met[i].exchange(0) / window,
+                                            BbStats::wrm_forced_ns[i].exchange(0) / 1e6 / window, info >> 32,
+                                            info & 0xffffffffu);
+                    }
+                }
+                std::printf("%s\n", line.c_str());
+            }
+            {
                 std::vector<std::pair<u64, u32>> ops;
                 for (u32 i = 0; i < 256; ++i) {
                     if (const u64 ns = BbStats::opcode_ns[i].exchange(0)) {

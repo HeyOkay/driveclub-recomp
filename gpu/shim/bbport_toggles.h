@@ -161,6 +161,25 @@ inline std::atomic<std::uint64_t> wait_site_ns[8]{};
 /// Guest read paths into BufferCache::ReadMemory: 0 offloaded, 1 window split, 2 unresolved (sync fallback),
 /// 3 locked caller (sync), 4 offload disabled.
 inline std::atomic<std::uint64_t> readback_paths[8]{};
+/// WAIT_REG_MEM on memory (BB_FRAME_STATS): [0] graphics / [1] compute waits whose first test failed, and the
+/// ns they waited. By polled address (8 slots): reads through the guest view (the 32nd unmet poll), of those
+/// the ones that met the condition, their ns, and function << 32 | reference.
+inline std::atomic<std::uint64_t> wrm_waits[2]{}, wrm_wait_ns[2]{};
+inline std::atomic<std::uint64_t> wrm_addr[8]{}, wrm_forced[8]{}, wrm_forced_met[8]{}, wrm_forced_ns[8]{},
+    wrm_info[8]{};
+inline void NoteWaitViewRead(std::uint64_t addr, std::uint64_t info, bool met, std::uint64_t ns) {
+    for (unsigned i = 0, at = static_cast<unsigned>((addr >> 2) * 0x9E3779B1u) & 7; i < 8; ++i, at = (at + 1) & 7) {
+        std::uint64_t expected = 0;
+        if (wrm_addr[at].load(std::memory_order_relaxed) == addr ||
+            wrm_addr[at].compare_exchange_strong(expected, addr) || expected == addr) {
+            wrm_forced[at].fetch_add(1, std::memory_order_relaxed);
+            wrm_forced_met[at].fetch_add(met ? 1 : 0, std::memory_order_relaxed);
+            wrm_forced_ns[at].fetch_add(ns, std::memory_order_relaxed);
+            wrm_info[at].store(info, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 /// Read faults taken by the GPU command thread itself, by faulting instruction (BB_FRAME_STATS).
 inline std::atomic<std::uint64_t> gpu_fault_rip[32]{}, gpu_fault_count[32]{};
 inline void NoteGpuReadFault(std::uint64_t rip) {
