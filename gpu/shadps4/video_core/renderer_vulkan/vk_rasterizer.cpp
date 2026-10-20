@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <array>
+#include "common/bytes_equal.h"
 #include <cstring>
 #include <optional>
 #include <set>
@@ -217,6 +218,8 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
                                                   LastTarget& last, auto&& make_desc,
                                                   const Parts&... parts) {
     static_assert((sizeof(Parts) + ...) <= 256, "target memo key too large");
+    // bbport: the key size is fixed per call site: compare inline instead of a CRT memcmp call.
+    constexpr u32 KeySize = (sizeof(Parts) + ...);
     std::array<u8, 256> key{};
     u32 key_size = 0;
     const auto append = [&](const auto& part) {
@@ -227,7 +230,7 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
     const u64 generation = texture_cache.RegistryGeneration();
     const bool memo_enabled = !BbToggle::Disabled(BbToggle::TextureBindingMemo);
     if (memo_enabled && last.generation == generation && last.key_size == key_size &&
-        std::memcmp(last.key.data(), key.data(), key_size) == 0) {
+        Common::BytesEqual<KeySize>(last.key.data(), key.data())) {
         texture_cache.MarkFound(last.image_id);
         return last.image_id;
     }
@@ -246,7 +249,7 @@ VideoCore::ImageId Rasterizer::FindTargetMemoized(VideoCore::TextureCache::Image
     }
     auto& memo = target_memo[hash % target_memo.size()];
     if (memo.generation == generation && memo.key_size == key_size &&
-        std::memcmp(memo.key.data(), key.data(), key_size) == 0 && memo_enabled) {
+        Common::BytesEqual<KeySize>(memo.key.data(), key.data()) && memo_enabled) {
         desc = memo.desc;
         texture_cache.MarkFound(memo.image_id);
         remember(memo.image_id);

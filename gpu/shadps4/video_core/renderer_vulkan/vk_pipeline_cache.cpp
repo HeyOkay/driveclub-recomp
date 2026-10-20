@@ -699,7 +699,7 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
                  key.stage_hashes[stage_out_idx]) =
             GetProgram(sel, stage_in, stage_out, params, binding);
         if (fetch_shader_) {
-            sel.fetch_shader = fetch_shader_;
+            sel.fetch_shader = std::move(fetch_shader_); // bbport: no vector copy per draw
         }
         return true;
     };
