@@ -128,6 +128,26 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                        reqs.memoryTypeBits)
             .value();
     {
+        // Type for buffer data when the card's own memory is full: system memory, which the GPU reads
+        // over PCIe. Slower, but a full card should not end the game.
+        const auto& props = instance.GetMemoryProperties();
+        for (u32 i = 0; i < props.memoryTypeCount && spill_memory_type_index == ~0u; ++i) {
+            if (((reqs.memoryTypeBits >> i) & 1) == 0) {
+                continue;
+            }
+            const auto flags = props.memoryTypes[i].propertyFlags;
+            if ((flags & (vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)) !=
+                (vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent)) {
+                continue;
+            }
+            if ((props.memoryHeaps[props.memoryTypes[i].heapIndex].flags &
+                 vk::MemoryHeapFlagBits::eDeviceLocal) != vk::MemoryHeapFlags{}) {
+                continue;
+            }
+            spill_memory_type_index = i;
+        }
+    }
+    {
         const char* direct = std::getenv("BB_READBACK_DIRECT");
         // Reading GPU results straight from host visible memory (resizable BAR) is untested on AMD cards, which
         // show device losses and broken frames with it: off there unless BB_READBACK_DIRECT=1 asks for it.
@@ -166,9 +186,36 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     bda_pagetable_buffer = std::make_unique<Buffer>(
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
+
+    // The zeroed guard block, on the drivers that support aliasing one memory over many ranges (AMD
+    // by default in this port). AMD faults a shader that reads an unbound page; NVIDIA answers zero.
+    if (sparse_aliased_enabled) {
+        const auto guard_type = FindMemoryType(
+            instance.GetMemoryProperties(),
+            vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
+            reqs.memoryTypeBits);
+        if (guard_type) {
+            const auto alloc = instance.GetDevice().allocateMemory(
+                {.allocationSize = block_size, .memoryTypeIndex = *guard_type});
+            if (alloc.result == vk::Result::eSuccess) {
+                guard_memory = alloc.value;
+                const auto map = instance.GetDevice().mapMemory(guard_memory, 0, block_size);
+                if (map.result == vk::Result::eSuccess) {
+                    std::memset(map.value, 0, block_size);
+                    instance.GetDevice().unmapMemory(guard_memory);
+                }
+            }
+        }
+        std::printf("GPU: guard page for buffers that are read past the end: %s\n",
+                    guard_memory ? "on" : "off");
+    }
 }
 
-BufferCache::~BufferCache() = default;
+BufferCache::~BufferCache() {
+    if (guard_memory) {
+        instance.GetDevice().freeMemory(guard_memory);
+    }
+}
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
     memory_tracker->InvalidateRegion(device_addr, size, [this, device_addr, size, assume_locks] {
@@ -811,7 +858,30 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         .allocationSize = resident_blocks << block_shift,
         .memoryTypeIndex = arena_memory_type_index,
     };
-    const auto device_memory = Vulkan::Check(instance.GetDevice().allocateMemory(alloc_info));
+    auto alloc = instance.GetDevice().allocateMemory(alloc_info);
+    if (alloc.result == vk::Result::eErrorOutOfDeviceMemory && spill_memory_type_index != ~0u) {
+        static std::atomic<bool> told{false};
+        if (!told.exchange(true)) {
+            std::printf("GPU: the card's memory is full, buffer data goes to system memory. "
+                        "The frame rate drops instead of the game ending.\n");
+            std::fflush(stdout);
+        }
+        alloc = instance.GetDevice().allocateMemory({.allocationSize = alloc_info.allocationSize,
+                                                    .memoryTypeIndex = spill_memory_type_index});
+    }
+    if (alloc.result != vk::Result::eSuccess) {
+        // Out of room in system memory too. Leaving these pages unbound shows wrong pixels where the
+        // game reads them; stopping the port is what the assert here used to do.
+        static std::atomic<u32> failed{0};
+        const u32 n = failed.fetch_add(1) + 1;
+        if (n <= 3 || n % 512 == 0) {
+            LOG_WARNING(Render_Vulkan,
+                        "No memory for {} bytes of buffer data ({} failures so far); the pages stay empty",
+                        alloc_info.allocationSize, n);
+        }
+        return;
+    }
+    const vk::DeviceMemory device_memory = *alloc;
     u8* mapped_base = nullptr;
     if (arena_host_visible) {
         const auto mapping = instance.GetDevice().mapMemory(device_memory, 0, vk::WholeSize);
@@ -853,6 +923,35 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         const u64 copy_size = (backing.end - backing.start) * sizeof(vk::DeviceAddress);
         copies.emplace_back(offset, backing.start * sizeof(vk::DeviceAddress), copy_size);
         offset += copy_size;
+    }
+
+    // AMD faults a shader that touches an unbound page, NVIDIA answers zero. The block just before
+    // the first and just after the last of what the game asked for gets the zeroed guard page, so a
+    // draw that steps one block over the end of its buffer keeps reading zeros instead of losing
+    // the device.
+    if (guard_memory) {
+        const u64 arena_first = arena->cpu_addr >> block_shift;
+        const u64 arena_last = (arena->cpu_addr + arena->SizeBytes() - 1) >> block_shift;
+        auto guard = [&](u64 block) {
+            if (block < arena_first || block > arena_last) {
+                return;
+            }
+            bool resident = false;
+            resident_ranges.ForEachInRange(block, block + 1, [&](const Backing&) { resident = true; });
+            if (resident) {
+                return;
+            }
+            binds->binds.push_back(vk::SparseMemoryBind{
+                .resourceOffset = (block << block_shift) - arena->cpu_addr,
+                .size = block_size,
+                .memory = guard_memory,
+                .memoryOffset = 0,
+            });
+        };
+        if (first_block > 0) {
+            guard(first_block - 1);
+        }
+        guard(last_block + 1);
     }
 
     staging.Flush();

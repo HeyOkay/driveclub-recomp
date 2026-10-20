@@ -206,6 +206,13 @@ private:
     IntervalList<Backing> resident_ranges;
 
     u32 arena_memory_type_index{};
+    /// System memory type used when video memory is full, so a small card keeps playing slowly
+    /// instead of ending. ~0u when the driver offers none.
+    u32 spill_memory_type_index{~0u};
+    /// One zeroed block, bound in the page next to a buffer's last one. A shader that reads one
+    /// block past the end then sees zeros instead of faulting the device, which is what AMD does
+    /// to an unbound page. Only used when the driver supports aliased sparse binding.
+    vk::DeviceMemory guard_memory{};
     u32 block_size{};
     u32 block_shift{};
     u32 blocks_per_arena_page{};
