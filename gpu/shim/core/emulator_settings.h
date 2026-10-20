@@ -45,6 +45,10 @@ public:
     /// Frames per second the present thread lets through; 0 = no limit. BB_FPS_LIMIT overrides.
     u32 GetFrameLimit() {
         static const u32 value = [] {
+            // bbport: BB_FPS_CAP=<n> wins over BB_FPS_LIMIT (which the launcher sets), as the benchmark's
+            // "ran" line already reports it: a test cap (40 FPS = 3 refreshes at 120 Hz) with any launcher.
+            const long cap = Number("BB_FPS_CAP", -1);
+            if (cap >= 0) return u32(cap);
             const long limit = Number("BB_FPS_LIMIT", -1);
             if (limit >= 0) return u32(limit);
             return Number("BB_VBLANK_HZ", 60) > 0 ? 0u : std::min<u32>(BbDisplayRefreshHz(), 120);
