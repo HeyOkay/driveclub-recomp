@@ -88,6 +88,29 @@ inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// BB_FAULT_EMULATE=1: guest read faults on bytes the GPU did not write, served by emulating the load
+/// (page_manager.cpp); declined (instruction not handled) and GPU-written bytes take the usual download.
+inline std::atomic<std::uint64_t> fault_emulated{0}, fault_emulate_declined{0}, fault_emulate_gpu{0};
+/// BB_FAULT_EMULATE=1: guest write faults on bytes the GPU did not write, done as a store plus an inline
+/// update of the GPU copy; and those that took the usual download.
+inline std::atomic<std::uint64_t> store_emulated{0}, store_emulate_declined{0};
+/// Why stores were not emulated: 0 instruction, 1 operands, 2 address, 3 source, 4 page without GPU data,
+/// 5 GPU-written bytes, 6 download in flight, 7 arena.
+inline std::atomic<std::uint64_t> store_why[8]{};
+/// Instructions of write faults the emulation does not handle (rip, count), for BB_FRAME_STATS.
+inline std::atomic<std::uint64_t> store_skip_rip[64]{}, store_skip_count[64]{};
+inline void NoteStoreSkip(std::uint64_t rip) {
+    for (std::uint32_t i = 0, h = std::uint32_t((rip >> 2) * 2654435761u) & 63; i < 64; ++i, h = (h + 1) & 63) {
+        std::uint64_t cur = store_skip_rip[h].load(std::memory_order_relaxed);
+        if (cur == 0 && store_skip_rip[h].compare_exchange_strong(cur, rip)) {
+            cur = rip;
+        }
+        if (cur == rip) {
+            store_skip_count[h].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).

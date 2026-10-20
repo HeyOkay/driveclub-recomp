@@ -196,6 +196,21 @@ void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
                  vk::AccessFlagBits2::eTransferWrite);
 }
 
+void Runtime::InlineBytes(VideoCore::Buffer* dst, u64 offset, const void* data, u32 size) {
+    scheduler.EndRendering();
+
+    if (IsBufferAccessed(dst, offset, size, true)) {
+        FlushBarriers();
+    }
+
+    std::vector<u8> bytes(static_cast<const u8*>(data), static_cast<const u8*>(data) + size);
+    scheduler.Record([handle = dst->Handle(), offset, bytes = std::move(bytes)](vk::CommandBuffer cmdbuf) {
+        cmdbuf.updateBuffer(handle, offset, bytes.size(), bytes.data());
+    });
+
+    AccessBuffer(dst, offset, size, vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferWrite);
+}
+
 bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                       std::optional<VideoCore::SubresourceRange> subres_range) {

@@ -482,6 +482,44 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::wait_site_ns[5].exchange(0) / (window * 1e7),
                         BbStats::wait_site_ns[6].exchange(0) / (window * 1e7),
                         BbStats::wait_site_ns[7].exchange(0) / (window * 1e7));
+            std::printf("Read faults per second emulated (bytes the GPU did not write): %.0f; not emulated: "
+                        "instruction %.0f, GPU-written bytes %.0f; write faults emulated %.0f, not %.0f\n",
+                        BbStats::fault_emulated.exchange(0) / window,
+                        BbStats::fault_emulate_declined.exchange(0) / window,
+                        BbStats::fault_emulate_gpu.exchange(0) / window,
+                        BbStats::store_emulated.exchange(0) / window,
+                        BbStats::store_emulate_declined.exchange(0) / window);
+            std::printf("Write faults not emulated: instruction %.0f, operands %.0f, address %.0f, source %.0f, "
+                        "page without GPU data %.0f, GPU-written bytes %.0f, download in flight %.0f, arena %.0f\n",
+                        BbStats::store_why[0].exchange(0) / window, BbStats::store_why[1].exchange(0) / window,
+                        BbStats::store_why[2].exchange(0) / window, BbStats::store_why[3].exchange(0) / window,
+                        BbStats::store_why[4].exchange(0) / window, BbStats::store_why[5].exchange(0) / window,
+                        BbStats::store_why[6].exchange(0) / window, BbStats::store_why[7].exchange(0) / window);
+            {
+                std::printf("Write faults not emulated by instruction:");
+                for (int pass = 0; pass < 8; ++pass) {
+                    int best = -1;
+                    std::uint64_t most = 0;
+                    for (int i = 0; i < 64; ++i) {
+                        const std::uint64_t n = BbStats::store_skip_count[i].load(std::memory_order_relaxed);
+                        if (n > most) {
+                            most = n;
+                            best = i;
+                        }
+                    }
+                    if (best < 0) {
+                        break;
+                    }
+                    std::printf(" %llx x%.0f/s", static_cast<unsigned long long>(BbStats::store_skip_rip[best].load()),
+                                most / window);
+                    BbStats::store_skip_count[best].store(0);
+                }
+                for (int i = 0; i < 64; ++i) {
+                    BbStats::store_skip_count[i].store(0);
+                    BbStats::store_skip_rip[i].store(0);
+                }
+                std::printf("\n");
+            }
             std::printf("Guest reads per second: offloaded %.0f, window split %.0f, unresolved %.0f, "
                         "locked caller %.0f, offload off %.0f; read directly from video memory %.0f, direct read "
                         "mismatches %.0f\n",

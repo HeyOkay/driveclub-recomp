@@ -156,11 +156,31 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     }
 }
 
+namespace {
+// bbport: the hash of guest memory read through the backing view: a page the GPU wrote is protected, and
+// hashing it through the guest view faulted (a download, or a deadlock when the caller holds this cache's lock
+// in a guest-thread fault handler).
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
+u64 HashGuestMemory(VAddr addr, u64 size) {
+    static thread_local XXH3_state_t* state = XXH3_createState(); // opaque in this xxhash build
+    XXH3_64bits_reset(state);
+    alignas(64) static thread_local u8 chunk[64 * 1024];
+    for (u64 done = 0; done < size;) {
+        const u64 n = std::min<u64>(sizeof(chunk), size - done);
+        if (!runtime_memory_read_backing(addr + done, chunk, n)) {
+            return XXH3_64bits(std::bit_cast<const u8*>(addr), size);
+        }
+        XXH3_64bits_update(state, chunk, n);
+        done += n;
+    }
+    return XXH3_64bits_digest(state);
+}
+} // namespace
+
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     if (image.hash == 0) {
         // Initialize hash
-        const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-        image.hash = XXH3_64bits(addr, image.info.guest_size);
+        image.hash = HashGuestMemory(image.info.guest_address, image.info.guest_size);
     }
     image.flags |= ImageFlagBits::MaybeCpuDirty;
     UntrackImage(image_id);

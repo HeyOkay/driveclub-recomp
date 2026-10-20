@@ -16,6 +16,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/buffer_cache/gpu_byte_map.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
 
 namespace AmdGpu {
@@ -77,6 +78,30 @@ public:
     StreamBuffer& GetStreamBuffer() noexcept {
         return stream_buffer;
     }
+
+    /// bbport: whether the GPU wrote (or a download is under way for) any byte of the range: a guest read of
+    /// other bytes on the same protected pages needs no download (BB_FAULT_EMULATE). Any thread, lock-free.
+    [[nodiscard]] bool IsRangeGpuWritten(VAddr addr, u64 size) const {
+        return gpu_byte_map.Any(addr, size);
+    }
+
+    /// bbport: BB_FAULT_EMULATE, any thread: a guest store to bytes no GPU write holds, on a page protected for
+    /// other bytes. Written to guest memory now; the arena copy is updated by the cache owner before it records
+    /// further work (ApplyQueuedStores). False when not eligible.
+    bool QueueUntrackedStore(VAddr addr, const void* data, u32 size);
+    /// The checks of QueueUntrackedStore without the store (any thread).
+    bool CanQueueUntrackedStore(VAddr addr, u32 size);
+    /// The cache owner (GPU command thread or draw recording thread): inline updates of the queued stores.
+    void ApplyQueuedStores();
+
+    /// bbport: see gpu_byte_map.h.
+    GpuByteMap gpu_byte_map;
+    struct QueuedStore {
+        VAddr lo, hi;
+    };
+    std::mutex queued_store_mutex;
+    std::vector<QueuedStore> queued_stores;
+    std::atomic<u32> num_queued_stores{0};
 
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {

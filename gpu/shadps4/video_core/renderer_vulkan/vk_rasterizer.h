@@ -136,6 +136,13 @@ public:
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// bbport: BB_FAULT_EMULATE: true unless every byte of the range is GPU mapped and not GPU written.
+    bool IsRangeGpuWritten(VAddr addr, u64 size);
+    /// bbport: BB_FAULT_EMULATE: queues a guest store that touches no GPU-written byte (BufferCache::
+    /// QueueUntrackedStore); false when the usual write fault path must run.
+    bool StoreUntracked(VAddr addr, const void* data, u32 size);
+    /// bbport: BB_FAULT_EMULATE: whether the page holds GPU data (lock-free, any thread).
+    bool IsPageGpuModified(VAddr addr);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);

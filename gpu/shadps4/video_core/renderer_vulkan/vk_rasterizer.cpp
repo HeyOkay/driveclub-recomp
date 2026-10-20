@@ -111,6 +111,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
+        buffer_cache.ApplyQueuedStores();
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
@@ -1106,6 +1107,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
 
 void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw* used_prepared,
                             bool is_indexed, u32 index_offset) {
+    buffer_cache.ApplyQueuedStores(); // bbport: guest stores emulated since the last recording
     if (DrawPipe::OnStageB()) {
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
@@ -1425,6 +1427,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
 
 void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_indexed,
                                     const IndirectDraw& indirect) {
+    buffer_cache.ApplyQueuedStores(); // bbport: guest stores emulated before this work
     if (DrawPipe::OnStageB()) {
         FrameCapture::Poll();
         scheduler.PopPendingOperations();
@@ -1532,6 +1535,7 @@ void Rasterizer::DispatchDirect() {
 }
 
 void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
+    buffer_cache.ApplyQueuedStores();
     fg_in_display = false;
     FrameCapture::Poll();
     gbuffer_draw = false;
@@ -1690,6 +1694,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
 
 void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr address,
                                         u32 size) {
+    buffer_cache.ApplyQueuedStores(); // bbport: guest stores emulated before this work
     scheduler.PopPendingOperations();
     const u32 offset = 0;
 
@@ -3404,7 +3409,8 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
 }
 
 void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds) {
-    DrainDrawPipe();
+    DrainDrawPipe(); // stage B must be idle before this thread records (the queued stores included)
+    buffer_cache.ApplyQueuedStores(); // bbport: guest stores emulated before this work
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
@@ -3425,7 +3431,8 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
-    DrainDrawPipe();
+    DrainDrawPipe(); // stage B must be idle before this thread records (the queued stores included)
+    buffer_cache.ApplyQueuedStores(); // bbport: guest stores emulated before this work
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&
             !texture_cache.FindImageFromRange(src, num_bytes)) {
@@ -3492,6 +3499,28 @@ bool Rasterizer::ReadMemory(VAddr addr, u64 size, bool assume_locks) {
     }
     buffer_cache.ReadMemory(addr, size, false, assume_locks);
     return true;
+}
+
+bool Rasterizer::IsRangeGpuWritten(VAddr addr, u64 size) {
+    if (!IsMapped(addr, size)) {
+        return true;
+    }
+    return buffer_cache.IsRangeGpuWritten(addr, size); // lock-free (gpu_byte_map.h)
+}
+
+bool Rasterizer::StoreUntracked(VAddr addr, const void* data, u32 size) {
+    if (!IsMapped(addr, size) || !buffer_cache.CanQueueUntrackedStore(addr, size)) {
+        return false;
+    }
+    // As for a write fault: images over the range learn of the write before it happens (their hash reads the
+    // backing view: the page is still protected).
+    texture_cache.InvalidateMemory(addr, size);
+    return buffer_cache.QueueUntrackedStore(addr, data, size);
+}
+
+bool Rasterizer::IsPageGpuModified(VAddr addr) {
+    const VAddr page = Common::AlignDown(addr, 4096);
+    return IsMapped(page, 4096) && buffer_cache.IsRegionGpuModified(page, 4096);
 }
 
 void Rasterizer::ProcessDownloadImages() {
