@@ -159,8 +159,9 @@ struct PhaseTimer {
 /// 3 present pacing, 4 Finish, 5 WaitSubmitted.
 inline std::atomic<std::uint64_t> wait_site_ns[8]{};
 /// Guest read paths into BufferCache::ReadMemory: 0 offloaded, 1 window split, 2 unresolved (sync fallback),
-/// 3 locked caller (sync), 4 offload disabled.
-inline std::atomic<std::uint64_t> readback_paths[8]{};
+/// 3 locked caller (sync), 4 offload disabled, 5 direct, 6 direct mismatch, 7 early copy used, 8 early copy made,
+/// 9 early copy verified, 10 early copy deferred (the draw writing the window was not recorded yet).
+inline std::atomic<std::uint64_t> readback_paths[11]{};
 /// WAIT_REG_MEM on memory (BB_FRAME_STATS): [0] graphics / [1] compute waits whose first test failed, and the
 /// ns they waited. By polled address (8 slots): reads through the guest view (the 32nd unmet poll), of those
 /// the ones that met the condition, their ns, and function << 32 | reference.

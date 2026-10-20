@@ -164,6 +164,13 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         }
         std::printf("GPU: buffer arena memory type %u, host visible (direct guest reads): %s\n", arena_memory_type_index,
                     arena_host_visible ? "yes" : "no");
+        // bbport: copies of hot readback windows at the end of the submission that wrote them (BB_READBACK_EARLY=0: off).
+        const char* early = std::getenv("BB_READBACK_EARLY");
+        early_readback = !(early && early[0] == '0') && !arena_host_visible;
+        std::printf("GPU: early readback copies at submission end: %s\n", early_readback ? "on" : "off");
+        // bbport: BB_EARLY_BINDING_GUARD=0: early copies may be taken by a submission made inside a binding.
+        const char* guard = std::getenv("BB_EARLY_BINDING_GUARD");
+        early_binding_guard = !(guard && guard[0] == '0');
         // What the driver offers, to see whether resizable BAR is on: a CPU visible type in the card's own memory
         // that is as large as the card's memory means it is.
         const auto& mem = instance.GetMemoryProperties();
@@ -359,6 +366,12 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         readback_cv.wait(lk, [&] { return !IsReadbackPending(device_addr, size); });
         MergeReadbackReturns();
     }
+    if (!early_readbacks.empty()) {
+        for (VAddr w = Common::AlignDown(device_addr, READBACK_WINDOW_SIZE); w < device_addr + size;
+             w += READBACK_WINDOW_SIZE) {
+            DropEarlyReadback(w);
+        }
+    }
     ApplyQueuedStores();
     DownloadCopies copies;
     const VAddr arena_base = arena->cpu_addr;
@@ -387,14 +400,30 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
 
 // The tick that completes the last GPU write into each readback window (hashed): a direct read waits for it.
 void BufferCache::StampGpuWrite(VAddr device_addr, u64 size) {
-    if (!arena_host_visible || size == 0) {
+    if ((!arena_host_visible && !early_readback) || size == 0) {
         return;
     }
     const u64 tick = scheduler.CurrentTick();
+    if (early_readback) {
+        for (u64 w = device_addr / READBACK_WINDOW_SIZE; w <= (device_addr + size - 1) / READBACK_WINDOW_SIZE; ++w) {
+            const VAddr window = w * READBACK_WINDOW_SIZE;
+            // Hot: read back lately.
+            if (hot_window[w & 4095] == window && tick - hot_tick[w & 4095] < 64) {
+                if (std::ranges::find(early_pending, window) == early_pending.end()) {
+                    early_pending.push_back(window);
+                }
+            }
+            if (early_binding_guard && std::ranges::find(unrecorded_windows, window) == unrecorded_windows.end()) {
+                unrecorded_windows.push_back(window);
+            }
+        }
+    }
     for (u64 w = device_addr / READBACK_WINDOW_SIZE; w <= (device_addr + size - 1) / READBACK_WINDOW_SIZE; ++w) {
         window_write_tick[w & 4095] = tick;
     }
-    scheduler.RequestHostReadBarrier();
+    if (arena_host_visible) {
+        scheduler.RequestHostReadBarrier();
+    }
 }
 
 struct DirectSpan {
@@ -415,6 +444,8 @@ struct BufferCache::Readback {
     bool direct{};
     bool verify{};
     std::vector<DirectSpan> spans;
+    /// BB_READBACK_EARLY_VERIFY: the usual copy, made too and compared with the early one.
+    Vulkan::StagingBufferRef early_verify{};
 };
 
 bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
@@ -472,6 +503,58 @@ void BufferCache::RecordReadback(Readback& job) {
     }
     job.arena_base = arena->cpu_addr;
     job.write_seq = memory_tracker->GpuWriteSeq(job.window, READBACK_WINDOW_SIZE);
+    if (early_readback) {
+        const u64 slot = (job.window / READBACK_WINDOW_SIZE) & 4095;
+        hot_window[slot] = job.window;
+        hot_tick[slot] = scheduler.CurrentTick();
+        // The copy made at the end of the submission that wrote the window holds what is downloaded now when no GPU
+        // write was marked in the window since and the ranges are the same.
+        const auto it = std::ranges::find(early_readbacks, job.window, &EarlyReadback::window);
+        if (it != early_readbacks.end()) {
+            bool same = it->write_seq == job.write_seq && it->arena_base == job.arena_base &&
+                        it->copies.size() == job.copies.size();
+            for (size_t i = 0; same && i < job.copies.size(); ++i) {
+                same = it->copies[i].srcOffset == job.copies[i].srcOffset && it->copies[i].size == job.copies[i].size;
+            }
+            if (same) {
+                // BB_READBACK_EARLY_VERIFY=N: every Nth use also makes the usual copy; FinishReadback compares.
+                static const int verify_every = [] {
+                    const char* env = std::getenv("BB_READBACK_EARLY_VERIFY");
+                    return env ? std::atoi(env) : 0;
+                }();
+                static u64 uses = 0;
+                if (verify_every > 0 && (++uses % u64(verify_every)) == 0) {
+                    job.early_verify =
+                        staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 0, true);
+                    DownloadCopies verify_copies = job.copies;
+                    for (auto& copy : verify_copies) {
+                        copy.dstOffset += job.early_verify.offset;
+                    }
+                    runtime.CopyBuffer(arena, job.early_verify.buffer, verify_copies);
+                }
+                const DownloadCopies packed = job.copies;
+                job.copies = it->copies;
+                job.staging = it->staging;
+                job.tick = it->tick;
+                early_readbacks.erase(it);
+                BbStats::readback_paths[7].fetch_add(1, std::memory_order_relaxed);
+                if (job.early_verify.buffer) {
+                    // Packed offsets of the verify copy, in the same order as job.copies.
+                    job.spans.clear();
+                    for (size_t i = 0; i < packed.size(); ++i) {
+                        job.spans.push_back({job.early_verify.mapped + packed[i].dstOffset, 0, packed[i].size});
+                    }
+                    job.tick = scheduler.CurrentTick();
+                    scheduler.Flush();
+                }
+                std::scoped_lock lk{readback_mutex};
+                pending_readbacks.push_back(job.window);
+                return;
+            }
+            staging_pool.FreeDeferred(it->staging);
+            early_readbacks.erase(it);
+        }
+    }
 
     // Direct path: the data is already in memory the CPU can read once the GPU has finished writing it, so no copy
     // is recorded. Small requests only (reads of video memory through the mapping are slow), and only when every
@@ -536,6 +619,26 @@ void BufferCache::FinishReadback(const Readback& job) {
     bool use_direct = job.direct;
     if (job.staging.buffer) {
         job.staging.buffer->Invalidate(job.staging.offset, job.staging.size);
+    }
+    if (job.early_verify.buffer) {
+        job.early_verify.buffer->Invalidate(job.early_verify.offset, job.early_verify.size);
+        const bool rewritten = memory_tracker->GpuWriteSeq(job.window, READBACK_WINDOW_SIZE) != job.write_seq;
+        u64 differing = 0;
+        for (size_t i = 0; i < job.copies.size() && i < job.spans.size(); ++i) {
+            const u8* early = job.staging.mapped + (job.copies[i].dstOffset - job.staging.offset);
+            if (std::memcmp(early, job.spans[i].src, job.copies[i].size) != 0) {
+                ++differing;
+                // The usual copy is the reference.
+                std::memcpy(const_cast<u8*>(early), job.spans[i].src, job.copies[i].size);
+            }
+        }
+        BbStats::readback_paths[9].fetch_add(1, std::memory_order_relaxed);
+        if (differing && !rewritten) {
+            std::printf("GPU: early readback copy of window %llx differs from the usual copy in %llu of %zu ranges\n",
+                        static_cast<unsigned long long>(job.window), static_cast<unsigned long long>(differing),
+                        job.copies.size());
+        }
+        liverpool->SendCommand([this, staging = job.early_verify] { staging_pool.FreeDeferred(staging); });
     }
     if (use_direct && job.verify) {
         // Both copies hold the same GPU writes unless the GPU wrote the window again in between (then the window is
@@ -604,6 +707,73 @@ void BufferCache::FinishReadback(const Readback& job) {
     if (job.staging.buffer) {
         liverpool->SendCommand([this, staging = job.staging] { staging_pool.FreeDeferred(staging); });
     }
+}
+
+void BufferCache::DropEarlyReadback(VAddr window) {
+    const auto it = std::ranges::find(early_readbacks, window, &EarlyReadback::window);
+    if (it != early_readbacks.end()) {
+        staging_pool.FreeDeferred(it->staging);
+        early_readbacks.erase(it);
+    }
+}
+
+void BufferCache::RecordEarlyReadbacks() {
+    if (!early_readback || (early_pending.empty() && early_readbacks.empty())) {
+        return;
+    }
+    // The buffer cache belongs to the GPU command thread, or to the draw recording thread while draw packets are
+    // in flight (two-stage pipe); submissions from elsewhere leave the windows pending.
+    if (std::this_thread::get_id() != liverpool->GetGpuCommandProcessorThread() &&
+        !Vulkan::DrawPipe::OnStageB()) {
+        return;
+    }
+    // Called from inside the submission: its tick was taken already.
+    const u64 tick = scheduler.CurrentTick() - 1;
+    // Copies nobody read for a while.
+    std::erase_if(early_readbacks, [&](const EarlyReadback& e) {
+        if (tick - e.tick < 128) {
+            return false;
+        }
+        staging_pool.FreeDeferred(e.staging);
+        return true;
+    });
+    std::vector<VAddr> keep_pending;
+    for (const VAddr window : early_pending) {
+        if (std::ranges::find(unrecorded_windows, window) != unrecorded_windows.end()) {
+            keep_pending.push_back(window); // the draw that writes it is not recorded yet: copy at a later submission
+            BbStats::readback_paths[10].fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        DropEarlyReadback(window);
+        const u64 block = window >> block_shift;
+        const auto* arena = GetArena(block, block);
+        EarlyReadback early{.window = window, .arena_base = arena->cpu_addr};
+        u64 total_size_bytes = 0;
+        memory_tracker->ForEachDownloadRange<false>(window, READBACK_WINDOW_SIZE, [&](u64 address, u64 size) {
+            gpu_modified_ranges.ForEachInRange(address, size, [&](VAddr start, VAddr end) {
+                early.copies.push_back(vk::BufferCopy{
+                    .srcOffset = start - early.arena_base,
+                    .dstOffset = total_size_bytes,
+                    .size = end - start,
+                });
+                total_size_bytes += (end - start + 63) & ~u64{63};
+            });
+        });
+        if (total_size_bytes == 0) {
+            continue;
+        }
+        early.staging = staging_pool.Request(total_size_bytes, VideoCore::MemoryType::HostCached, 0, true);
+        for (auto& copy : early.copies) {
+            copy.dstOffset += early.staging.offset;
+        }
+        runtime.CopyBuffer(arena, early.staging.buffer, early.copies);
+        early.write_seq = memory_tracker->GpuWriteSeq(window, READBACK_WINDOW_SIZE);
+        early.tick = tick;
+        early_readbacks.push_back(std::move(early));
+        BbStats::readback_paths[8].fetch_add(1, std::memory_order_relaxed);
+        scheduler.RequestHostReadBarrier();
+    }
+    early_pending = std::move(keep_pending);
 }
 
 bool BufferCache::IsReadbackPending(VAddr addr, u64 size) const {

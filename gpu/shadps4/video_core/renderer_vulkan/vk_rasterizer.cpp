@@ -112,6 +112,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     runtime.SetImageAccessHook(&JoinBindHelper, this);
     scheduler.SetSubmitCallback([this](Vulkan::SubmitInfo& info) {
         buffer_cache.ApplyQueuedStores();
+        buffer_cache.RecordEarlyReadbacks();
         runtime.FlushBarriers();
         buffer_cache.SubmitPendingArenaBinds(info);
     });
@@ -2204,6 +2205,7 @@ void Rasterizer::ResolveIndexBuffer(u32 index_offset) {
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
+    buffer_cache.NoteBindingsRecorded();
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
@@ -3428,6 +3430,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         return buffer_cache.ObtainBuffer(address, num_bytes, true);
     }();
     runtime.FillBuffer(buffer, offset, num_bytes, value);
+    buffer_cache.NoteBindingsRecorded(); // the fill that wrote the stamped window is recorded
 }
 
 void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, bool src_gds) {
@@ -3461,6 +3464,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         .size = num_bytes,
     };
     runtime.CopyBuffer(src_buffer, dst_buffer, std::span{&copy, 1});
+    buffer_cache.NoteBindingsRecorded(); // the copy that wrote the stamped window is recorded
 }
 
 u32 Rasterizer::ReadDataFromGds(u32 gds_offset) {

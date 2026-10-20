@@ -522,14 +522,18 @@ void VideoOutDriver::Flip(const Request& req) {
             }
             std::printf("Guest reads per second: offloaded %.0f, window split %.0f, unresolved %.0f, "
                         "locked caller %.0f, offload off %.0f; read directly from video memory %.0f, direct read "
-                        "mismatches %.0f\n",
+                        "mismatches %.0f; early copies made %.0f, used %.0f (verified %.0f, deferred mid-binding %.0f)\n",
                         BbStats::readback_paths[0].exchange(0) / window,
                         BbStats::readback_paths[1].exchange(0) / window,
                         BbStats::readback_paths[2].exchange(0) / window,
                         BbStats::readback_paths[3].exchange(0) / window,
                         BbStats::readback_paths[4].exchange(0) / window,
                         BbStats::readback_paths[5].exchange(0) / window,
-                        BbStats::readback_paths[6].exchange(0) / window);
+                        BbStats::readback_paths[6].exchange(0) / window,
+                        BbStats::readback_paths[8].exchange(0) / window,
+                        BbStats::readback_paths[7].exchange(0) / window,
+                        BbStats::readback_paths[9].exchange(0) / window,
+                        BbStats::readback_paths[10].exchange(0) / window);
             std::printf("Small scene (%llu color targets) draws per frame: %.0f seen (%.0f depth-only, never skipped), "
                         "%.0f skipped (of %.0f draws)\n",
                         static_cast<unsigned long long>(BbStats::mirror_targets.load()),
