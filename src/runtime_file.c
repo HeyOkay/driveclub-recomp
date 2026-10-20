@@ -457,6 +457,39 @@ static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {
     pthread_mutex_unlock(&lock);
     return result;
 }
+/* sceKernelGetdents (three arguments, no basep) writes the kernel's struct dirent: a 24-byte
+   header with d_ino, d_off, d_reclen, d_type and d_namlen, then the name. This is the only
+   directory listing call the game makes; sceKernelGetdirentries above is never called by it. */
+static int64_t do_getdents_orbis(int fd,char *buffer,uint64_t size) {
+    pthread_mutex_lock(&lock);
+    File *f=get(fd);
+    int64_t result=0;
+    if (!f) result=-EBADF;
+    else if (!f->dir) result=-EINVAL;
+    else if (!buffer) result=-EFAULT;
+    else if (size<512) result=-EINVAL;
+    else {
+        uint64_t written=0;
+        while (f->position<f->dir->count) {
+            const char *name=f->dir->names+f->dir->offsets[f->position];
+            size_t n=strlen(name); if (n>255) n=255;
+            uint16_t reclen=(uint16_t)((24+n+1+7)&~(size_t)7);
+            if (written+reclen>size) break;
+            char *p=buffer+written;
+            memset(p,0,reclen);
+            uint64_t ino=(uint64_t)f->position+1, off=ino+1;
+            memcpy(p,&ino,8); memcpy(p+8,&off,8);
+            memcpy(p+16,&reclen,2);
+            p[18]=(char)f->dir->types[f->position];
+            memcpy(p+20,&n,2);
+            memcpy(p+24,name,n);
+            written+=reclen; ++f->position;
+        }
+        result=(int64_t)written;
+    }
+    pthread_mutex_unlock(&lock);
+    return result;
+}
 static int64_t path_op(const char *guest,int op,int mode) {
     if (game_path(guest)) return -EROFS;
     char path[1024];
@@ -535,6 +568,7 @@ PAIR(ftruncate,(int fd,int64_t l),(fd,l))
 PAIR(truncate,(const char *p,int64_t l),(p,l))
 PAIR(fsync,(int fd),(fd))
 static ABI int64_t posix_access(const char *p,int m) { return posix(do_access(p,m)); }
+static ABI int64_t sce_getdents_orbis(int fd,char *b,uint64_t n) { return sce(do_getdents_orbis(fd,b,n)); }
 static ABI int64_t sce_mkdir(const char *p,int m) { return sce(path_op(p,0,m)); }
 static ABI int64_t posix_mkdir(const char *p,int m) { return posix(path_op(p,0,m)); }
 static ABI int64_t sce_rmdir(const char *p) { return sce(path_op(p,1,0)); }
@@ -556,6 +590,7 @@ static const RuntimeExport exports[]={
     {"sceKernelFstat",sce_fstat}, {"fstat",posix_fstat},
     {"sceKernelStat",sce_stat}, {"stat",posix_stat},
     {"sceKernelGetdirentries",sce_getdents}, {"getdirentries",posix_getdents},
+    {"sceKernelGetdents",sce_getdents_orbis},
     {"sceKernelRename",sce_rename}, {"rename",posix_rename},
     {"sceKernelFtruncate",sce_ftruncate}, {"ftruncate",posix_ftruncate},
     {"sceKernelTruncate",sce_truncate}, {"truncate",posix_truncate},
