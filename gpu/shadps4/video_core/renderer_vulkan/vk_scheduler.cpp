@@ -60,6 +60,7 @@ Scheduler::~Scheduler() {
 }
 
 void Scheduler::BeginRendering(const RenderState& new_state) {
+    BB_PIPE_CHECK_OBJ("Scheduler::BeginRendering", static_cast<const void*>(this));
     if (is_rendering && render_state == new_state) {
         return;
     }
@@ -133,6 +134,7 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
 }
 
 void Scheduler::EndRendering() {
+    BB_PIPE_CHECK_OBJ("Scheduler::EndRendering", static_cast<const void*>(this));
     if (!is_rendering) {
         return;
     }
@@ -325,6 +327,7 @@ void Scheduler::RecorderThread(std::stop_token stoken) {
 }
 
 void Scheduler::Flush(SubmitInfo& info) {
+    BB_PIPE_CHECK_OBJ("Scheduler::Flush", static_cast<const void*>(this));
     // When flushing, we only send data to the driver; no waiting is necessary.
     SubmitExecution(info);
 }

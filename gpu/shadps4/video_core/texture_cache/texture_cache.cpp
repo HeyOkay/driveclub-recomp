@@ -734,6 +734,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info_ref, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+    BB_PIPE_CHECK("TextureCache::FindImage");
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 

@@ -749,6 +749,7 @@ public:
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>
     void Record(Func&& func) {
+        BB_PIPE_CHECK_OBJ("Scheduler::Record", static_cast<const void*>(this));
         if (!recording_threaded || direct_mode) {
             func(current_cmdbuf);
             return;

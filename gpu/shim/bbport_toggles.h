@@ -88,6 +88,35 @@ inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// BB_PIPE_CHECK=1 (two-stage draw pipe debugging). While draw packets are in flight, stage B owns the draw
+/// scheduler and the caches: a call from any other thread is reported (bbport_sampler.cpp). `object` restricts the
+/// scheduler checks to the draw scheduler (the presenter has its own).
+inline std::atomic<std::uint32_t> pipe_owner{0};
+inline std::atomic<std::uint32_t> pipe_stage_b{0};
+inline std::atomic<const void*> pipe_scheduler{nullptr};
+inline bool (*pipe_in_flight)() = nullptr;
+/// Read once at startup: the checks on per-draw paths are a load of a constant when off.
+inline const bool pipe_check = [] {
+    const char* env = std::getenv("BB_PIPE_CHECK");
+    return env && env[0] == '1';
+}();
+inline bool PipeCheckEnabled() {
+    return pipe_check;
+}
+void PipeCheckViolation(const char* what);
+#define BB_PIPE_CHECK_OBJ(what, object)                                                             \
+    do {                                                                                           \
+        if (BbStats::PipeCheckEnabled() && BbStats::pipe_in_flight &&                              \
+            (!(object) || (object) == BbStats::pipe_scheduler.load(std::memory_order_relaxed))) {  \
+            const std::uint32_t tid_ = static_cast<std::uint32_t>(gettid());                       \
+            if (tid_ != BbStats::pipe_stage_b.load(std::memory_order_relaxed) &&                   \
+                (BbStats::pipe_owner.load(std::memory_order_acquire) != 0 ||                       \
+                 BbStats::pipe_in_flight())) {                                                     \
+                BbStats::PipeCheckViolation(what);                                                 \
+            }                                                                                      \
+        }                                                                                          \
+    } while (0)
+#define BB_PIPE_CHECK(what) BB_PIPE_CHECK_OBJ(what, static_cast<const void*>(nullptr))
 /// BB_FAULT_EMULATE=1: guest read faults on bytes the GPU did not write, served by emulating the load
 /// (page_manager.cpp); declined (instruction not handled) and GPU-written bytes take the usual download.
 inline std::atomic<std::uint64_t> fault_emulated{0}, fault_emulate_declined{0}, fault_emulate_gpu{0};

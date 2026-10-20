@@ -13,6 +13,8 @@
 
 #include <cstdlib>
 #include "bbport_threads.h"
+#include "bbport_copy.h"
+#include "bbport_toggles.h"
 
 #include <array>
 #include <atomic>
@@ -110,11 +112,22 @@ public:
         const u32 slot = reason < NumReasons ? reason : ReasonRasterizer;
         ++drains_by_reason[slot];
         const u64 start = __rdtsc();
+        const auto wall = std::chrono::steady_clock::now();
+        bool reported = false;
         for (u32 spins = 0; consumed.load(std::memory_order_acquire) != head; ++spins) {
             if (spins < 4096) {
                 __builtin_ia32_pause();
             } else {
                 std::this_thread::yield();
+                // bbport: a recording thread stuck for 2 s (a GPU hang inside it) is reported once, with the
+                // reason of this drain, so a freeze leaves a trace in the log.
+                if (!reported && !(spins & 1023) && std::chrono::steady_clock::now() - wall > std::chrono::seconds(2)) {
+                    reported = true;
+                    std::printf("Draw pipe: the recording thread has not finished its packets for 2 s (drain reason "
+                                "%u, %llu ring bytes queued)\n",
+                                reason, static_cast<unsigned long long>(head - consumed.load()));
+                    std::fflush(stdout);
+                }
             }
         }
         const u64 waited = __rdtsc() - start;
@@ -128,6 +141,24 @@ public:
     }
     [[nodiscard]] bool Reached(u64 position) const noexcept {
         return consumed.load(std::memory_order_acquire) >= position;
+    }
+
+    /// Stage A: waits until stage B has run everything before `position` (it keeps going after it).
+    void WaitFor(u64 position) {
+        if (Reached(position)) {
+            return;
+        }
+        for (u32 spins = 1; !Reached(position); ++spins) {
+            __builtin_ia32_pause();
+            if (!(spins & 1023)) {
+                std::this_thread::yield();
+            }
+        }
+    }
+
+    /// Packets published that stage B has not finished (any thread; BB_PIPE_CHECK).
+    [[nodiscard]] bool InFlight() const noexcept {
+        return consumed.load(std::memory_order_acquire) != published.load(std::memory_order_acquire);
     }
 
     [[nodiscard]] bool Idle() const noexcept {
@@ -160,6 +191,7 @@ private:
         Common::SetCurrentThreadName("bb:DrawRec");
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
+        BbStats::pipe_stage_b.store(static_cast<u32>(gettid()), std::memory_order_relaxed);
         u64 at = 0;
         while (true) {
             // Packets follow each other within microseconds while a frame is decoded: spin,
@@ -199,9 +231,23 @@ private:
                 continue;
             }
             const u64 start = __rdtsc();
+            const bool check = BbStats::PipeCheckEnabled();
+            if (check) {
+                BbStats::pipe_owner.store(static_cast<u32>(gettid()), std::memory_order_release);
+            }
             handler(context, reinterpret_cast<const u8*>(header + 1), header->payload);
+            if (check) {
+                BbStats::pipe_owner.store(0, std::memory_order_release);
+            }
             busy_cycles.fetch_add(__rdtsc() - start, std::memory_order_relaxed);
             at += header->size;
+            // bbport: guest copies this thread queued (BbCopy batches are per thread) must reach the copy pool
+            // before stage A can see the ring empty: A drains, then submits or signals the guest, and waits only
+            // for its own batch and the pool. Unpublished, the GPU read staging memory not yet written (missing
+            // geometry and noise textures in DriveClub). Published when the ring runs dry, batched otherwise.
+            if (published.load(std::memory_order_acquire) == at) {
+                BbCopy::FlushBatch();
+            }
             consumed.store(at, std::memory_order_release);
         }
     }

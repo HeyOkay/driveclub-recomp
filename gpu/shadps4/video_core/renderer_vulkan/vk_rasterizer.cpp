@@ -108,6 +108,12 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     if (DrawPipeWanted()) {
         constant_ring = std::make_unique<ConstantRing>(instance, scheduler);
         draw_pipe = std::make_unique<DrawPipe>(&RunDrawPacket, this);
+        if (BbStats::PipeCheckEnabled()) {
+            static DrawPipe* checked_pipe = nullptr;
+            checked_pipe = draw_pipe.get();
+            BbStats::pipe_scheduler.store(&scheduler);
+            BbStats::pipe_in_flight = [] { return checked_pipe && checked_pipe->InFlight(); };
+        }
     }
     // bbport: this thread joins the texture binding helper before it changes image state.
     runtime.SetImageAccessHook(&JoinBindHelper, this);
@@ -498,7 +504,10 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
         return;
     }
     // Draws write the same buffers over and over: an entry for the range only moves on.
-    const u64 position = draw_pipe->Head();
+    // bbport: noted while the writing packet is built (before Begin/Commit): Head() is still the end of the
+    // previous packet, already reached after any drain, so the next draw could copy the stale CPU bytes into
+    // the constant ring. Unreachable until the packet is committed (ResolvePendingWrites).
+    const u64 position = UnresolvedWrite;
     const VAddr end = address + size;
     for (auto& write : pending_writes) {
         if (address <= write.end && write.begin <= end) {
@@ -513,6 +522,14 @@ void Rasterizer::NotePendingGpuWrite(VAddr address, u64 size) {
     pending_writes.push_back({address, end, position});
     pending_min = std::min(pending_min, address);
     pending_max = std::max(pending_max, end);
+}
+
+void Rasterizer::ResolvePendingWrites() {
+    for (auto& write : pending_writes) {
+        if (write.position == UnresolvedWrite) {
+            write.position = draw_pipe->Head();
+        }
+    }
 }
 
 bool Rasterizer::PendingWriteOverlaps(VAddr address, u64 size) {
@@ -632,6 +649,25 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     thread_local std::array<boost::container::static_vector<RingBinding, Shader::NUM_BUFFERS>,
                             Shader::MaxStageTypes>
         rings;
+    // bbport: every range a stage of this draw writes is noted before any read-only binding is copied into the
+    // ring: a read copied first would no longer alias a write declared by a later binding or stage.
+    if (constant_ring && !BbToggle::Disabled(BbToggle::ConstantRing)) {
+        for (const auto* stage : stages) {
+            if (!stage) {
+                continue;
+            }
+            for (const auto& desc : stage->buffers) {
+                if (desc.IsSpecial() || !desc.is_written) {
+                    continue;
+                }
+                const auto vsharp = desc.GetSharp(*stage);
+                if (vsharp.base_address != 0 && vsharp.GetSize() != 0) {
+                    NotePendingGpuWrite(vsharp.base_address,
+                                        memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
+                }
+            }
+        }
+    }
     u32 num_stages = 0;
     u32 size = sizeof(DrawPacket) + AlignPacket(num_blocks * sizeof(u16)) +
                num_blocks * AmdGpu::RegDirty::BlockWords * sizeof(u32);
@@ -723,7 +759,10 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
         out += sizeof(AmdGpu::Regs);
     }
     dirty.Clear();
+    // bbport: copies stage A queued for work recorded before this hand-off: stage B may submit it.
+    BbCopy::FlushBatch();
     draw_pipe->Commit(static_cast<u32>(out - start));
+    ResolvePendingWrites();
     PrintPipeStats();
 }
 
@@ -749,8 +788,21 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     u8* out = draw_pipe->Begin(total);
     *reinterpret_cast<TaskPacket*>(out) = {PacketKind::Task, size, task};
     std::memcpy(out + sizeof(TaskPacket), data, size);
+    BbCopy::FlushBatch();
     draw_pipe->Commit(total);
+    ResolvePendingWrites();
+    if (toggle == BbToggle::PipelinedMemoryWrites) {
+        last_memory_task = draw_pipe->Head();
+    }
     return true;
+}
+
+void Rasterizer::WaitQueuedMemoryWrites() {
+    // bbport: the selection reads guest memory (SRT walk, fetch V#s, sharps) a queued
+    // WriteData or DmaData may still change; only that packet has to have run, not the whole ring.
+    if (draw_pipe && last_memory_task && OnStageA()) {
+        draw_pipe->WaitFor(last_memory_task);
+    }
 }
 
 void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
@@ -1085,6 +1137,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
             return;
         }
     }
+    WaitQueuedMemoryWrites();
     const GraphicsPipeline* pipeline;
     const PreparedDraw* used_prepared;
     {
@@ -1376,7 +1429,9 @@ void Rasterizer::FlushLongBatch() {
         const long v = env ? std::atol(env) : 96;
         return v <= 0 ? 0u : u32(std::max<long>(v, 64));
     }();
-    if (!interval || DrawPipe::OnStageB()) {
+    // bbport: on stage B too: while packets are in flight it owns the scheduler (two-stage pipe). Skipped there
+    // before, the pipe lost the 96-draw batching and the guest waited twice as long for readbacks.
+    if (!interval) {
         return;
     }
     const u64 tick = scheduler.CurrentTick();
@@ -1409,6 +1464,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
             return;
         }
     }
+    WaitQueuedMemoryWrites();
 
     const DrawIndirectParams params = {
         .vertex_sgpr_offset = vertex_sgpr_offset,
@@ -1525,6 +1581,7 @@ void Rasterizer::DispatchDirect() {
     if (!pipelined) {
         DrainDrawPipe();
     }
+    WaitQueuedMemoryWrites();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
@@ -1682,6 +1739,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     if (!pipelined) {
         DrainDrawPipe();
     }
+    WaitQueuedMemoryWrites();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
     if (!pipeline) {
         return;
@@ -2381,11 +2439,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         if (ring) {
             // Copied by the GPU command thread into the constant ring (read-only).
             if (!desc.IsSpecial()) {
-                if (ring->size == 864 && gbuffer_draw &&
-                    memory->IsValidGpuMapping(ring->address, 0)) {
-                    camera_motion->OnConstants(reinterpret_cast<const float*>(ring->address));
+                // The copy the draw binds, made at decode: the guest memory may hold a later draw's values.
+                const u8* ring_data = constant_ring->Data(ring->offset);
+                if (ring->size == 864 && gbuffer_draw) {
+                    camera_motion->OnConstants(reinterpret_cast<const float*>(ring_data));
                 }
-                if (memory->IsValidGpuMapping(ring->address, 0)) NoteTaaBuffer(stage.pgm_hash, buffer_index, reinterpret_cast<const void*>(ring->address), ring->size);
+                NoteTaaBuffer(stage.pgm_hash, buffer_index, ring_data, ring->size);
                 push_data.AddOffset(binding.buffer, 0);
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
