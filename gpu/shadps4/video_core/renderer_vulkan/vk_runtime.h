@@ -76,7 +76,9 @@ public:
                              const VideoCore::Buffer* buffer, u64 offset);
     void CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32 slice);
 
-    void CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
+    /// Moves the pixels of an image that the guest reinterpreted between its depth and colour forms.
+    /// False when the two forms cannot be copied between (multisampled): the caller chooses the fallback.
+    bool CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
 
     void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                           const VideoCore::SubresourceRange& sub_range);

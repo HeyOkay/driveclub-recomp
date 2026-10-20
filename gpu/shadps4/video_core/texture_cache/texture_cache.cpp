@@ -336,10 +336,11 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
             auto& new_image = slot_images[new_image_id];
             auto& old_image = slot_images[cache_image_id];
             new_image.usage = old_image.usage;
-            new_image.flags &= ~ImageFlagBits::Dirty;
-            // When creating a depth buffer through overlap resolution don't clear it on first use.
-            new_image.info.meta_info.htile_clear_mask = 0;
-            runtime.CopyColorAndDepth(&old_image, &new_image);
+            if (runtime.CopyColorAndDepth(&old_image, &new_image)) {
+                // When creating a depth buffer through overlap resolution don't clear it on first use.
+                new_image.flags &= ~ImageFlagBits::Dirty;
+                new_image.info.meta_info.htile_clear_mask = 0;
+            }
 
             // Free the cache image.
             FreeImage(cache_image_id);
@@ -1347,7 +1348,8 @@ void TextureCache::GarbageCollectImages() {
         const auto now = std::chrono::steady_clock::now();
         if (now - gc_report_time >= std::chrono::seconds(5)) {
             std::printf("Texture cache: memory pressure, %llu of %llu MiB (critical %llu): "
-                        "%llu images evicted, %llu written back since the last report\n",
+                        "%llu images evicted, %llu written back, %llu could not be freed since "
+                        "the last report\n",
                         (unsigned long long)(total_used_memory >> 20),
                         (unsigned long long)(pressure_gc_memory >> 20),
                         (unsigned long long)(critical_gc_memory >> 20),
