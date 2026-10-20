@@ -1285,7 +1285,16 @@ void TextureCache::GarbageCollectImages() {
             const char* env = std::getenv("BB_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
+        // bbport: on discrete GPUs too (BB_GC_DRIVER_BUDGET=0 reverts to the startup rule). With the startup
+        // rule an 8 GB card got a 2.5 GB pressure mark, compared with all device memory in use (buffers,
+        // swapchain, ...: ~3.6 GB in a race), so every submission evicted textures that were then created and
+        // uploaded again (~67 evictions per 5 s). Measured, 3 pairs: day 1% low 39.3 -> 43.9, 0.1% 32.8 ->
+        // 38.3, night 1% 46.9 -> 50.0 FPS (BB_GC_BUDGET_MB=7000 vs default).
+        static const bool driver_budget = [] {
+            const char* env = std::getenv("BB_GC_DRIVER_BUDGET");
+            return !(env && env[0] == '0');
+        }();
+        if (instance.IsIntegrated() || driver_budget || forced_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;
