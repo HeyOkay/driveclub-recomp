@@ -102,6 +102,11 @@ private:
         s64 flip_arg;
         s32 index;
         bool eop;
+        // bbport: BB_FRAME_TRACE timestamps (ns, steady clock) taken when the request was queued.
+        s64 queued_ns;
+        s64 guest_flip_ns;
+        u64 prep_ns;
+        u64 ahead_ns;
 
         operator bool() const noexcept {
             return frame != nullptr;

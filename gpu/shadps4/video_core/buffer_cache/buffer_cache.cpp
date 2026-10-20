@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <chrono>
+#include <cstdio>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <array>
@@ -15,6 +17,7 @@
 #include <magic_enum/magic_enum.hpp>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
 extern "C" int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 #include "common/alignment.h"
@@ -273,6 +276,12 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
 
 static constexpr u64 READBACK_WINDOW_SIZE = 512_KB;
 
+namespace {
+FILE* ReadbackLog();
+std::mutex g_readback_log_mutex;
+unsigned long LogThreadId();
+} // namespace
+
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool assume_locks) {
     // The faulting thread waits for the download instead of the GPU command thread: that thread
     // keeps recording the frame while the copy runs.
@@ -330,6 +339,16 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     };
     if (assume_locks) {
         flush_request();
+    } else if (FILE* log = ReadbackLog()) {
+        // bbport: BB_READBACK_LOG: the synchronous download (the GPU command thread waits for the GPU).
+        const s64 t_start = BbTrace::NowNs();
+        liverpool->SendCommand<true>(std::move(flush_request));
+        const s64 t_done = BbTrace::NowNs();
+        std::scoped_lock lk{g_readback_log_mutex};
+        std::fprintf(log, "%.3f %u %lu %llx %llx s %d 0 0 %.0f %llu 0 0 0 0 0 -1 0\n", t_start / 1e6,
+                     BbTrace::frame_gen.load(std::memory_order_relaxed), LogThreadId(),
+                     (unsigned long long)BbTrace::fault_rip, (unsigned long long)device_addr, int(is_write),
+                     (t_done - t_start) / 1e3, (unsigned long long)size);
     } else {
         liverpool->SendCommand<true>(std::move(flush_request));
     }
@@ -384,7 +403,7 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
         copy.dstOffset += download.offset;
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
-    scheduler.Finish();
+    scheduler.Finish(1); // "buffer watch" bucket of BB_FRAME_STATS tick waits: synchronous guest downloads
 
     download.buffer->Invalidate(download.offset, download.size);
     for (const auto& copy : copies) {
@@ -398,9 +417,32 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
 }
 
+namespace {
+// bbport: BB_READBACK_LOG=<file>: one line per guest read that downloads GPU-written data (see the header line).
+FILE* ReadbackLog() {
+    static FILE* file = [] {
+        const char* path = std::getenv("BB_READBACK_LOG");
+        FILE* f = path && path[0] ? std::fopen(path, "w") : nullptr;
+        if (f) {
+            std::setvbuf(f, nullptr, _IOFBF, 1 << 16);
+            std::fprintf(f, "# t_ms frame tid rip addr path write pickup_us data_us copy_us bytes ncopies stamped_tick "
+                            "open_tick gpu_tick writer writer_age_us writes fault_range_lo fault_range_hi page_gpu_bytes nearest_gpu_byte\n");
+        }
+        return f;
+    }();
+    return file;
+}
+unsigned long LogThreadId() {
+    static thread_local const unsigned long tid =
+        static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xffffff);
+    return tid;
+}
+} // namespace
+
 // The tick that completes the last GPU write into each readback window (hashed): a direct read waits for it.
 void BufferCache::StampGpuWrite(VAddr device_addr, u64 size) {
-    if ((!arena_host_visible && !early_readback) || size == 0) {
+    static const bool log = ReadbackLog() != nullptr;
+    if ((!arena_host_visible && !log && !early_readback) || size == 0) {
         return;
     }
     const u64 tick = scheduler.CurrentTick();
@@ -418,8 +460,15 @@ void BufferCache::StampGpuWrite(VAddr device_addr, u64 size) {
             }
         }
     }
+    const u64 tag = log ? BbTrace::writer_tag.load(std::memory_order_relaxed) : 0;
+    const s64 now = log ? BbTrace::NowNs() : 0;
     for (u64 w = device_addr / READBACK_WINDOW_SIZE; w <= (device_addr + size - 1) / READBACK_WINDOW_SIZE; ++w) {
         window_write_tick[w & 4095] = tick;
+        if (log) {
+            window_writer[w & 4095] = tag;
+            window_write_ns[w & 4095] = now;
+            ++window_writes[w & 4095];
+        }
     }
     if (arena_host_visible) {
         scheduler.RequestHostReadBarrier();
@@ -434,6 +483,9 @@ struct DirectSpan {
 
 struct BufferCache::Readback {
     VAddr window{};
+    /// BB_READBACK_LOG: the faulting address; the downloaded GPU-modified range holding it (0, 0: none).
+    VAddr fault{}, fault_lo{}, fault_hi{};
+    u64 page_gpu_bytes{}, nearest{~0ull};
     DownloadCopies copies{};
     Vulkan::StagingBufferRef staging{};
     VAddr arena_base{};
@@ -444,6 +496,10 @@ struct BufferCache::Readback {
     bool direct{};
     bool verify{};
     std::vector<DirectSpan> spans;
+    /// BB_READBACK_LOG: ticks when recorded (the window's last GPU write, the open one, the GPU's), its writer.
+    u64 log_stamped{}, log_current{}, log_gpu{}, log_bytes{}, log_writer{};
+    s64 log_write_ns{};
+    u32 log_writes{};
     /// BB_READBACK_EARLY_VERIFY: the usual copy, made too and compared with the early one.
     Vulkan::StagingBufferRef early_verify{};
 };
@@ -457,16 +513,52 @@ bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
     // A request still GPU modified after two rounds of its own takes the synchronous download,
     // which copies and unmarks in one GPU thread command.
     u32 attempts = 0;
+    FILE* const log = ReadbackLog();
+    const bool timed = log || BbTrace::enabled;
     while (attempts < 2) {
-        Readback job{.window = window};
+        Readback job{.window = window, .fault = device_addr};
+        // bbport: where a read fault's time goes (BB_FRAME_STATS 'Readback waits', BB_READBACK_LOG).
+        const s64 t_start = timed ? BbTrace::NowNs() : 0;
         liverpool->SendCommand<true>([this, &job] { RecordReadback(job); });
+        const s64 t_recorded = timed ? BbTrace::NowNs() : 0;
+        if (timed) {
+            BbTrace::rb_pickup_ns.fetch_add(u64(t_recorded - t_start), std::memory_order_relaxed);
+        }
         if (job.busy) {
             std::unique_lock lk{readback_mutex};
             readback_cv.wait(lk, [&] { return !IsReadbackPending(window, READBACK_WINDOW_SIZE); });
+            if (timed) {
+                BbTrace::rb_pending_ns.fetch_add(u64(BbTrace::NowNs() - t_recorded), std::memory_order_relaxed);
+            }
         } else {
             ++attempts;
             if (!job.copies.empty()) {
+                // Logged: first the submission that wrote the data, then the copy (recorded after everything
+                // that was open when the fault came).
+                s64 t_data = t_recorded;
+                if (log && job.log_stamped && job.log_stamped < job.tick) {
+                    scheduler.GetWorkSemaphore()->Wait(job.log_stamped);
+                    t_data = BbTrace::NowNs();
+                }
                 scheduler.GetWorkSemaphore()->Wait(job.tick);
+                if (timed) {
+                    const s64 t_done = BbTrace::NowNs();
+                    BbTrace::rb_gpu_ns.fetch_add(u64(t_done - t_recorded), std::memory_order_relaxed);
+                    BbTrace::rb_jobs.fetch_add(1, std::memory_order_relaxed);
+                    if (log) {
+                        std::scoped_lock lk{g_readback_log_mutex};
+                        std::fprintf(log, "%.3f %u %lu %llx %llx o %d %.0f %.0f %.0f %llu %zu %llu %llu %llu %016llx %.0f %u %llx %llx %llu %llu\n",
+                                     t_start / 1e6, BbTrace::frame_gen.load(std::memory_order_relaxed), LogThreadId(),
+                                     (unsigned long long)BbTrace::fault_rip, (unsigned long long)device_addr,
+                                     int(is_write), (t_recorded - t_start) / 1e3, (t_data - t_recorded) / 1e3,
+                                     (t_done - t_data) / 1e3, (unsigned long long)job.log_bytes, job.copies.size(),
+                                     (unsigned long long)job.log_stamped, (unsigned long long)job.log_current,
+                                     (unsigned long long)job.log_gpu, (unsigned long long)job.log_writer,
+                                     job.log_write_ns ? (t_start - job.log_write_ns) / 1e3 : -1.0, job.log_writes,
+                                     (unsigned long long)job.fault_lo, (unsigned long long)job.fault_hi,
+                                     (unsigned long long)job.page_gpu_bytes, (unsigned long long)job.nearest);
+                    }
+                }
                 FinishReadback(job);
             }
         }
@@ -500,6 +592,33 @@ void BufferCache::RecordReadback(Readback& job) {
         CollectDownloads(arena, job.window, READBACK_WINDOW_SIZE, job.copies);
     if (total_size_bytes == 0) {
         return;
+    }
+    if (ReadbackLog()) {
+        const u64 slot = (job.window / READBACK_WINDOW_SIZE) & 4095;
+        job.log_stamped = window_write_tick[slot];
+        job.log_current = scheduler.CurrentTick();
+        scheduler.GetWorkSemaphore()->Refresh();
+        job.log_gpu = scheduler.GetWorkSemaphore()->KnownGpuTick();
+        job.log_bytes = total_size_bytes;
+        job.log_writer = window_writer[slot];
+        job.log_write_ns = window_write_ns[slot];
+        job.log_writes = window_writes[slot];
+        for (const auto& copy : job.copies) {
+            const VAddr lo = arena->cpu_addr + copy.srcOffset;
+            if (job.fault >= lo && job.fault < lo + copy.size) {
+                job.fault_lo = lo;
+                job.fault_hi = lo + copy.size;
+            }
+            // GPU-modified bytes on the fault's own 4 KB page: their total, and the closest one.
+            const VAddr page = Common::AlignDown(job.fault, 4096);
+            const VAddr a = std::max(lo, page), e = std::min(lo + copy.size, page + 4096);
+            if (a < e) {
+                job.page_gpu_bytes += e - a;
+            }
+            const u64 dist = job.fault < lo ? lo - job.fault : job.fault >= lo + copy.size ? job.fault - (lo + copy.size) + 1 : 0;
+            job.nearest = std::min(job.nearest, dist);
+        }
+        window_writes[slot] = 0;
     }
     job.arena_base = arena->cpu_addr;
     job.write_seq = memory_tracker->GpuWriteSeq(job.window, READBACK_WINDOW_SIZE);

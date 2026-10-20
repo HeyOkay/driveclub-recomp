@@ -259,6 +259,11 @@ private:
     std::atomic<bool> direct_readback{true};
     u32 direct_reads{};
     std::array<u64, 4096> window_write_tick{};
+    /// bbport: BB_READBACK_LOG: per window (hashed like window_write_tick) the last writer's tag, when it was
+    /// recorded (steady ns), and how many write bindings since the window was last read back.
+    std::array<u64, 4096> window_writer{};
+    std::array<s64, 4096> window_write_ns{};
+    std::array<u32, 4096> window_writes{};
     void StampGpuWrite(VAddr device_addr, u64 size);
 
     /// bbport: early readbacks (RecordEarlyReadbacks). Hot: the window was read back in the last ticks.

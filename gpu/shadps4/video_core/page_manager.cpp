@@ -3,6 +3,7 @@
 
 #include <boost/container/small_vector.hpp>
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -799,6 +800,8 @@ struct PageManager::Impl {
                 BbStats::NoteGpuReadFault(Common::FaultInstructionPointer(context) | (1ull << 63));
             }
             BbStats::Timer timer{BbStats::t_write_faults};
+            // The readback log names the faulting instruction for writes too (it kept the last read's before).
+            BbTrace::fault_rip = Common::FaultInstructionPointer(context);
 #ifdef _WIN64
             // Only faults on pages holding GPU data: CPU write tracking faults stay on the cheap path.
             if (!is_gpu_thread && FaultEmulation() && rasterizer->IsPageGpuModified(addr) &&
@@ -817,6 +820,7 @@ struct PageManager::Impl {
                 BbStats::NoteGpuReadFault(Common::FaultInstructionPointer(context));
             }
             BbStats::Timer timer{BbStats::t_read_faults};
+            BbTrace::fault_rip = Common::FaultInstructionPointer(context);
 #ifdef _WIN64
             // Only read faults from GPU read protection (a page holding GPU data).
             if (!is_gpu_thread && FaultEmulation() && rasterizer->IsPageGpuModified(addr) &&
@@ -832,6 +836,12 @@ struct PageManager::Impl {
                 }
             }
 #endif
+            if (BbTrace::enabled) {
+                const s64 start = BbTrace::NowNs();
+                const bool handled = rasterizer->ReadMemory(addr, 8, is_gpu_thread);
+                BbTrace::NoteReadFault(start, u64(BbTrace::NowNs() - start));
+                return handled;
+            }
             return rasterizer->ReadMemory(addr, 8, is_gpu_thread);
         }
         return false;

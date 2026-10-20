@@ -7,6 +7,7 @@
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -1348,6 +1349,7 @@ void TextureCache::GarbageCollectImages() {
             ++gc_downloads;
         }
         ++gc_evictions;
+        BbTrace::evictions.fetch_add(1, std::memory_order_relaxed);
         FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {

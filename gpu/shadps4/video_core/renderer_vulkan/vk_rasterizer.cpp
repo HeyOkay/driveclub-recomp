@@ -9,6 +9,7 @@
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_settings.h"
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
 #include "core/debug_state.h"
@@ -2469,6 +2470,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
                 }
+                if (desc.is_written) {
+                    // bbport: BB_READBACK_LOG names the shader that wrote what the guest reads back.
+                    BbTrace::writer_tag.store(stage.pgm_hash ^ (u64(stage.sw_stage) << 60), std::memory_order_relaxed);
+                }
                 const auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
@@ -3427,6 +3432,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         if (is_gds) {
             return {buffer_cache.GetGdsBuffer(), address};
         }
+        BbTrace::writer_tag.store(0xF111000000000000ull | num_bytes, std::memory_order_relaxed);
         return buffer_cache.ObtainBuffer(address, num_bytes, true);
     }();
     runtime.FillBuffer(buffer, offset, num_bytes, value);
@@ -3456,6 +3462,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         if (dst_gds) {
             return {gds_buffer, dst};
         }
+        BbTrace::writer_tag.store(0xC0B7000000000000ull | (src & 0xffffffffffull), std::memory_order_relaxed);
         return buffer_cache.ObtainBuffer(dst, num_bytes, true, true);
     }();
     const vk::BufferCopy copy = {

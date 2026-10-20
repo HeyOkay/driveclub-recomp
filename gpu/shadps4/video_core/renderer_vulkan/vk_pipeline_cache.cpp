@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_frametrace.h"
 #include "shader_recompiler/depth_size_fix.h"
 #include <atomic>
 #include <chrono>
@@ -374,6 +375,7 @@ struct CompileTimer {
                                    std::chrono::steady_clock::now() - start)
                                    .count());
         ++g_bb_compiles;
+        BbTrace::compiles.fetch_add(1, std::memory_order_relaxed);
     }
 };
 } // namespace
