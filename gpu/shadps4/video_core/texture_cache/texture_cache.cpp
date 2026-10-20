@@ -515,12 +515,16 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
             return {merged_image_id, -1, -1};
         }
 
-        // Enhanced debug logging for unreachable case
+        // Reported for the first few only: this is not fatal any more, and a game that keeps
+        // reusing one address for two shapes would fill the log with it.
+        static std::atomic<u32> reported{};
+        const bool tell = reported.fetch_add(1) < 3;
         // Calculate expected size based on format and dimensions
         u64 expected_size =
             (static_cast<u64>(image_info.size.width) * static_cast<u64>(image_info.size.height) *
              static_cast<u64>(image_info.size.depth) * static_cast<u64>(image_info.num_bits) / 8);
-        LOG_ERROR(Render_Vulkan,
+        if (tell) {
+            LOG_ERROR(Render_Vulkan,
                   "Unresolvable image overlap with equal memory address:\n"
                   "=== OLD IMAGE (cached) ===\n"
                   "  Address:        {:#x}\n"
@@ -629,8 +633,14 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
                   merged_image_id.index, static_cast<int>(binding), scheduler.CurrentTick(),
                   scheduler.CurrentTick() - cache_image.tick_accessed_last);
-
-        UNREACHABLE_MSG("Encountered unresolvable image overlap with equal memory address.");
+        }
+        // The address holds a shape none of the cases above can turn into the requested one. As in
+        // the other reuse cases, drop the old image when it is old enough and let the caller make a
+        // new one: this ended the port before, which is what the crash reports were.
+        if (safe_to_delete) {
+            FreeImage(cache_image_id);
+        }
+        return {merged_image_id, -1, -1};
     }
 
     // Right overlap, the image requested is a possible subresource of the image from cache.
