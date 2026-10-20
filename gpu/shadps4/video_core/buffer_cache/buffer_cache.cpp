@@ -1129,6 +1129,10 @@ void BufferCache::ApplyQueuedStores() {
     stores.clear();
 }
 
+bool BufferCache::IsHostWrittenBuffer(const Buffer* buffer) const noexcept {
+    return buffer == &stream_buffer;
+}
+
 std::pair<const Buffer*, u64> BufferCache::ObtainBuffer(VAddr device_addr, u32 size,
                                                         bool is_written, bool is_texel_buffer) {
     BB_PIPE_CHECK("BufferCache::ObtainBuffer");

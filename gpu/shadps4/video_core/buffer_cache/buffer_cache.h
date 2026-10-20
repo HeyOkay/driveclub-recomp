@@ -104,6 +104,9 @@ public:
     std::vector<QueuedStore> queued_stores;
     std::atomic<u32> num_queued_stores{0};
 
+    /// bbport: the stream buffer: only the host writes it, no GPU hazard to track.
+    [[nodiscard]] bool IsHostWrittenBuffer(const Buffer* buffer) const noexcept;
+
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;

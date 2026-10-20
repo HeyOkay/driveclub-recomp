@@ -4,6 +4,7 @@
 #pragma once
 
 #include <boost/container/static_vector.hpp>
+#include "common/bytes_equal.h"
 #include <xxhash.h>
 
 #include "shader_recompiler/frontend/fetch_shader.h"
@@ -62,7 +63,7 @@ struct GraphicsPipelineKey {
     }
 
     bool operator==(const GraphicsPipelineKey& key) const noexcept {
-        return std::memcmp(this, &key, sizeof(key)) == 0;
+        return Common::BytesEqual<sizeof(GraphicsPipelineKey)>(this, &key);
     }
 
     void Serialize(Serialization::Archive& ar) const;

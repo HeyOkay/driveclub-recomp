@@ -1176,9 +1176,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         used_prepared = pipeline_cache.UsedPrepared();
     }
     if (prepared) {
-        draw_prep->Count(pipeline != nullptr &&
-                         prepared->state.load(std::memory_order_acquire) == PreparedDraw::Ready &&
-                         prepared->reg_checksum == liverpool->gfx_reg_checksum);
+        draw_prep->Count(pipeline != nullptr && used_prepared == prepared);
     }
     if (!pipeline) {
         return;
@@ -2573,12 +2571,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 push_data.AddOffset(binding.buffer, adjust);
                 buffer_infos.emplace_back(buffer->Handle(), offset_aligned, size + adjust);
-                bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
+                // bbport: the stream buffer is only written by the host (copies of read-only
+                // guest data, reused after the GPU finished with it): no GPU hazard to track.
+                // ~500k such binds per second in DriveClub each inserted a barrier tracker range.
+                static const bool track_stream = [] {
+                    const char* env = std::getenv("BB_TRACK_STREAM");
+                    return env && env[0] == '1';
+                }();
+                if (track_stream || desc.is_written || !buffer_cache.IsHostWrittenBuffer(buffer)) {
+                    bound_buffers.emplace_back(buffer, offset, size, desc.is_written);
+                    needs_barrier |=
+                        runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
+                }
                 if (desc.is_written) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
-                needs_barrier |= runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
             }
         }
 

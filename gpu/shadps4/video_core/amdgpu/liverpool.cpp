@@ -565,7 +565,7 @@ u64 Liverpool::HashRegisterPacket(u64 checksum, const u32* words, u32 count) {
 }
 
 void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
-                                             RegDirty* dirty) {
+                                             RegDirty* dirty, bool hash) {
     const u32 count = header->type3.NumWords();
     const auto* payload = reinterpret_cast<const u32*>(header + 2);
     const auto mark = [&](u32 word, u32 words) {
@@ -682,7 +682,10 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
     default:
         return;
     }
-    checksum = HashRegisterPacket(checksum, reinterpret_cast<const u32*>(header), count + 1);
+    // bbport: only draw preparation compares checksums; without its workers nobody reads it.
+    if (hash) {
+        checksum = HashRegisterPacket(checksum, reinterpret_cast<const u32*>(header), count + 1);
+    }
 }
 
 // bbport: BB_DCB_STATS=1 - structure of graphics command buffers (read-only scan, printed every
@@ -798,6 +801,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (draw_prep) {
         draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
     }
+    // Nested buffers (no draw_prep here) must keep the checksum in step while the workers run.
+    const bool hash_registers = rasterizer && rasterizer->GetDrawPreparation().Enabled();
     static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
     const int dcb_depth = g_dcb_depth;
     if (dcb_stats) {
@@ -839,7 +844,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
             BbStats::PhaseTimer opcode_timer{BbStats::opcode_ns[static_cast<u32>(opcode) & 255]};
-            ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
+            ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty, hash_registers);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
                 !(opcode == PM4ItOpcode::DmaData &&
