@@ -782,15 +782,19 @@ void *runtime_low_map(size_t size, int prot) {
 /* Bits 32 and up: the draw pipeline and related GPU thread work (gpu/shim/bbport_toggles.h). */
 /* DriveClub: draw-preparation workers (4096 | 8192) read vertex/texture descriptors before the game finished
  * updating them, which showed up as vertex explosions, green textures and flicker. Off by default. */
-uint64_t runtime_disabled_optimizations=4096|8192|16384|524288|(1ull<<37);
+uint64_t runtime_disabled_optimizations=4096|8192|16384|524288|(1ull<<41);
 /* Speculative readers of guest memory (GPU draw-preparation workers) register a recovery
  * point: a fault on that thread jumps back to it instead of terminating (probe.c). */
 __thread sigjmp_buf *runtime_fault_recover;
 static void *toggle_watcher(void *path) {
     for (unsigned long long last=ULLONG_MAX;;) {
         FILE *f=fopen(path,"r");
-        unsigned long long value=0;
-        if (f) { if (fscanf(f,"%llu",&value)!=1) value=0; fclose(f); }
+        unsigned long long value=last;
+        int parsed=0;
+        if (f) { parsed=fscanf(f,"%llu",&value)==1; fclose(f); }
+        /* bbport: a missing, empty (being rewritten) or garbled file keeps the last mask; it no longer turns
+         * every optimization on. The first read without a file keeps the built-in default. */
+        if (!parsed) value=last==ULLONG_MAX ? runtime_disabled_optimizations : last;
         if (value!=last) {
             __atomic_store_n(&runtime_disabled_optimizations,(uint64_t)value,__ATOMIC_RELEASE);
             printf("Runtime: disabled optimizations mask=%llu\n",value);
