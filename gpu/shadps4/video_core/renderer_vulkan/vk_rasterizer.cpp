@@ -1372,7 +1372,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 void Rasterizer::FlushLongBatch() {
     static const u32 interval = [] {
         const char* env = std::getenv("BB_FLUSH_DRAWS");
-        const long v = env ? std::atol(env) : 384;
+        const long v = env ? std::atol(env) : 96;
         return v <= 0 ? 0u : u32(std::max<long>(v, 64));
     }();
     if (!interval || DrawPipe::OnStageB()) {
