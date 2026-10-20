@@ -1434,7 +1434,24 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     while (!acb.empty()) {
         ProcessCommands();
         if (rasterizer) {
-            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // bbport: compute work uses the caches
+            // bbport: compute work uses the caches, so the recording thread must be idle first. Padding, Nop and
+            // register writes do no work: no drain for them (~6000 compute drains/s in races, most before
+            // register packets). The recording thread draws from its own register snapshots (Rasterizer::Regs).
+            // BB_COMPUTE_STATE_NODRAIN=0 drains before every packet again.
+            static const bool state_nodrain = [] {
+                const char* env = std::getenv("BB_COMPUTE_STATE_NODRAIN");
+                return !(env && env[0] == '0');
+            }();
+            const auto* peek = reinterpret_cast<const PM4Header*>(acb.data());
+            const bool state_only =
+                state_nodrain && queue.tmp_dwords == 0 &&
+                (peek->type == 2 ||
+                 (peek->type == 3 && (peek->type3.opcode == PM4ItOpcode::Nop ||
+                                      peek->type3.opcode == PM4ItOpcode::SetShReg ||
+                                      peek->type3.opcode == PM4ItOpcode::SetQueueReg)));
+            if (!state_only) {
+                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+            }
         }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
