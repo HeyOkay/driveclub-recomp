@@ -114,12 +114,18 @@ AvPlayerState::AvPlayerState(const AvPlayerInitData& init_data)
 }
 
 AvPlayerState::~AvPlayerState() {
+    // Stop the controller thread first: its event callbacks use the source.
+    m_controller_thread.Stop();
     {
         std::unique_lock lock(m_source_mutex);
         m_up_source.reset();
     }
-    m_controller_thread.Stop();
     m_event_queue.Clear();
+}
+
+// Called inside GAME thread (sceAvPlayerClose)
+void AvPlayerState::StopControllerThread() {
+    m_controller_thread.Stop();
 }
 
 void AvPlayerState::PostInit(const AvPlayerPostInitData& post_init_data) {

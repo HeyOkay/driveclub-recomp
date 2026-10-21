@@ -15,6 +15,7 @@ namespace Libraries::AvPlayer {
 class AvPlayer {
 public:
     AvPlayer(const AvPlayerInitData& data);
+    ~AvPlayer();
 
     s32 PostInit(const AvPlayerPostInitData& data);
     s32 AddSource(std::string_view filename);
