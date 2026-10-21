@@ -883,6 +883,35 @@ static int backing_copy(uintptr_t address, void *data, uint64_t size, int to_bac
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) { return backing_copy(address,(void *)data,size,1); }
 /* Reads through the backing view: the GPU side copies guest data (uploads) without raising read faults. */
 int runtime_memory_read_backing(uintptr_t address, void *data, uint64_t size) { return backing_copy(address,data,size,0); }
+/* Reads a range that may span mappings and gaps: mapped parts through the backing view, gaps and reserved space as
+ * zeros. One region lookup per part (the GPU's per-draw constant copies are ~1 KB each, about a million a second). */
+void runtime_memory_read_sparse(uintptr_t address, void *data, uint64_t size) {
+    unsigned char *out=data;
+    const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
+    if (c && c->kind!=KIND_RESERVED && size<=c->end-address) {
+        memcpy(out,backing_base+c->phys+(address-c->start),size);
+        return;
+    }
+    read_lock();
+    { size_t i=vma_index(address); if (i<vma_count && vmas[i].start<=address) cache_region(i); }
+    for (uintptr_t at=address, end=address+size; at<end;) {
+        size_t i=vma_index(at);
+        uintptr_t next=end;
+        if (i<vma_count && vmas[i].start<=at) {
+            next=vmas[i].end<end ? vmas[i].end : end;
+            if (vmas[i].kind!=KIND_RESERVED) {
+                memcpy(out+(at-address),backing_base+vmas[i].phys+(at-vmas[i].start),next-at);
+                at=next;
+                continue;
+            }
+        } else if (i<vma_count && vmas[i].start<end) {
+            next=vmas[i].start;
+        }
+        memset(out+(at-address),0,next-at);
+        at=next;
+    }
+    read_unlock();
+}
 /* Mapped length from address, up to size, across adjacent mappings. */
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size) {
     const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
