@@ -51,6 +51,9 @@ struct Program {
     Shader::Info info;
     ModuleList modules{};
     size_t last_used = 0; ///< bbport: permutation of the previous lookup, compared first
+    /// bbport (BB_SPEC_MEMO): the specialization inputs of the lookup that chose `last_used`.
+    Shader::StageSpecializationKey memo_key;
+    bool memo_valid = false;
     /// bbport: `info` as translated, for draw-preparation workers (they must not read `info`,
     /// whose user data the GPU thread rewrites every draw). Guarded by programs_mutex.
     std::unique_ptr<Shader::Info> info_template;
