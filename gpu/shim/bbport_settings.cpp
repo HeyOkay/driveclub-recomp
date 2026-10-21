@@ -68,6 +68,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.aa_scale = a;
             }
         }
+    } else if (key == "dlss_model") {
+        // auto, or the preset's letter
+        v.dlss_model = value == "k" || value == "K" ? 11 : value == "l" || value == "L" ? 12
+                     : value == "m" || value == "M" ? 13 : 0;
     } else if (key == "frame_gen_multiplier") {
         v.frame_gen_multiplier = std::clamp(i, 2, 4);
     } else if (key == "frame_gen_fit_display") {
@@ -136,7 +140,7 @@ void Load() {
         {"BB_REACTIVE_THRESHOLD", "reactive_threshold"}, {"BB_REACTIVE_MAX", "reactive_max"},
         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
         {"BB_AA", "aa"},                            {"BB_AA_SCALE", "aa_scale"},                            {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
-        {"BB_FRAME_GEN_FIT_DISPLAY", "frame_gen_fit_display"},
+        {"BB_FRAME_GEN_FIT_DISPLAY", "frame_gen_fit_display"}, {"BB_DLSS_MODEL", "dlss_model"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -260,12 +264,13 @@ const char* AaName(int aa) {
 }
 
 const char* AaScaleName(int scale) {
-    static constexpr const char* names[AaScaleCount] = {"native", "quality", "balanced", "performance"};
+    static constexpr const char* names[AaScaleCount] = {"native", "quality", "balanced", "performance",
+                                                        "ultra_performance"};
     return names[std::clamp(scale, 0, AaScaleCount - 1)];
 }
 
 float AaScaleFactor(int scale) {
-    static constexpr float factors[AaScaleCount] = {1.0f, 1.5f, 1.7f, 2.0f};
+    static constexpr float factors[AaScaleCount] = {1.0f, 1.5f, 1.7f, 2.0f, 3.0f};
     return factors[std::clamp(scale, 0, AaScaleCount - 1)];
 }
 

@@ -63,6 +63,10 @@ constexpr bool menu_open = false;
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
 bool text_entry_active = false;
 std::string text_entry_prompt, text_entry_text;
+// A hotkey's note (Note), guarded by imgui_mutex: shown until note_until.
+std::string note_text;
+std::chrono::steady_clock::time_point note_until{};
+std::atomic<bool> note_active{false};
 float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
@@ -169,7 +173,15 @@ void PollHotkeys() {
         g_aa_used = true;
     }
     if (f9 && !f9_down) {
-        s.aa_mode = s.aa_mode != BbSettings::AaOff ? int(BbSettings::AaOff) : remembered;
+        if (s.aa_scale != BbSettings::AaScaleNative && s.aa_mode != BbSettings::AaOff) {
+            // Upscaling: the game draws at the smaller size from the start; without FSR or DLSS
+            // there would only be that picture stretched, not the full resolution.
+            Note(s.aa_mode == BbSettings::AaDlss
+                     ? "Upscaling is on: DLSS stays on (change Upscaling in the launcher)"
+                     : "Upscaling is on: FSR stays on (change Upscaling in the launcher)");
+        } else {
+            s.aa_mode = s.aa_mode != BbSettings::AaOff ? int(BbSettings::AaOff) : remembered;
+        }
     }
     if (f10 && !f10_down && s.dlss_supported) { // DLSS only where this card can run it
         remembered = remembered == BbSettings::AaDlss ? int(BbSettings::AaFsr3)
@@ -191,6 +203,20 @@ void PollHotkeys() {
     }
     f8_down = f8;
 #endif
+}
+
+void NoteBox() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, viewport->WorkPos.y + 40.0f * base_scale),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.0f));
+    ImGui::SetNextWindowBgAlpha(0.75f);
+    ImGui::Begin("##note", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::SetWindowFontScale(1.3f);
+    ImGui::Text("%s", note_text.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::End();
 }
 
 void FpsCounter() {
@@ -223,11 +249,13 @@ void FpsCounter() {
         }
         if (s.aa_mode != BbSettings::AaOff) {
             const bool up = s.aa_scale != BbSettings::AaScaleNative;
-            ImGui::Text("%s: %s%s%s%s  (%s)", up ? "Upscaling" : "AA",
+            // With upscaling F9 does not turn it off (see PollHotkeys).
+            const char* keys = up ? (s.dlss_supported ? "F10 FSR/DLSS" : "")
+                                  : (s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");
+            ImGui::Text("%s: %s%s%s%s%s%s%s", up ? "Upscaling" : "AA",
                         s.aa_mode == BbSettings::AaDlss ? (up ? "DLSS" : "DLAA") : "FSR 3.1",
                         up ? " " : "", up ? BbSettings::AaScaleName(s.aa_scale) : "",
-                        s.aa_running ? " on" : " waiting",
-                        s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");
+                        s.aa_running ? " on" : " waiting", *keys ? "  (" : "", keys, *keys ? ")" : "");
         } else if (g_aa_used) {
             ImGui::Text("AA: game  (F9 on)");
         }
@@ -399,7 +427,14 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || BbSettings::Get().show_fps);
+    return initialized && (menu_open || text_entry_active || note_active || BbSettings::Get().show_fps);
+}
+
+void Note(const std::string& text) {
+    std::scoped_lock lock{imgui_mutex};
+    note_text = text;
+    note_until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    note_active = true;
 }
 
 bool CapturesInput() {
@@ -451,6 +486,13 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (text_entry_active) {
         TextEntryBox();
+    }
+    if (note_active) {
+        if (now < note_until) {
+            NoteBox();
+        } else {
+            note_active = false;
+        }
     }
     ImGui::Render();
 

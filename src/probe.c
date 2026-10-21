@@ -710,6 +710,32 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     fclose(f);
     printf("Patches: %" PRIu64 " writes, %" PRIu64 " bytes applied, %" PRIu64 " pointers rebased\n",count,bytes,rebased);
 }
+/* Upscaling (BB_AA = dlss or fsr3 with BB_AA_SCALE = quality, balanced, performance or ultra_performance): the game
+ * renders its scene at the output size over the scale and FSR or DLSS brings it back to the output size
+ * (gpu/shadps4/video_core/renderer_vulkan/vk_drive_aa.cpp). DriveClub 1.28 keeps its output size in the code (the
+ * immediates of mov r8d / mov r9d at +0x754c19 / +0x754c1f, which the resolution patches change) and its render size
+ * in data (+0x12d0544, +0x12d0554, as the "Internal resolution" patches): the render size is set here, after the
+ * patches, so it follows any output size, widescreen ones too. Both multiples of 8. */
+static void apply_upscale_render_size(unsigned char *image, uint64_t size) {
+    static const struct { const char *name; float scale; } scales[] = {
+        {"quality", 1.5f}, {"balanced", 1.7f}, {"performance", 2.0f}, {"ultra_performance", 3.0f}};
+    const char *aa=getenv("BB_AA"), *want=getenv("BB_AA_SCALE");
+    if (!aa || (strcmp(aa,"dlss") && strcmp(aa,"fsr3")) || !want) return;
+    float scale=0.0f;
+    for (size_t i=0;i<sizeof scales/sizeof *scales;++i) if (!strcmp(want,scales[i].name)) scale=scales[i].scale;
+    if (scale<=0.0f || size<0x12d0558) return;
+    if (image[0x754c19]!=0x41 || image[0x754c1a]!=0xb8 || image[0x754c1f]!=0x41 || image[0x754c20]!=0xb9) {
+        printf("Upscaling: the game's output size is not where eboot 1.28 has it; rendering at the output size\n");
+        return;
+    }
+    uint32_t out_w, out_h, render_w, render_h;
+    memcpy(&out_w,image+0x754c1b,4); memcpy(&out_h,image+0x754c21,4);
+    if (out_w<640 || out_w>16384 || out_h<360 || out_h>8640) return;
+    render_w=(uint32_t)((float)out_w/scale+4.0f)/8*8;
+    render_h=(uint32_t)((float)out_h/scale+4.0f)/8*8;
+    memcpy(image+0x12d0544,&render_w,4); memcpy(image+0x12d0554,&render_h,4);
+    printf("Upscaling: the game renders at %ux%u for its %ux%u output (%s)\n",render_w,render_h,out_w,out_h,want);
+}
 /* Restarts the game through run.sh (the settings menu: a new render resolution is a patch
  * applied at start). Descriptors are closed first so the old GPU device and its memory are
  * released before the new process opens its own. */
@@ -1156,6 +1182,7 @@ int main(int argc, char **argv) {
         memcpy(image + relocs[i].target, &value, 8);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    if (!cpu_only) apply_upscale_render_size(image, size);
     if (!cpu_only) patch_shared_alloc(image, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));

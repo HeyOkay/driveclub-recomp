@@ -51,6 +51,7 @@ public:
         int quality;
         bool hdr;
         bool depth_inverted = false;
+        u32 preset = 0; ///< NGX render preset (11 K, 12 L, 13 M), 0: NVIDIA's choice
         bool operator==(const FeatureDesc&) const = default;
     };
     struct Frame {

@@ -24,8 +24,9 @@ enum FrameGen : int { FrameGenOff = 0, FrameGenFsr3 = 1, FrameGenDlss = 2, Frame
 /// Anti-aliasing at the render resolution: the game's own, FSR 3.1, or DLSS (DLAA).
 enum Aa : int { AaOff = 0, AaFsr3 = 1, AaDlss = 2, AaCount };
 /// Upscaling with the anti-aliasing: render size to output size (Native, Quality 1.5x, Balanced 1.7x,
-/// Performance 2x).
-enum AaScale : int { AaScaleNative = 0, AaScaleQuality = 1, AaScaleBalanced = 2, AaScalePerformance = 3, AaScaleCount };
+/// Performance 2x, Ultra Performance 3x). The runtime sets the game's render size (src/probe.c).
+enum AaScale : int { AaScaleNative = 0, AaScaleQuality = 1, AaScaleBalanced = 2, AaScalePerformance = 3,
+                     AaScaleUltraPerformance = 4, AaScaleCount };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -112,6 +113,9 @@ struct Values {
     /// F8: frame generation stays set up but stops capturing and generating (nothing is freed).
     std::atomic<bool> frame_gen_paused{false};
     std::atomic<int> aa_scale{AaScaleNative};
+    /// The DLSS Super Resolution model (NVIDIA's render preset): 0 NVIDIA's choice for the quality
+    /// mode, 11 K (DLSS 4), 12 L, 13 M (DLSS 4.5); BB_DLSS_MODEL = k, l or m for tests.
+    std::atomic<int> dlss_model{0};
     /// The anti-aliasing replaced the game's result in the last frame (for the overlay).
     std::atomic<bool> aa_running{false};
     std::atomic<int> frame_gen_multiplier{2};
@@ -162,5 +166,4 @@ const char* FrameGenName(int frame_gen);
 const char* AaName(int aa);
 const char* AaScaleName(int scale);
 float AaScaleFactor(int scale);
-
 } // namespace BbSettings

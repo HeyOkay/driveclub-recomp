@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Anti-aliasing for DriveClub through FSR 3.1 or DLSS (DLAA) at the render resolution. The game's
-// own temporal anti-aliasing pass runs as before; right after it the lit HDR picture it read is
-// reconstructed by FSR or DLSS (jittered geometry, depth, camera motion) and the result replaces
-// the pass's output.
+// Anti-aliasing and upscaling for DriveClub through FSR 3.1 or DLSS. At the render resolution
+// (DLAA): the game's own temporal anti-aliasing pass runs as before; right after it the lit HDR
+// picture it read is reconstructed by FSR or DLSS (jittered geometry, depth, camera motion) and
+// the result replaces the pass's output. Upscaling (the runtime lowers the render size, see
+// src/probe.c): the game's anti-aliasing is skipped, its later passes (transparents, bloom,
+// motion blur) draw at the render size as before, and where the game scales its finished picture
+// into the display buffer, FSR or DLSS upscales it to the output size instead.
 #pragma once
 
 #include <array>
@@ -50,10 +53,9 @@ public:
     [[nodiscard]] bool Redirects(VideoCore::ImageId id) const {
         return redirect_valid && id == redirect_id;
     }
-    void Redirect(vk::ImageView& view, vk::ImageLayout& layout) const {
-        view = *result_view;
-        layout = vk::ImageLayout::eGeneral;
-    }
+    /// `mapping`: the component swizzle of the view the game asked for (its T#'s destination
+    /// select), which the upscaled picture is read with too.
+    void Redirect(const vk::ComponentMapping& mapping, vk::ImageView& view, vk::ImageLayout& layout);
 
     /// The display pass: the next frame's jitter.
     void NextFrame();
@@ -61,6 +63,15 @@ public:
     /// After the game's anti-aliasing dispatch: `color` is the lit HDR picture it read, `depth` the
     /// scene depth and `output` the image it wrote.
     void OnTaa(VideoCore::ImageId color, VideoCore::ImageId depth, VideoCore::ImageId output);
+
+    /// Upscaling: OnTaa left the picture for the pass that scales it into the display buffer, and
+    /// `image` (sampled by the first draw into the display buffer) is that picture.
+    [[nodiscard]] bool LatePending() const {
+        return late_pending;
+    }
+    [[nodiscard]] bool WantsComposite(const VideoCore::Image& image) const;
+    /// Upscales `color` to the output size; the draw then samples the result (Redirect).
+    void OnComposite(VideoCore::ImageId color);
 
 private:
     struct CachedView {
@@ -74,6 +85,10 @@ private:
     vk::ImageView View(const VideoCore::Image& image, vk::Format format,
                        vk::ImageAspectFlags aspect);
     bool EnsureResources(u32 width, u32 height, u32 out_width, u32 out_height, bool dlss);
+    /// FSR or DLSS on `color` (jittered by `frame_jitter`): at the render size into `output`,
+    /// or upscaled to the output size and sampled in place of `color` (Redirect).
+    void Reconstruct(VideoCore::ImageId color, VideoCore::ImageId depth, VideoCore::ImageId output,
+                     std::array<float, 2> frame_jitter, bool upscale);
     void CreatePipeline();
 
     const Instance& instance;
@@ -88,6 +103,11 @@ private:
     u32 width = 0, height = 0, out_width = 0, out_height = 0;
     bool redirect_valid = false;
     VideoCore::ImageId redirect_id{};
+    /// Upscaling: the scene of this frame waits for its composite (OnTaa to OnComposite).
+    bool late_pending = false;
+    VideoCore::ImageId late_depth{};
+    std::array<float, 2> late_jitter{};
+    u32 late_width = 0, late_height = 0;
     float scale = 1.0f;
     bool ready = false;
     bool failed = false;
@@ -102,6 +122,12 @@ private:
     FfxVkPortableUpscaleContext* context = nullptr;
     VideoCore::UniqueImage motion_image, result_image;
     vk::UniqueImageView motion_view, result_view;
+    /// DLSS writes here when the result is sharpened into result_image afterwards.
+    VideoCore::UniqueImage raw_image;
+    vk::UniqueImageView raw_view;
+    vk::UniquePipeline sharpen_pipeline;
+    /// Views of the result with the swizzles the game samples it with (Redirect).
+    std::array<std::pair<vk::ComponentMapping, vk::UniqueImageView>, 4> swizzled_views{};
     vk::UniqueDescriptorSetLayout copy_desc_layout;
     vk::UniquePipelineLayout copy_pipeline_layout;
     vk::UniquePipeline copy_pipeline;
