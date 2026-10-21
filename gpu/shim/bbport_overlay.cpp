@@ -245,9 +245,11 @@ void FpsCounter() {
                         s.aa_mode == BbSettings::AaDlss ? (up ? "DLSS" : "DLAA") : "FSR 3.1",
                         up ? " " : "", up ? BbSettings::AaScaleName(s.aa_scale) : "",
                         s.aa_running ? " on" : " waiting",
-                        s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");
-        } else if (g_aa_used) {
-            ImGui::Text("AA: game  (F9 on)");
+                        s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");        } else if (g_aa_used) {
+            // With upscaling chosen the game still draws at the smaller size: F9 shows its own
+            // stretched picture, not the full resolution.
+            ImGui::Text(s.aa_scale != BbSettings::AaScaleNative ? "AA: game, not upscaled  (F9 on)"
+                                                                : "AA: game  (F9 on)");
         }
     }
     static unsigned shown_w, shown_h, frames;

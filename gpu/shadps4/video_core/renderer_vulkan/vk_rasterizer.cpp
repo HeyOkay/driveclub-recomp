@@ -2650,7 +2650,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                               bool& barrier, bool on_helper) {
     const u32 first_image_idx = image_infos.size();
     TextureSet* set_slot = nullptr;
-    if (!on_helper && BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
+    // A draw into the display buffer may be the one OnComposite waits for: never a memoized set.
+    const bool composite_pending = fg_in_display && drive_aa->LatePending();
+    if (!on_helper && !composite_pending &&
+        BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
         // Descriptor writes: one per image (no mip arrays in a memoized set).
         for (u32 i = 0; i < stage.images.size(); ++i) {
             auto& set_write = set_writes[write_index++];
@@ -2853,11 +2856,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
 
+            // Upscaling: the draw scaling the game's picture into the display buffer gets it
+            // upscaled by FSR or DLSS (DriveAA::OnComposite) and samples that instead, below.
+            if (drive_redirect && composite_pending && binding_proxy_ok[binding_index] && !is_storage &&
+                !binding.is_target && drive_aa->WantsComposite(image)) {
+                drive_aa->OnComposite(image_id);
+            }
             if (drive_redirect && binding_proxy_ok[binding_index] && !is_storage &&
                 !binding.force_general && !binding.is_target && drive_aa->Redirects(image_id)) {
                 vk::ImageView redirected;
                 vk::ImageLayout redirected_layout;
-                drive_aa->Redirect(redirected, redirected_layout);
+                drive_aa->Redirect(image_view.info.mapping, redirected, redirected_layout);
                 image.usage.texture = 1u;
                 image_infos.emplace_back(VK_NULL_HANDLE, redirected, redirected_layout);
                 set_ok = false;

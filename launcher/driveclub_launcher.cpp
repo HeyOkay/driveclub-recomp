@@ -267,6 +267,9 @@ const wchar_t* const kLangName[21] = {L"Japanese", L"English (US)", L"French", L
                                       L"Spanish (Mexico)"};
 int g_lang_id = 1;
 int up_saved = 0;     // "Upscaling" choice, from launcher.ini
+int sharp_saved = -1;  // "Sharpness" percent, from launcher.ini (-1: not saved yet)
+int g_sharp = -1;
+void NameNativeUpscale();
 int aa_saved = 0;     // "Anti-aliasing" choice, from launcher.ini
 int fgen_saved = 0;   // "Frame generation" choice, from launcher.ini
 int mirror_saved = 0;  // "Mirror and reflection updates" choice, from launcher.ini
@@ -648,8 +651,19 @@ void BuildModel() {
                  L"Static draws it once and keeps that picture: much faster and steady, but reflections and rain on the glass stop updating.",
                  {L"Live", L"Static (faster)"}, {"@mirror", ""}, 0);
   g_aa = seg(L"Anti-aliasing",
-             L"Replaces the game's own anti-aliasing with AMD FSR 3.1 (any graphics card) or NVIDIA DLAA (GeForce RTX) for a sharper, steadier picture. The game's own is the default. It does not work together with the patch \"Disable motion blur and depth of field\": the game keeps its own anti-aliasing then.",
-             {L"Game", L"FSR 3.1", L"DLAA (RTX)"}, {"@aa", "", ""}, 0);
+             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. It does not work together with the patch \"Disable motion blur and depth of field\": the game keeps its own anti-aliasing then.",
+             {L"Game", L"FSR 3.1", L"DLSS (RTX)"}, {"@aa", "", ""}, 0);
+  g_up = seg(L"Upscaling",
+             L"More FPS for nearly the same picture: the game is drawn at a lower resolution and DLSS (or FSR) rebuilds it at your screen's resolution. DLAA (Native with FSR) draws every pixel: the best picture, the lowest FPS. Quality is the best balance; Balanced, Performance and Ultra Perf. give more FPS each. Needs DLSS or FSR 3.1 above.",
+             {L"DLAA", L"Quality", L"Balanced", L"Performance", L"Ultra Perf."}, {"@up", "", "", "", ""}, 0);
+  {
+    Ctl c{L"Sharpness", L"How crisp the picture looks with DLSS or FSR. 0 adds no sharpening; 80 is recommended; very high values can make edges look rough.",
+          Kind::Slider, {}, {"@sharpness"}, 80, 80};
+    c.min = 0;
+    c.max = 100;
+    g_sharp = int(g_c.size());
+    g_c.push_back(std::move(c));
+  }
   g_aniso = seg(L"Anisotropic filtering",
                 L"Keeps textures on roads and terrain sharp at a shallow angle. Automatic is 16x (4x on integrated graphics). Off uses only what the game asks for. It costs little on any graphics card.",
                 {L"Automatic", L"Off", L"2x", L"4x", L"8x", L"16x"}, {"@aniso", "", "", "", "", ""}, 0);
@@ -758,7 +772,7 @@ void BuildModel() {
   const int ffb_invert = toggle(L"Invert forces", L"Turn on only if the wheel pulls away from the centre instead of towards it.", "@ffb:wheel_ffb_invert", false);
   // The cards flow into as many columns as the window width allows (see LayoutPass), on the page of their tab.
   g_cards.push_back({L"FRAME RATE AND RESOLUTION", {g_preset, fps, outres, inres, wide, fov, twothread}, 0, kTabGraphics});
-  g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_aniso}, 0, kTabGraphics});
+  g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
                      L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off.   F10  FSR or DLSS.   F12  FPS counter."});
@@ -855,6 +869,7 @@ void LoadSettings() {
     if (line.rfind("aniso=", 0) == 0) aniso_saved = atoi(line.substr(6).c_str());
     if (line.rfind("language=", 0) == 0) lang_saved = atoi(line.substr(9).c_str());
     if (line.rfind("up=", 0) == 0) up_saved = atoi(line.substr(3).c_str());
+    if (line.rfind("sharpness=", 0) == 0) sharp_saved = atoi(line.substr(10).c_str());
     if (line.rfind("aa=", 0) == 0) aa_saved = atoi(line.substr(3).c_str());
     if (line.rfind("fgen=", 0) == 0) fgen_saved = atoi(line.substr(5).c_str());
     if (line.rfind("unlocked=", 0) == 0) unlocked_saved = line.substr(9) == "1";
@@ -934,10 +949,12 @@ void LoadSettings() {
     g_lang_id = lang_saved >= 0 && lang_saved <= 20 ? lang_saved : 1;
     g_c[g_lang].items[0] = kLangName[g_lang_id];
   }
-  if (g_up >= 0 && up_saved >= 1 && up_saved <= 3) g_c[g_up].sel = up_saved;
+  if (g_up >= 0 && up_saved >= 1 && up_saved <= 4) g_c[g_up].sel = up_saved;
+  if (g_sharp >= 0 && sharp_saved >= 0) g_c[g_sharp].sel = (std::clamp)(sharp_saved, 0, 100);
   if (g_aa >= 0 && aa_saved >= 1 && aa_saved <= 2) g_c[g_aa].sel = aa_saved;
   if (g_fgen >= 0 && fgen_saved >= 1 && fgen_saved <= 4) g_c[g_fgen].sel = fgen_saved;
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
+  NameNativeUpscale();
   DerivePreset();
   LoadWheel();
   DeriveDrivePreset();
@@ -957,19 +974,14 @@ bool full_screen_now() {
   return true;
 }
 
-// Upscaling: with FSR 3.1 or DLAA chosen, the render size follows from the output size.
+// Upscaling: with FSR 3.1 or DLSS chosen, the runtime sets the render size from the output size (src/probe.c).
 bool UpscaleActive() {
   return g_up >= 0 && g_aa >= 0 && g_c[g_up].sel > 0 && g_c[g_aa].sel > 0;
 }
 
-void UpscaleSize(int& rw, int& rh, const char*& name) {
-  static const int kOut[7][2] = {{1920, 1080}, {1280, 720}, {2560, 1440}, {3200, 1800}, {3840, 2160}, {5120, 2880}, {7680, 4320}};
-  const int o = g_outres >= 0 ? g_c[g_outres].sel : 0;
-  const int q = g_c[g_up].sel;  // 1 Quality 3/2, 2 Balanced 17/10, 3 Performance 2/1
-  const int num = q == 1 ? 3 : q == 2 ? 17 : 2, den = q == 1 ? 2 : q == 2 ? 10 : 1;
-  rw = ((kOut[o][0] * den / num) + 4) / 8 * 8;
-  rh = ((kOut[o][1] * den / num) + 4) / 8 * 8;
-  name = q == 1 ? "Quality" : q == 2 ? "Balanced" : "Performance";
+// Upscaling's first choice draws every pixel: DLAA with DLSS, "Native" with FSR (or the game's own).
+void NameNativeUpscale() {
+  if (g_up >= 0 && g_aa >= 0) g_c[g_up].items[0] = g_c[g_aa].sel == 2 ? L"DLAA" : L"Native";
 }
 
 // The output size counts too: 4K output with the Default render size crashed at boot on the default
@@ -981,12 +993,6 @@ int OutputMemoryTier() {
 }
 
 int RenderMemoryTier() {
-  if (UpscaleActive()) {
-    int rw, rh;
-    const char* name;
-    UpscaleSize(rw, rh, name);
-    return rh <= 1080 ? 0 : rh <= 1440 ? 1 : rh <= 2160 ? 2 : 3;
-  }
   if (g_inres < 0 || g_wide < 0) return 0;
   const int r = g_c[g_inres].sel, w = g_c[g_wide].sel;  // render: Default 720p 1440p 1800p 4K; wide: Off + sizes
   if (r >= 5) return 3;
@@ -1021,7 +1027,7 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@autoplay") g_auto_play = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
         << "\r\nbench_rain=" << g_c[g_brain].sel << "\r\nbench_length=" << g_c[g_blen].sel << "\r\n";
@@ -1050,12 +1056,6 @@ void SaveSettings() {
     } else if (c.sel > 0 && !c.patches[c.sel].empty() && c.patches[c.sel][0] != '@') {
       out << c.patches[c.sel] << "\n";
     }
-  }
-  if (UpscaleActive()) {
-    int rw, rh;
-    const char* name;
-    UpscaleSize(rw, rh, name);
-    out << "Upscale render " << rw << "x" << rh << "\n";
   }
   if (MemoryTier() == 1) out << "Memory for up to 1440p\n";
   if (MemoryTier() == 2) out << "Memory for up to 4K\n";
@@ -1921,7 +1921,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
   }
   if (g_up >= 0 && !UserEnv(L"BB_AA_SCALE")) {
     const int u = UpscaleActive() ? g_c[g_up].sel : 0;
-    SetEnvironmentVariableW(L"BB_AA_SCALE", u == 0 ? L"native" : u == 1 ? L"quality" : u == 2 ? L"balanced" : L"performance");
+    SetEnvironmentVariableW(L"BB_AA_SCALE", u == 0 ? L"native" : u == 1 ? L"quality" : u == 2 ? L"balanced"
+                                            : u == 3 ? L"performance" : L"ultra_performance");
+  }
+  if (g_sharp >= 0 && !UserEnv(L"BB_FSR_SHARPNESS")) {  // FSR's RCAS, and the one after DLSS
+    wchar_t v[16];
+    swprintf(v, 16, L"%.2f", g_c[g_sharp].sel / 100.0);
+    SetEnvironmentVariableW(L"BB_FSR_SHARPNESS", v);
   }
   if (g_aa >= 0 && !UserEnv(L"BB_AA")) {
     const int a = g_c[g_aa].sel;
@@ -2610,6 +2616,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           else if (c == g_ffb_preset) ApplyWheelPreset(seg);
           else if (c == g_drive_preset) ApplyDrivePreset(seg);
           if (IsDriveRow(ctl)) DeriveDrivePreset();
+          if (c == g_aa) NameNativeUpscale();
           g_changed = true;
           if (model_changed) Relayout(h);  // the physics settings show or hide
         }

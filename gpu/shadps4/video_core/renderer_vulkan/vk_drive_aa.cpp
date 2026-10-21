@@ -6,9 +6,11 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "bbport_frame_info.h"
 #include "bbport_settings.h"
 #include "ffx_vk_portable.h"
 #include "video_core/host_shaders/drive_aa_copy_comp.h"
+#include "video_core/host_shaders/drive_aa_sharpen_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
 #include "video_core/renderer_vulkan/vk_drive_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -75,18 +77,17 @@ bool DriveAA::Active() const {
     return !failed && BbSettings::Get().aa_mode != BbSettings::AaOff;
 }
 
-// Upscaling is not finished: it only runs for development with BB_AA_UPSCALE_DEV=1.
-static bool UpscalingAllowed() {
-    static const bool allowed = std::getenv("BB_AA_UPSCALE_DEV") != nullptr;
-    return allowed;
-}
-
+// The render size is the output size over the scale (src/probe.c sets it at start).
 bool DriveAA::Upscaling() const {
-    return Active() && UpscalingAllowed() && BbSettings::Get().aa_scale != BbSettings::AaScaleNative;
+    return Active() && BbSettings::Get().aa_scale != BbSettings::AaScaleNative;
 }
 
+// The scale measured on the last run (render to output), else the chosen one.
 float DriveAA::MipBias() const {
-    return Upscaling() ? -std::log2(BbSettings::AaScaleFactor(BbSettings::Get().aa_scale)) : 0.0f;
+    if (!Upscaling()) {
+        return 0.0f;
+    }
+    return -std::log2(scale > 1.0f ? scale : BbSettings::AaScaleFactor(BbSettings::Get().aa_scale));
 }
 
 void DriveAA::NextFrame() {
@@ -105,12 +106,11 @@ void DriveAA::NextFrame() {
         return;
     }
     // 8 phases per 1:1 (16 for the native anti-aliasing), more as the scale grows.
-    const float factor = UpscalingAllowed() ? BbSettings::AaScaleFactor(BbSettings::Get().aa_scale) : 1.0f;
+    const float factor = Upscaling() && scale > 1.0f ? scale : 1.0f;
     const u32 phases = factor > 1.0f ? u32(std::ceil(8.0f * factor * factor)) : 16u;
-    if (redirect_valid &&
-        std::chrono::steady_clock::now() - last_run > std::chrono::milliseconds(300)) {
-        redirect_valid = false;
-    }
+    // The upscaled picture stands in for the game's during the one draw that scales it to the
+    // output (OnComposite runs after this, for that draw).
+    redirect_valid = false;
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
 }
@@ -149,6 +149,36 @@ vk::ImageView DriveAA::View(const VideoCore::Image& image, vk::Format format,
     return oldest->view;
 }
 
+void DriveAA::Redirect(const vk::ComponentMapping& mapping, vk::ImageView& view,
+                       vk::ImageLayout& layout) {
+    layout = vk::ImageLayout::eGeneral;
+    if (mapping == vk::ComponentMapping{}) {
+        view = *result_view;
+        return;
+    }
+    for (const auto& [key, cached] : swizzled_views) {
+        if (cached && key == mapping) {
+            view = *cached;
+            return;
+        }
+    }
+    // Few swizzles read it (the game's passes agree on one); the oldest slot is reused.
+    static u32 next = 0;
+    auto& slot = swizzled_views[next++ % swizzled_views.size()];
+    if (slot.second) {
+        scheduler.DeferOperation([old = std::make_shared<vk::UniqueImageView>(std::move(slot.second))] {});
+    }
+    slot.first = mapping;
+    slot.second = Check(instance.GetDevice().createImageViewUnique({
+        .image = vk::Image(result_image),
+        .viewType = vk::ImageViewType::e2D,
+        .format = vk::Format::eR16G16B16A16Sfloat,
+        .components = mapping,
+        .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+    }));
+    view = *slot.second;
+}
+
 void DriveAA::CreatePipeline() {
     if (copy_pipeline) {
         return;
@@ -178,15 +208,22 @@ void DriveAA::CreatePipeline() {
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &range,
     }));
-    const auto module = CompileSPV(DRIVE_AA_COPY_COMP, device);
-    copy_pipeline = Check(device.createComputePipelineUnique(
-        {}, vk::ComputePipelineCreateInfo{
-                .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
-                          .module = module,
-                          .pName = "main"},
-                .layout = *copy_pipeline_layout,
-            }));
-    device.destroyShaderModule(module);
+    // Both take two storage images and up to two floats: the copy its size, the sharpening its
+    // strength.
+    const auto compute = [&](const auto& code) {
+        const auto module = CompileSPV(code, device);
+        auto pipeline = Check(device.createComputePipelineUnique(
+            {}, vk::ComputePipelineCreateInfo{
+                    .stage = {.stage = vk::ShaderStageFlagBits::eCompute,
+                              .module = module,
+                              .pName = "main"},
+                    .layout = *copy_pipeline_layout,
+                }));
+        device.destroyShaderModule(module);
+        return pipeline;
+    };
+    copy_pipeline = compute(DRIVE_AA_COPY_COMP);
+    sharpen_pipeline = compute(DRIVE_AA_SHARPEN_COMP);
 }
 
 bool DriveAA::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool dlss) {
@@ -196,6 +233,9 @@ bool DriveAA::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool dlss) {
     }
     scheduler.Finish();
     ready = false;
+    for (auto& slot : swizzled_views) {
+        slot.second.reset();
+    }
     if (context) {
         ffxVkPortableUpscaleContextDestroy(context);
         context = nullptr;
@@ -267,6 +307,10 @@ bool DriveAA::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool dlss) {
          vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
              vk::ImageUsageFlagBits::eTransferSrc,
          ow, oh);
+    if (dlss) {
+        make(raw_image, raw_view, vk::Format::eR16G16B16A16Sfloat,
+             vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled, ow, oh);
+    }
     CreatePipeline();
     ready = true;
     reset = true;
@@ -289,6 +333,8 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
             std::puts("");
         }
     };
+    late_pending = false;
+    redirect_valid = false;
     if (!Active() || !color_id || !depth_id || !output_id) {
         return skip("no image");
     }
@@ -307,6 +353,74 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
         std::puts("");
         return skip("image sizes or usage differ");
     }
+    const u32 display_w = BbFrame::output_w.load(std::memory_order_relaxed);
+    const u32 display_h = BbFrame::output_h.load(std::memory_order_relaxed);
+    if (!Upscaling() || display_w <= w || display_h <= h) {
+        // At the render size: the reconstructed picture replaces the pass's result.
+        Reconstruct(color_id, depth_id, output_id, jitter, false);
+        return;
+    }
+    // Upscaling: the passes after this one (transparents, bloom, motion blur and depth of field)
+    // draw at the render size, and the picture only reaches the output size when the game scales
+    // it into its display buffer. So the upscale waits for that pass (OnComposite), and the
+    // game's own anti-aliasing is skipped here: its result is the lit picture as it is, still
+    // aliased and jittered, as FSR and DLSS want their input.
+    scheduler.EndRendering();
+    runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+                    vk::AccessFlagBits2::eTransferRead);
+    runtime.Transit(&output, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+                    vk::AccessFlagBits2::eTransferWrite);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const vk::ImageCopy region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .extent = {w, h, 1},
+    };
+    cmdbuf.copyImage(color.GetImage(), vk::ImageLayout::eGeneral, output.GetImage(),
+                     vk::ImageLayout::eGeneral, region);
+    const vk::MemoryBarrier2 copied{
+        .srcStageMask = vk::PipelineStageFlagBits2::eTransfer,
+        .srcAccessMask = vk::AccessFlagBits2::eTransferWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite,
+    };
+    cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &copied});
+    late_pending = true;
+    late_depth = depth_id;
+    late_jitter = jitter;  // the jitter the scene was drawn with (NextFrame moves on before the composite)
+    late_width = w;
+    late_height = h;
+}
+
+bool DriveAA::WantsComposite(const VideoCore::Image& image) const {
+    return late_pending && image.info.size.width == late_width &&
+           image.info.size.height == late_height &&
+           image.info.pixel_format == vk::Format::eB10G11R11UfloatPack32;
+}
+
+void DriveAA::OnComposite(VideoCore::ImageId color_id) {
+    late_pending = false;
+    static int reported = 0;
+    if (reported++ < 2) {
+        const auto& color = texture_cache.GetImage(color_id);
+        std::printf("Upscaling: the game's picture %#llx (%ux%u) upscaled where it is scaled to the output\n",
+                    static_cast<unsigned long long>(color.info.guest_address), color.info.size.width,
+                    color.info.size.height);
+    }
+    Reconstruct(color_id, late_depth, {}, late_jitter, true);
+}
+
+void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
+                          VideoCore::ImageId output_id, std::array<float, 2> frame_jitter,
+                          bool upscale) {
+    auto& color = texture_cache.GetImage(color_id);
+    auto& depth = texture_cache.GetImage(depth_id);
+    const u32 w = color.info.size.width, h = color.info.size.height;
+    if (depth.info.size.width != w || depth.info.size.height != h) {
+        reset = true;
+        return;
+    }
     const bool want_dlss = BbSettings::Get().aa_mode == BbSettings::AaDlss;
     Dlss* dlss = want_dlss ? Dlss::Get() : nullptr;
     if (want_dlss && (!dlss || !dlss->Available())) {
@@ -315,12 +429,11 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
         reset = true;
         return;
     }
-    const float factor = UpscalingAllowed() ? BbSettings::AaScaleFactor(BbSettings::Get().aa_scale) : 1.0f;
+    // Upscaled to the game's output size (its display buffer).
+    const u32 ow = upscale ? BbFrame::output_w.load(std::memory_order_relaxed) : w;
+    const u32 oh = upscale ? BbFrame::output_h.load(std::memory_order_relaxed) : h;
+    const float factor = float(ow) / float(w);
     scale = factor;
-    const bool upscale = factor > 1.0f;
-    const u32 ow = upscale ? ((u32(std::lround(float(w) * factor)) + 1) & ~1u) : w;
-    const u32 oh = upscale ? ((u32(std::lround(float(h) * factor)) + 1) & ~1u) : h;
-    redirect_valid = false;
     if (!EnsureResources(w, h, ow, oh, want_dlss)) {
         failed = true;
         return;
@@ -329,16 +442,17 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
     const auto depth_format = depth.info.pixel_format;
     const auto color_view = View(color, color_format, vk::ImageAspectFlagBits::eColor);
     const auto depth_view = View(depth, depth_format, vk::ImageAspectFlagBits::eDepth);
-    const auto out_view = View(output, vk::Format::eB10G11R11UfloatPack32,
-                               vk::ImageAspectFlagBits::eColor);
 
     scheduler.EndRendering();
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
     runtime.Transit(&color, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
-    runtime.Transit(&output, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
-                    vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+    VideoCore::Image* output = output_id ? &texture_cache.GetImage(output_id) : nullptr;
+    if (output) {
+        runtime.Transit(output, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
+                        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+    }
     runtime.FlushBarriers();
     const auto cmdbuf = scheduler.CommandBuffer();
 
@@ -381,9 +495,16 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
     bool dispatched = false;
     const auto& settings = BbSettings::Get();
     const float sharpness = settings.sharpen ? std::min(settings.sharpness.load(), 1.0f) : 0.0f;
+    // DLSS ignores its sharpness since 2.5.1: RCAS sharpens its result afterwards (FSR has its own).
+    const bool sharpen_after = dlss && sharpness > 0.0f && raw_image;
+    if (sharpen_after) {
+        barrier(vk::Image(raw_image), vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
+                all, rw);
+    }
     if (dlss) {
+        // A new size or model makes a new feature.
         const Dlss::FeatureDesc desc{w, h, ow, oh, upscale ? Dlss::QualityForScale(factor) : 0, true,
-                                     true};
+                                     true, u32(settings.dlss_model.load())};
         bool ok = true;
         if (!dlss->HasFeature(desc)) {
             scheduler.WaitSubmitted();
@@ -400,10 +521,11 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
                            vk::ImageAspectFlagBits::eDepth, w, h},
                  .motion = {vk::Image(motion_image), *motion_view, vk::Format::eR16G16Sfloat,
                             vk::ImageAspectFlagBits::eColor, w, h},
-                 .output = {vk::Image(result_image), *result_view, vk::Format::eR16G16B16A16Sfloat,
+                 .output = {sharpen_after ? vk::Image(raw_image) : vk::Image(result_image),
+                            sharpen_after ? *raw_view : *result_view, vk::Format::eR16G16B16A16Sfloat,
                             vk::ImageAspectFlagBits::eColor, ow, oh},
-                 .jitter_x = jitter[0],
-                 .jitter_y = jitter[1],
+                 .jitter_x = frame_jitter[0],
+                 .jitter_y = frame_jitter[1],
                  .reset = reset,
                  .frame_ms = frame_ms,
                  .sharpness = sharpness});
@@ -438,7 +560,7 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
         info.reactiveMask.structSize = sizeof(info.reactiveMask);
         info.transparencyAndCompositionMask.structSize =
             sizeof(info.transparencyAndCompositionMask);
-        info.jitterOffset = {jitter[0], jitter[1]};
+        info.jitterOffset = {frame_jitter[0], frame_jitter[1]};
         info.motionVectorScale = {1.0f, 1.0f};
         info.renderSize = {w, h};
         info.outputSize = {ow, oh};
@@ -479,9 +601,37 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
     last_run = std::chrono::steady_clock::now();
     BbSettings::Get().aa_running = true;
 
+    if (sharpen_after) {
+        barrier(vk::Image(raw_image), vk::ImageLayout::eGeneral, all, rw,
+                vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
+        const vk::DescriptorImageInfo raw_info{.imageView = *raw_view,
+                                               .imageLayout = vk::ImageLayout::eGeneral};
+        const vk::DescriptorImageInfo result_info{.imageView = *result_view,
+                                                  .imageLayout = vk::ImageLayout::eGeneral};
+        const std::array<vk::WriteDescriptorSet, 2> writes = {{
+            {.dstBinding = 0,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &raw_info},
+            {.dstBinding = 1,
+             .descriptorCount = 1,
+             .descriptorType = vk::DescriptorType::eStorageImage,
+             .pImageInfo = &result_info},
+        }};
+        const std::array<float, 2> strength{sharpness, 0.0f};
+        cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *sharpen_pipeline);
+        cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *copy_pipeline_layout, 0, writes);
+        cmdbuf.pushConstants(*copy_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                             sizeof(strength), strength.data());
+        cmdbuf.dispatch((ow + 7) / 8, (oh + 7) / 8, 1);
+        barrier(vk::Image(result_image), vk::ImageLayout::eGeneral,
+                vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite, all, rw);
+    }
+
     if (upscale) {
-        // The game's own picture stays for what reads it by pixel; everything that samples it
-        // by UV from here on gets the upscaled one.
+        // The pass scaling the game's picture into its display buffer samples the upscaled one
+        // instead (by UV, so the size does not matter); what reads the picture by pixel keeps
+        // the game's.
         const vk::MemoryBarrier2 ready_to_read{
             .srcStageMask = all,
             .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
@@ -489,11 +639,16 @@ void DriveAA::OnTaa(VideoCore::ImageId color_id, VideoCore::ImageId depth_id,
             .dstAccessMask = vk::AccessFlagBits2::eShaderRead,
         };
         cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &ready_to_read});
-        redirect_id = output_id;
+        redirect_id = color_id;
         redirect_valid = true;
         return;
     }
+    if (!output) {
+        return;
+    }
     // The reconstructed picture replaces what the game's pass wrote.
+    const auto out_view = View(*output, vk::Format::eB10G11R11UfloatPack32,
+                               vk::ImageAspectFlagBits::eColor);
     barrier(vk::Image(result_image), vk::ImageLayout::eGeneral, all, rw,
             vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderRead);
     const vk::DescriptorImageInfo src_info{.imageView = *result_view,

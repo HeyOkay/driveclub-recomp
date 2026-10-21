@@ -18,7 +18,9 @@ The game's own anti-aliasing is replaced by a modern one, chosen in the launcher
 - **NVIDIA DLAA** (GeForce RTX) for the sharpest, steadiest picture: thin lines, wires, fences and foliage stay clean.
 - **AMD FSR 3.1** on any graphics card, with no special hardware and nothing extra to install.
 
-Both work at the native resolution and use the game's own camera motion. In the game the overlay shows what is active, **F9** switches the new anti-aliasing off and on to compare, and **F10** switches between FSR and DLSS on RTX cards.
+Both use the game's own camera motion. In the game the overlay shows what is active, **F9** switches the new anti-aliasing off and on to compare, and **F10** switches between FSR and DLSS on RTX cards.
+
+**Upscaling** (launcher, next to Anti-aliasing): the game draws at a lower resolution and DLSS or FSR rebuilds the picture at the full output size, after the game's own effects, so it stays sharp. At 5120x1440 on an RTX 4070 Ti the average went from 48 FPS (DLAA) to 80 (DLSS Quality), 88 (Balanced) and 104 (Performance); FSR 3.1 Quality gave 103 (DLSS's transformer model costs about 3 ms a frame there, for a cleaner picture). It works with every output and widescreen size; the render size follows from it. **Sharpness** sharpens the finished picture (AMD's RCAS, also after DLSS, which no longer sharpens by itself).
 
 ## How to play
 1. Download the latest `driveclub-recomp-<version>-win64.zip` from the [Releases](../../releases) page and extract it anywhere you can write to (not `Program Files`).
@@ -114,7 +116,9 @@ The window that opens when you start `DriveClub.exe` has every setting. Press **
 
 **Mirror and reflection updates:** **Live** (default) draws the small scene of mirrors, rain and reflections every frame. **Static (faster)** draws it once and keeps that picture, which is much faster but stops reflections and rain on the glass from updating. The Handheld preset uses it.
 
-**Anti-aliasing:** **Game** keeps the original. **FSR 3.1** works on any graphics card, **DLAA (RTX)** needs a GeForce RTX card; if it is not available the launcher falls back to FSR. Do not turn on the community patch "Disable motion blur and depth of field" with it: they do not work together and the game keeps its own anti-aliasing then.
+**Anti-aliasing:** **Game** keeps the original. **FSR 3.1** works on any graphics card, **DLSS (RTX)** needs a GeForce RTX card; if it is not available the launcher falls back to FSR. Do not turn on the community patch "Disable motion blur and depth of field" with it: they do not work together and the game keeps its own anti-aliasing then.
+
+**Upscaling:** with FSR 3.1 or DLSS: **DLAA** (**Native** with FSR) draws every pixel; **Quality**, **Balanced**, **Performance** and **Ultra Perf.** draw the game at 1/1.5, 1/1.7, 1/2 and 1/3 of the output size and rebuild the full picture, for more FPS each. The Render resolution choice does not apply then. With upscaling, F9 shows the game's own picture stretched from the smaller size, not the full resolution. **Sharpness:** 0 to 100 (80 by default).
 
 **Anisotropic filtering:** keeps textures on roads and terrain sharp at a shallow angle. **Automatic** is 16x (4x on integrated graphics); you can also choose Off, 2x, 4x, 8x or 16x.
 
