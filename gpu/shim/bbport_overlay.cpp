@@ -173,7 +173,15 @@ void PollHotkeys() {
         g_aa_used = true;
     }
     if (f9 && !f9_down) {
-        s.aa_mode = s.aa_mode != BbSettings::AaOff ? int(BbSettings::AaOff) : remembered;
+        if (s.aa_scale != BbSettings::AaScaleNative && s.aa_mode != BbSettings::AaOff) {
+            // Upscaling: the game draws at the smaller size from the start; without FSR or DLSS
+            // there would only be that picture stretched, not the full resolution.
+            Note(s.aa_mode == BbSettings::AaDlss
+                     ? "Upscaling is on: DLSS stays on (change Upscaling in the launcher)"
+                     : "Upscaling is on: FSR stays on (change Upscaling in the launcher)");
+        } else {
+            s.aa_mode = s.aa_mode != BbSettings::AaOff ? int(BbSettings::AaOff) : remembered;
+        }
     }
     if (f10 && !f10_down && s.dlss_supported) { // DLSS only where this card can run it
         remembered = remembered == BbSettings::AaDlss ? int(BbSettings::AaFsr3)
@@ -241,15 +249,15 @@ void FpsCounter() {
         }
         if (s.aa_mode != BbSettings::AaOff) {
             const bool up = s.aa_scale != BbSettings::AaScaleNative;
-            ImGui::Text("%s: %s%s%s%s  (%s)", up ? "Upscaling" : "AA",
+            // With upscaling F9 does not turn it off (see PollHotkeys).
+            const char* keys = up ? (s.dlss_supported ? "F10 FSR/DLSS" : "")
+                                  : (s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");
+            ImGui::Text("%s: %s%s%s%s%s%s%s", up ? "Upscaling" : "AA",
                         s.aa_mode == BbSettings::AaDlss ? (up ? "DLSS" : "DLAA") : "FSR 3.1",
                         up ? " " : "", up ? BbSettings::AaScaleName(s.aa_scale) : "",
-                        s.aa_running ? " on" : " waiting",
-                        s.dlss_supported ? "F9 off, F10 FSR/DLSS" : "F9 off");        } else if (g_aa_used) {
-            // With upscaling chosen the game still draws at the smaller size: F9 shows its own
-            // stretched picture, not the full resolution.
-            ImGui::Text(s.aa_scale != BbSettings::AaScaleNative ? "AA: game, not upscaled  (F9 on)"
-                                                                : "AA: game  (F9 on)");
+                        s.aa_running ? " on" : " waiting", *keys ? "  (" : "", keys, *keys ? ")" : "");
+        } else if (g_aa_used) {
+            ImGui::Text("AA: game  (F9 on)");
         }
     }
     static unsigned shown_w, shown_h, frames;

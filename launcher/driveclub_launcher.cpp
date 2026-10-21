@@ -783,7 +783,7 @@ void BuildModel() {
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off.   F10  FSR or DLSS.   F12  FPS counter."});
+                     L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});

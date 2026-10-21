@@ -118,7 +118,7 @@ The window that opens when you start `DriveClub.exe` has every setting. Press **
 
 **Anti-aliasing:** **Game** keeps the original. **FSR 3.1** works on any graphics card, **DLSS (RTX)** needs a GeForce RTX card; if it is not available the launcher falls back to FSR. Do not turn on the community patch "Disable motion blur and depth of field" with it: they do not work together and the game keeps its own anti-aliasing then.
 
-**Upscaling:** with FSR 3.1 or DLSS: **DLAA** (**Native** with FSR) draws every pixel; **Quality**, **Balanced**, **Performance** and **Ultra Perf.** draw the game at 1/1.5, 1/1.7, 1/2 and 1/3 of the output size and rebuild the full picture, for more FPS each. The Render resolution choice does not apply then. With upscaling, F9 shows the game's own picture stretched from the smaller size, not the full resolution. **Sharpness:** 0 to 100 (80 by default).
+**Upscaling:** with FSR 3.1 or DLSS: **DLAA** (**Native** with FSR) draws every pixel; **Quality**, **Balanced**, **Performance** and **Ultra Perf.** draw the game at 1/1.5, 1/1.7, 1/2 and 1/3 of the output size and rebuild the full picture, for more FPS each. The Render resolution choice does not apply then. With upscaling, F9 leaves FSR or DLSS on: the game draws at the smaller size, so there is no full-resolution picture to switch to. **Sharpness:** 0 to 100 (80 by default).
 
 **Anisotropic filtering:** keeps textures on roads and terrain sharp at a shallow angle. **Automatic** is 16x (4x on integrated graphics); you can also choose Off, 2x, 4x, 8x or 16x.
 
