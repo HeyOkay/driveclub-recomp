@@ -441,6 +441,15 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!RefreshGraphicsKey(sel)) {
         return nullptr;
     }
+    // bbport: the key is still built from the current state every draw; only the map probe is skipped when it
+    // equals the last draw's key. BB_PIPELINE_LASTKEY=0 probes the map every draw.
+    static const bool last_key = [] {
+        const char* env = std::getenv("BB_PIPELINE_LASTKEY");
+        return !(env && env[0] == '0');
+    }();
+    if (last_key && last_graphics_pipeline && sel.graphics_key == last_graphics_key) {
+        return last_graphics_pipeline;
+    }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
@@ -469,6 +478,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     if (!it->second->Handle()) {
         return nullptr;
     }
+    last_graphics_key = sel.graphics_key;
+    last_graphics_pipeline = it->second.get();
     return it->second.get();
 }
 
@@ -975,6 +986,7 @@ std::optional<vk::ShaderModule> PipelineCache::ReplaceShader(vk::ShaderModule mo
             if (std::holds_alternative<GraphicsPipelineKey>(key)) {
                 auto& graphics_key = std::get<GraphicsPipelineKey>(key);
                 graphics_pipelines.erase(graphics_key);
+                last_graphics_pipeline = nullptr;
             } else if (std::holds_alternative<ComputePipelineKey>(key)) {
                 auto& compute_key = std::get<ComputePipelineKey>(key);
                 compute_pipelines.erase(compute_key);

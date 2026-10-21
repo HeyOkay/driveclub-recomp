@@ -197,6 +197,11 @@ private:
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;
     tsl::robin_map<GraphicsPipelineKey, std::unique_ptr<GraphicsPipeline>> graphics_pipelines;
     PipelineSelection sel{}; ///< GPU thread selection state
+    /// bbport: the pipeline of the last draw and its key (BB_PIPELINE_LASTKEY): consecutive draws mostly select
+    /// the same pipeline, and comparing the fresh key with the last one is cheaper than hashing it and probing
+    /// the map. Forgotten when pipelines are erased.
+    GraphicsPipelineKey last_graphics_key{};
+    const GraphicsPipeline* last_graphics_pipeline = nullptr;
     ComputePipelineKey compute_key{};
     u32 num_new_pipelines{}; // new pipelines added to the cache since the game start
 
