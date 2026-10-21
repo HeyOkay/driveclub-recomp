@@ -307,16 +307,26 @@ static ABI int32_t trophy_info(int32_t ctx,int32_t handle,int32_t id,void *detai
 
 /* ---- PlayGo: fully installed package ---- */
 static int playgo_handle, playgo_chunks=-1;
+/* Many dumps lack sce_sys/playgo-chunk.dat, and the chunk count with it. The game then still asks about the chunks of
+ * its tracks and cars (its own map, scripts/playgochunks_id_map.csv): an error for those reads as "downloading" in
+ * every menu after the tutorial, which is chunk 0. Without the file every chunk number is installed. */
+static int playgo_count_known;
+static int playgo_chunk_ok(uint16_t id) { return !playgo_count_known || id<playgo_chunks; }
 static ABI int32_t playgo_init(const void *params) {
     (void)params;
     int fd=(int)runtime_file_open("/app0/sce_sys/playgo-chunk.dat",0,0);
     unsigned char header[12];
-    playgo_chunks=1;
+    playgo_chunks=1; playgo_count_known=0;
     if (fd>=0) {
-        if (runtime_file_read(fd,header,sizeof(header))==sizeof(header)) playgo_chunks=header[10]|header[11]<<8;
+        if (runtime_file_read(fd,header,sizeof(header))==sizeof(header)) {
+            playgo_chunks=header[10]|header[11]<<8;
+            playgo_count_known=playgo_chunks>0;
+            if (!playgo_count_known) playgo_chunks=1;
+        }
         runtime_file_close(fd);
     }
-    printf("Runtime: PlayGo initialized; %d chunks, all installed locally\n",playgo_chunks);
+    if (playgo_count_known) printf("Runtime: PlayGo initialized; %d chunks, all installed locally\n",playgo_chunks);
+    else printf("Runtime: PlayGo initialized; no sce_sys/playgo-chunk.dat in the dump, every chunk reads installed locally\n");
     return 0;
 }
 static ABI int32_t playgo_open(int32_t *handle,const void *param) {
@@ -337,8 +347,10 @@ static ABI int32_t playgo_locus(int32_t handle,const uint16_t *ids,uint32_t coun
     if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
     if (!ids || !loci) return PLAYGO_BAD_POINTER;
     if (!count) return PLAYGO_BAD_SIZE;
+    static unsigned logged;
+    if (logged<20) { ++logged; printf("Runtime: scePlayGoGetLocus %u chunk(s) from %u\n",count,ids[0]); }
     for (uint32_t i=0;i<count;++i) {
-        if (ids[i]>=playgo_chunks) return PLAYGO_BAD_CHUNK;
+        if (!playgo_chunk_ok(ids[i])) return PLAYGO_BAD_CHUNK;
         loci[i]=3; /* LocalFast */
     }
     return 0;
@@ -378,7 +390,7 @@ static ABI int32_t playgo_progress(int32_t handle,const uint16_t *ids,uint32_t c
     if (handle!=playgo_handle || !handle) return PLAYGO_BAD_HANDLE;
     if (!ids || !out) return PLAYGO_BAD_POINTER;
     if (!count) return PLAYGO_BAD_SIZE;
-    for (uint32_t i=0;i<count;++i) if (ids[i]>=playgo_chunks) return PLAYGO_BAD_CHUNK;
+    for (uint32_t i=0;i<count;++i) if (!playgo_chunk_ok(ids[i])) return PLAYGO_BAD_CHUNK;
     out[0]=1; out[1]=1; /* progressSize == totalSize: complete (non-zero, so no caller divides by zero) */
     return 0;
 }
