@@ -189,6 +189,11 @@ private:
 
     void Run(std::stop_token stop) {
         Common::SetCurrentThreadName("bb:DrawRec");
+        // The renderer's bottleneck: a core of its own and the GPU threads' priority (BB_CORE_OWNERS bit 2).
+        if (BbThreads::CoreOwners() & BbThreads::kDrawThread) {
+            BbThreads::MakeImportant();
+            BbThreads::ReserveCoreForCurrentThread(BbThreads::kDrawThread);
+        }
         on_stage_b = true;
         stage_b_tid.store(static_cast<u32>(gettid()), std::memory_order_release);
         BbStats::pipe_stage_b.store(static_cast<u32>(gettid()), std::memory_order_relaxed);

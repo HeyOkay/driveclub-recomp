@@ -284,6 +284,7 @@ void Scheduler::SyncRecording() {
 void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("bb:VkRecorder");
     BbThreads::MakeImportant();
+    BbThreads::ReserveCoreForCurrentThread(BbThreads::kRecorderThread);
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,
         // and a sleeping recorder costs the GPU thread a wake-up syscall per kick. With few
