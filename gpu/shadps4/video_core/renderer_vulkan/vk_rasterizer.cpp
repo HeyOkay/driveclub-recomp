@@ -839,7 +839,8 @@ void Rasterizer::RetireSubmission() {
     }
 }
 
-bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle) {
+bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 toggle,
+                            bool writes_guest_memory) {
     if (!UseDrawPipe() || BbToggle::Disabled(toggle)) {
         DrainDrawPipe(DrawPipe::ReasonRasterizer);
         task(*this, static_cast<const u8*>(data));
@@ -852,7 +853,12 @@ bool Rasterizer::RunInOrder(OrderedTask task, const void* data, u32 size, u64 to
     BbCopy::FlushBatch();
     draw_pipe->Commit(total);
     ResolvePendingWrites();
-    if (toggle == BbToggle::PipelinedMemoryWrites) {
+    // bbport: BB_MEMWAIT_ALL=1: every PipelinedMemoryWrites task holds back the next selection, as before.
+    static const bool all_tasks = [] {
+        const char* env = std::getenv("BB_MEMWAIT_ALL");
+        return env && env[0] == '1';
+    }();
+    if (toggle == BbToggle::PipelinedMemoryWrites && (writes_guest_memory || all_tasks)) {
         last_memory_task = draw_pipe->Head();
     }
     return true;

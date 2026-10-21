@@ -868,7 +868,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     // may still be queued on the draw recording thread).
                     if (rasterizer) {
                         rasterizer->RunInOrder(&SignalFlip, header, sizeof(u32),
-                                               BbToggle::PipelinedMemoryWrites);
+                                               BbToggle::PipelinedMemoryWrites, false);
                     } else {
                         Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip);
                     }
@@ -1244,10 +1244,11 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
                     break;
                 }
+                const bool to_memory = dma_data->dst_sel == DmaDataDst::Memory ||
+                                       dma_data->dst_sel == DmaDataDst::MemoryUsingL2;
                 if (rasterizer->RunInOrder(&RunDmaData, dma_data, sizeof(PM4DmaData),
-                                           BbToggle::PipelinedMemoryWrites) &&
-                    (dma_data->dst_sel == DmaDataDst::Memory ||
-                     dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                                           BbToggle::PipelinedMemoryWrites, to_memory) &&
+                    to_memory) {
                     rasterizer->NotePendingGpuWrite(dma_data->DstAddress<VAddr>(),
                                                     dma_data->NumBytes());
                 }

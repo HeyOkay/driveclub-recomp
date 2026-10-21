@@ -111,8 +111,10 @@ public:
     /// thread while the draw pipeline is in use (PipelinedTasks), else here after a drain.
     using OrderedTask = void (*)(Rasterizer& rasterizer, const u8* data);
     /// Returns true when the task was handed to the recording thread (not run yet).
+    /// `writes_guest_memory`: a PipelinedMemoryWrites task that writes guest memory, so the next
+    /// pipeline selection waits for it (WaitQueuedMemoryWrites); a flip signal or a DMA into GDS does not.
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
-                    u64 toggle = BbToggle::PipelinedTasks);
+                    u64 toggle = BbToggle::PipelinedTasks, bool writes_guest_memory = true);
     /// bbport: stage A, before a pipeline selection: WriteData/DMA queued for stage B may write the
     /// descriptor tables the selection walks; wait until stage B has run the last one.
     void WaitQueuedMemoryWrites();
