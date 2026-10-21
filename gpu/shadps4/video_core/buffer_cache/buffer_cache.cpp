@@ -284,7 +284,15 @@ void BufferCache::ExtendWriteFault(VAddr device_addr) {
     memory_tracker->ExtendWriteFault(Common::AlignDown(device_addr, window), window);
 }
 
-static constexpr u64 READBACK_WINDOW_SIZE = 512_KB;
+// bbport: BB_READBACK_WINDOW_KB (power of two, 16-4096, default 512): the unit of an offloaded readback, of its wait
+// and of the early copies. A read waits for every GPU write recorded in its window, and an early copy is dropped when
+// anything else in the window is written: DriveClub reads a 4-byte count 8 KB below a compute shader's output that
+// is rewritten every frame. The GPU write sequence that validates early copies is per 16 KB (region_manager.h).
+static const u64 READBACK_WINDOW_SIZE = [] {
+    const char* env = std::getenv("BB_READBACK_WINDOW_KB");
+    const u64 kib = env ? std::strtoull(env, nullptr, 10) : 512;
+    return std::bit_ceil(std::clamp<u64>(kib, 16, 4096)) * 1024;
+}();
 
 namespace {
 FILE* ReadbackLog();
@@ -327,7 +335,7 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
 
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
-        constexpr u64 WindowSize = READBACK_WINDOW_SIZE;
+        const u64 WindowSize = READBACK_WINDOW_SIZE;
         const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
         // Every sync with the GPU costs a full frame of waiting, so one read downloads all the
         // GPU-modified data of the arena at once instead of one window per fault.
