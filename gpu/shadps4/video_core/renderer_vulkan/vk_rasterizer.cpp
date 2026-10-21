@@ -4,6 +4,7 @@
 #include <array>
 #include "common/bytes_equal.h"
 #include <cstring>
+#include <cstdlib>
 #include <optional>
 #include <set>
 #include <xxhash.h>
@@ -2555,7 +2556,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
                 if (size != vsharp.GetSize()) {
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
@@ -2564,8 +2565,66 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     // bbport: BB_READBACK_LOG names the shader that wrote what the guest reads back.
                     BbTrace::writer_tag.store(stage.pgm_hash ^ (u64(stage.sw_stage) << 60), std::memory_order_relaxed);
                 }
-                const auto [buffer, offset] = buffer_cache.ObtainBuffer(
+                auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                // DriveClub reads hardware HTILE for local-light/probe culling. Vulkan depth
+                // writes do not update that guest metadata; captured tiles stay at 0x0000000f.
+                // In this shader bits 18..31 are Zmin and bits 12..17 encode the Z span through
+                // a 64-entry table. Index 63 expands to 16383, so 0x0003f00f covers [0,1].
+                // Local volumes are tested against actual per-pixel positions by 2c918c06.
+                static const bool lighting_cull_fix = [] {
+                    const char* value = std::getenv("BB_LIGHTING_CULL_FIX");
+                    return !value || std::atoi(value) != 0; // enabled by default; 0 restores baseline
+                }();
+                if (lighting_cull_fix && stage.pgm_hash == 0xbfce517cull && buffer_index == 1) {
+                    runtime.FillBuffer(buffer, offset, size, 0x0003f00fu);
+                    static u32 logged{};
+                    if (logged++ < 8) {
+                        LOG_WARNING(Render_Vulkan,
+                                    "DriveClub culling: expanded HTILE at {:#x}, {} bytes",
+                                    vsharp.base_address, size);
+                    }
+                }
+                bool host_lighting_list = false;
+                const bool list_writer = stage.pgm_hash == 0xbfce517cull && buffer_index == 5;
+                const bool list_reader = stage.pgm_hash == 0x2c918c06ull && buffer_index == 1;
+                if (lighting_cull_fix && (list_writer || list_reader) && !stage.buffers.empty()) {
+                    const auto constants = stage.buffers[0].GetSharp(stage);
+                    if (constants.GetSize() >= 112 &&
+                        memory->IsValidGpuMapping(constants.base_address, 112)) {
+                        const auto* words = reinterpret_cast<const u32*>(constants.base_address);
+                        const u32 w = words[22], h = words[23];
+                        if (w > 0 && h > 0 && w <= 8192 && h <= 8192) {
+                            const u64 tiles = u64((w + 15) / 16) * ((h + 15) / 16);
+                            const u64 required = tiles * 100; // count + up to 24 volume IDs
+                            if (required > size) {
+                                auto& replacement = lighting_lists[vsharp.base_address];
+                                if (list_writer && (!replacement || replacement->SizeBytes() < required)) {
+                                    if (replacement) {
+                                        scheduler.DeferOperation([old = std::move(replacement)] {});
+                                    }
+                                    replacement = std::make_unique<VideoCore::Buffer>(
+                                        instance, 0, required, VideoCore::MemoryType::DeviceLocal,
+                                        "DriveClub expanded lighting tile list");
+                                    LOG_WARNING(Render_Vulkan,
+                                                "DriveClub culling: resized host tile list {} -> {} bytes ({}x{})",
+                                                size, required, w, h);
+                                }
+                                if (replacement && replacement->SizeBytes() >= required) {
+                                    buffer = replacement.get();
+                                    offset = 0;
+                                    size = required;
+                                    host_lighting_list = true;
+                                    if (list_writer) {
+                                        // The cached culling shader also guards writes with the
+                                        // original descriptor's record count in the first live UD.
+                                        push_data.ud_regs[0] = static_cast<u32>(tiles);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 const u64 offset_aligned = Common::AlignDown(offset, alignment);
                 const u64 adjust = offset - offset_aligned;
                 if (adjust % 4 != 0) {
@@ -2586,7 +2645,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                     needs_barrier |=
                         runtime.IsBufferAccessed(buffer, offset, size, desc.is_written);
                 }
-                if (desc.is_written) {
+                if (desc.is_written && !host_lighting_list) {
                     // Raw storage-buffer writes can also make an aliased cached image stale.
                     texture_cache.InvalidateMemoryFromGPU(vsharp.base_address, size);
                 }
