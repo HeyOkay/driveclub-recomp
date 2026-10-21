@@ -417,7 +417,15 @@ const char* const kSoftLock[6] = {"game", "off", "540", "720", "900", "1080"};
 constexpr char kLayoutMarker[] = "# DriveClub racing layout";  // the game replaces a default.ini without it
 
 bool PhysicsChosen() { return g_ffb_model >= 0 && g_c[g_ffb_model].sel == 0; }
-bool RowHidden(const Ctl& c) { return c.physics_only && !PhysicsChosen(); }
+bool UpscaleActive();
+// Rows that do nothing with the other choices: the physics settings with Original Physics; Upscaling and
+// Sharpness without FSR or DLSS; Render resolution while Upscaling sets the render size.
+bool RowHidden(const Ctl& c) {
+  if (c.physics_only && !PhysicsChosen()) return true;
+  if ((g_up >= 0 && &c == &g_c[g_up]) || (g_sharp >= 0 && &c == &g_c[g_sharp])) return g_aa >= 0 && g_c[g_aa].sel == 0;
+  if (g_inres >= 0 && &c == &g_c[g_inres]) return UpscaleActive();
+  return false;
+}
 bool IsWheelRow(const Ctl& c) { return c.patches[0].rfind("@ffb:", 0) == 0 || c.patches[0].rfind("@wheel", 0) == 0; }
 bool IsFfbKeyRow(const Ctl& c) { return c.patches[0].rfind("@ffb:", 0) == 0; }
 std::wstring WheelIniPath() { return g_data + L"\\user\\input_config\\default.ini"; }
@@ -2596,7 +2604,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           }
           g_changed = true;
         } else if (seg >= 0) {
-          const bool model_changed = c == g_ffb_model && ctl.sel != seg;
+          // choices that show or hide other rows (RowHidden)
+          const bool model_changed = (c == g_ffb_model || c == g_aa || c == g_up) && ctl.sel != seg;
           ctl.sel = seg;
           if (c == g_preset) ApplyPreset(seg);
           else if (c == g_outres || c == g_inres || c == g_wide) {
@@ -2618,7 +2627,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           if (IsDriveRow(ctl)) DeriveDrivePreset();
           if (c == g_aa) NameNativeUpscale();
           g_changed = true;
-          if (model_changed) Relayout(h);  // the physics settings show or hide
+          if (model_changed) Relayout(h);  // rows show or hide
         }
       }
       SetCapture(h);
@@ -2745,6 +2754,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
       // LAUNCHER_SNAPSHOT_INFO = a row's name: its details panel
       if (const char* name = std::getenv("LAUNCHER_SNAPSHOT_INFO")) {
         for (size_t k = 0; k < g_c.size(); ++k) if (Narrow(g_c[k].label) == name) g_info_open = int(k);
+      }
+      // LAUNCHER_SNAPSHOT_SET = <row's name>=<choice number>: that choice instead of the saved one
+      if (const char* set = std::getenv("LAUNCHER_SNAPSHOT_SET")) {
+        const std::string s = set;
+        const size_t eq = s.rfind('=');
+        for (size_t k = 0; eq != std::string::npos && k < g_c.size(); ++k)
+          if (Narrow(g_c[k].label) == s.substr(0, eq)) g_c[k].sel = std::atoi(s.c_str() + eq + 1);
       }
       Layout();
       const int w = int(g_win_w * g_scale), h = int(TotalHeight() * g_scale);
