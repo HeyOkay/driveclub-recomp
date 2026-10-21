@@ -27,6 +27,8 @@ std::string_view BufferTypeName(MemoryType type) {
         return "HostCached";
     case MemoryType::Stream:
         return "Stream";
+    case MemoryType::StreamRing:
+        return "StreamRing";
     case MemoryType::DeviceLocal:
         return "DeviceLocal";
     case MemoryType::Sparse:
@@ -66,13 +68,45 @@ static StreamPlacement StreamMemory() {
     return placement;
 }
 
+// bbport: BB_RING_MEMORY=device|host|cached: the constant ring (stage A's copies of small read-only guest buffers,
+// read by every draw's shaders) placed apart from the stream buffer. Default: as the stream buffer (cached system
+// memory on NVIDIA). On an RTX 3070 Laptop (720p render, 4K output, uncapped) the ring in VRAM gives much
+// steadier frames (1% low 55 -> 65, p99 16 -> 13 ms, jitter 2.0 -> 0.65) but ~7% fewer FPS: stage A, the limit,
+// writes 7-9 MB a frame through the BAR (+0.4 ms), and the GPU saves only ~0.6 ms a frame of constant reads.
+static StreamPlacement RingMemory() {
+    static const StreamPlacement placement = [] {
+        const char* env = std::getenv("BB_RING_MEMORY");
+        if (!env) {
+            return StreamMemory();
+        }
+        const std::string_view value = env;
+        if (value == "device") {
+            return StreamPlacement::Device;
+        }
+        return value == "host" ? StreamPlacement::Host : StreamPlacement::Cached;
+    }();
+    static const bool reported = [] {
+        std::printf("GPU: constant ring in %s memory\n",
+                    placement == StreamPlacement::Device ? "device" : placement == StreamPlacement::Host ? "host" : "cached host");
+        return true;
+    }();
+    (void)reported;
+    return placement;
+}
+static bool IsStream(MemoryType type) {
+    return type == MemoryType::Stream || type == MemoryType::StreamRing;
+}
+static StreamPlacement PlacementOf(MemoryType type) {
+    return type == MemoryType::StreamRing ? RingMemory() : StreamMemory();
+}
+
 void SetStreamPlacementDefault(u32 vendor_id) {
     // NVIDIA 0x10DE, Intel 0x8086: cached system memory. AMD keeps VRAM (Smart Access Memory).
     stream_default = int(vendor_id == 0x1002 ? StreamPlacement::Device : StreamPlacement::Cached);
 }
 
 [[nodiscard]] VkMemoryPropertyFlags MemoryUsagePreferredVmaFlags(MemoryType type) {
-    if (type == MemoryType::Stream && StreamMemory() == StreamPlacement::Cached) {
+    if (IsStream(type) && PlacementOf(type) == StreamPlacement::Cached) {
         return VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
     }
     return type != MemoryType::DeviceLocal ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
@@ -80,12 +114,13 @@ void SetStreamPlacementDefault(u32 vendor_id) {
 }
 
 [[nodiscard]] VmaAllocationCreateFlags MemoryUsageVmaFlags(MemoryType type) {
-    if (type == MemoryType::Stream && StreamMemory() == StreamPlacement::Cached) {
+    if (IsStream(type) && PlacementOf(type) == StreamPlacement::Cached) {
         return VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
     }
     switch (type) {
     case MemoryType::HostUncached:
     case MemoryType::Stream:
+    case MemoryType::StreamRing:
         return VMA_ALLOCATION_CREATE_MAPPED_BIT |
                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
     case MemoryType::HostCached:
@@ -97,12 +132,13 @@ void SetStreamPlacementDefault(u32 vendor_id) {
 }
 
 [[nodiscard]] VmaMemoryUsage MemoryUsageVma(MemoryType type) {
-    if (type == MemoryType::Stream && StreamMemory() != StreamPlacement::Device) {
+    if (IsStream(type) && PlacementOf(type) != StreamPlacement::Device) {
         return VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
     }
     switch (type) {
     case MemoryType::DeviceLocal:
     case MemoryType::Stream:
+    case MemoryType::StreamRing:
         return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     case MemoryType::HostUncached:
     case MemoryType::HostCached:

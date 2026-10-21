@@ -36,6 +36,7 @@ enum class MemoryType : u8 {
     HostCached,   ///< Requires a host visible memory type optimized for GPU to CPU readbacks
     Stream,       ///< Requests device local host visible buffer, falling back host memory.
     Sparse,       ///< Requires an unbacked sparse resident buffer.
+    StreamRing,   ///< bbport: Stream memory for the constant ring, placed by BB_RING_MEMORY (buffer.cpp).
 };
 
 constexpr vk::BufferUsageFlags ReadFlags =
