@@ -95,6 +95,15 @@ AvPlayer::AvPlayer(const AvPlayerInitData& data)
     : m_init_data(StubInitData(data)), m_init_data_original(data),
       m_state(std::make_unique<AvPlayerState>(m_init_data)) {}
 
+AvPlayer::~AvPlayer() {
+    // The controller thread runs the game's event callback, which can call back into this
+    // player (sceAvPlayerGetStreamInfo on StateReady). Stop it while m_state is still set:
+    // unique_ptr clears m_state before ~AvPlayerState runs.
+    if (m_state) {
+        m_state->StopControllerThread();
+    }
+}
+
 s32 AvPlayer::PostInit(const AvPlayerPostInitData& data) {
     m_state->PostInit(data);
     return ORBIS_OK;
@@ -130,7 +139,7 @@ s32 AvPlayer::GetStreamCount() {
 }
 
 s32 AvPlayer::GetStreamInfo(u32 stream_index, AvPlayerStreamInfo& info) {
-    if (!m_state->GetStreamInfo(stream_index, info)) {
+    if (m_state == nullptr || !m_state->GetStreamInfo(stream_index, info)) {
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED;
     }
     return ORBIS_OK;

@@ -40,6 +40,7 @@ public:
     bool IsActive();
     u64 CurrentTime();
     bool SetLooping(bool is_looping);
+    void StopControllerThread();
 
 private:
     // Event Replacement
