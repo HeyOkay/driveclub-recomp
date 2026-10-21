@@ -1557,7 +1557,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const bool state_only =
                 state_nodrain && queue.tmp_dwords == 0 && (peek->type == 2 || (peek->type == 3 && no_drain));
             if (!state_only) {
-                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+                // By packet (the stats print opcode reasons by name; type-3 only, else "compute").
+                rasterizer->DrainDrawPipe(peek->type == 3 && queue.tmp_dwords == 0
+                                              ? static_cast<u32>(op)
+                                              : Vulkan::DrawPipe::ReasonCompute);
             }
         }
 

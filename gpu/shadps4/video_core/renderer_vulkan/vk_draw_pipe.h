@@ -168,7 +168,10 @@ public:
     /// Statistics (stage A): packets, drains that had to wait, cycles waited, cycles stage B
     /// spent running packets.
     u64 packets = 0, drains = 0, drain_cycles = 0;
-    std::atomic<u64> busy_cycles{0};
+    /// Stage B adds to it after every packet: a cache line of its own, apart from stage A's counters above and its
+    /// write position below (sharing one cost both stages a cache miss per packet).
+    alignas(64) std::atomic<u64> busy_cycles{0};
+    char busy_cycles_line[56]{};
 
 private:
     struct Header {
