@@ -3532,6 +3532,10 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
                     (unsigned long long)texture_set_why[2], (unsigned long long)texture_set_why[3]);
         std::printf("  scene proxies sampled directly: %llu bindings\n",
                     static_cast<unsigned long long>(proxy_samples));
+        std::printf("  dynamic state memo: %llu hits, %llu misses\n",
+                    static_cast<unsigned long long>(dyn_memo_hits),
+                    static_cast<unsigned long long>(dyn_memo_misses));
+        dyn_memo_hits = dyn_memo_misses = 0;
         proxy_samples = 0;
         texture_set_why = {};
         begin_memo_hits = begin_memo_misses = texture_set_hits = texture_set_misses = 0;
@@ -4113,11 +4117,48 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState();
-    UpdateDepthStencilState();
-    UpdatePrimitiveState(is_indexed);
-    UpdateRasterizationState();
-    UpdateColorBlendingState(pipeline);
+    static const bool memo_on = [] {
+        const char* env = std::getenv("BB_DYN_MEMO");
+        return !(env && env[0] == '0');
+    }();
+    auto& m = dyn_memo;
+    const u32* reg_words = Regs().reg_array.data();
+    bool same = memo_on && m.valid && m.pipeline == pipeline && m.is_indexed == is_indexed &&
+                m.feedback_loop == attachment_feedback_loop && m.jitter == draw_jitter &&
+                m.scale == target_scale;
+    if (same) {
+        // Fixed-size SSE compares (a memcmp call per range costs more than the work it saves).
+        const u32* c = m.words.data();
+        same = Common::BytesEqual<20 * 4>(reg_words + 0xA000, c) &&
+               Common::BytesEqual<52 * 4>(reg_words + 0xA080, c + 20) &&
+               Common::BytesEqual<108 * 4>(reg_words + 0xA103, c + 72) &&
+               Common::BytesEqual<7 * 4>(reg_words + 0xA200, c + 180) && reg_words[0xA282] == c[187] &&
+               reg_words[0xA292] == c[188] && reg_words[0xA2A5] == c[189] &&
+               Common::BytesEqual<5 * 4>(reg_words + 0xA2DF, c + 190) && reg_words[0xC242] == c[195];
+    }
+    if (same) {
+        ++dyn_memo_hits;
+    } else {
+        ++dyn_memo_misses;
+        UpdateViewportScissorState();
+        UpdateDepthStencilState();
+        UpdatePrimitiveState(is_indexed);
+        UpdateRasterizationState();
+        UpdateColorBlendingState(pipeline);
+        if (memo_on) {
+            u32* cached = m.words.data();
+            for (const auto& [first, count] : DynMemo::Ranges) {
+                std::memcpy(cached, reg_words + first, count * sizeof(u32));
+                cached += count;
+            }
+            m.pipeline = pipeline;
+            m.is_indexed = is_indexed;
+            m.feedback_loop = attachment_feedback_loop;
+            m.jitter = draw_jitter;
+            m.scale = target_scale;
+            m.valid = true;
+        }
+    }
 
     auto& dynamic_state = scheduler.GetDynamicState();
     dynamic_state.CommitWith(instance.IsDepthBoundsSupported(),

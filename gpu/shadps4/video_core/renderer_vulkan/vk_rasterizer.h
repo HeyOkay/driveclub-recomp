@@ -218,6 +218,25 @@ private:
         std::array<float, 2> target_scale{};
     } begin_memo;
     u64 begin_memo_hits = 0, begin_memo_misses = 0;
+    /// bbport: inputs of the last UpdateDynamicState: the register words its five
+    /// Update* functions read, and the members they use. Equal inputs give equal dynamic state, which is still
+    /// in DynamicState (only those functions write it), so they are skipped; CommitWith runs every draw.
+    /// BB_DYN_MEMO=0 turns it off.
+    struct DynMemo {
+        static constexpr std::array<std::pair<u32, u32>, 9> Ranges{{
+            {0xA000, 20}, {0xA080, 52}, {0xA103, 108}, {0xA200, 7}, {0xA282, 1},
+            {0xA292, 1}, {0xA2A5, 1}, {0xA2DF, 5}, {0xC242, 1}}};
+        static constexpr u32 Words = 196;
+        bool valid = false;
+        const GraphicsPipeline* pipeline = nullptr;
+        bool is_indexed = false;
+        bool feedback_loop = false;
+        std::array<float, 2> jitter{};
+        std::array<float, 2> scale{};
+        std::array<u32, Words> words{};
+    };
+    mutable DynMemo dyn_memo;
+    mutable u64 dyn_memo_hits = 0, dyn_memo_misses = 0;
     void Resolve();
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
