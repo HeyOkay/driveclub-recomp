@@ -192,6 +192,16 @@ void PollHotkeys() {
     }
     f9_down = f9;
     f10_down = f10;
+    // Page Up / Page Down: HDR brightness (SDR white) in steps of 25 nits, kept for the next start.
+    static bool page_up_down = false, page_down_down = false;
+    const bool brighter = edge(VK_PRIOR, page_up_down), darker = edge(VK_NEXT, page_down_down);
+    if (s.hdr_output && (brighter || darker)) {
+        const int now = int(std::lround(s.hdr_paper.load() / 25.0f)) * 25;
+        const int next = std::clamp(now + (brighter ? 25 : -25), 100, 600);
+        s.hdr_paper = float(next);
+        BbSettings::SaveHdrBrightness(next);
+        Note("HDR brightness " + std::to_string(next) + " nits   (Page Up / Page Down)");
+    }
     // F8: frame generation paused and resumed (everything stays set up).
     static bool f8_down = false;
     const bool f8 = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;

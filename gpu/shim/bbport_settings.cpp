@@ -17,6 +17,13 @@ const char* Path() {
     return env && env[0] ? env : "bbport.ini";
 }
 
+// hdr.ini in the settings file's folder: the HDR brightness set while playing.
+std::string HdrIniPath() {
+    const std::string config = Path();
+    const size_t slash = config.find_last_of("/\\");
+    return (slash == std::string::npos ? std::string() : config.substr(0, slash + 1)) + "hdr.ini";
+}
+
 float Clamp(float v, float lo, float hi) {
     return std::clamp(v, lo, hi);
 }
@@ -68,6 +75,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
                 v.aa_scale = a;
             }
         }
+    } else if (key == "hdr_paper") {
+        v.hdr_paper = Clamp(f, 80.0f, 600.0f);
+    } else if (key == "hdr_peak") {
+        v.hdr_peak = Clamp(f, 400.0f, 10000.0f);
     } else if (key == "dlss_model") {
         // auto, or the preset's letter
         v.dlss_model = value == "k" || value == "K" ? 11 : value == "l" || value == "L" ? 12
@@ -127,6 +138,16 @@ void Load() {
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
     }
+    // The HDR brightness last set while playing (the launcher passes its slider, which shows it).
+    if (FILE* file = std::fopen(HdrIniPath().c_str(), "r")) {
+        char line[64];
+        while (std::fgets(line, sizeof(line), file)) {
+            if (std::strncmp(line, "paper=", 6) == 0) {
+                Set(v, "hdr_paper", std::string(line + 6));
+            }
+        }
+        std::fclose(file);
+    }
     // Environment overrides (scripts, A/B tests).
     if (const char* env = std::getenv("BB_UPSCALER")) {
         v.upscaler = UpscalerOff;
@@ -141,6 +162,7 @@ void Load() {
         {"BB_UPSCALE_PRESET", "preset"},            {"BB_OBJECT_MOTION", "object_motion"},
         {"BB_AA", "aa"},                            {"BB_AA_SCALE", "aa_scale"},                            {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
         {"BB_FRAME_GEN_FIT_DISPLAY", "frame_gen_fit_display"}, {"BB_DLSS_MODEL", "dlss_model"},
+        {"BB_HDR_PAPER", "hdr_paper"},                {"BB_HDR_PEAK", "hdr_peak"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env)) {
@@ -261,6 +283,13 @@ const char* FrameGenName(int frame_gen) {
 const char* AaName(int aa) {
     static constexpr const char* names[AaCount] = {"off", "fsr3", "dlss"};
     return names[std::clamp(aa, 0, AaCount - 1)];
+}
+
+void SaveHdrBrightness(int nits) {
+    if (FILE* file = std::fopen(HdrIniPath().c_str(), "w")) {
+        std::fprintf(file, "paper=%d\n", nits);
+        std::fclose(file);
+    }
 }
 
 const char* AaScaleName(int scale) {

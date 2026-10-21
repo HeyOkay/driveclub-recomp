@@ -172,9 +172,23 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     // bbport: frames are composed in RGBA8 (what frame generation reads and writes) and
     // blitted into the swapchain's format.
     pp_pass.Create(device, FrameGenerator::ColorFormat);
+    // bbport: HDR output (BB_HDR=1, display in HDR mode): the swapchain in HDR10 from the start,
+    // each frame converted by hdr_pass, and the overlay drawn into the SDR frame before that.
+    if (EmulatorSettings.IsHdrAllowed()) {
+        if (swapchain.HasHDR()) {
+            swapchain.SetHDR(true);
+            hdr_output = true;
+            hdr_pass.Create(device, instance.GetAllocator(), vk::Format::eA2B10G10R10UnormPack32);
+            BbSettings::Get().hdr_output = true;
+            std::printf("HDR: HDR10 output, paper white %.0f nits, peak %.0f nits\n",
+                        BbSettings::Get().hdr_paper.load(), BbSettings::Get().hdr_peak.load());
+        } else {
+            std::printf("HDR: the display offers no HDR10 output (Windows HDR off?): SDR\n");
+        }
+    }
     // bbport: the overlay draws over every presented image, generated ones included: its
     // vertex buffers must not be reused while one of them is still drawn.
-    BbOverlay::Init(instance, swapchain.GetSurfaceFormat().format,
+    BbOverlay::Init(instance, hdr_output ? FrameGenerator::ColorFormat : swapchain.GetSurfaceFormat().format,
                     num_images * (FrameGenerator::MaxGenerated + 1));
 
     frame_generator = std::make_unique<FrameGenerator>(instance, draw_scheduler);
@@ -364,7 +378,42 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     frame->width = width;
     frame->height = height;
 
-    frame->is_hdr = swapchain.GetHDR();
+    frame->is_hdr = GameHdr();
+
+    // bbport: HDR output: the HDR10 picture presented in place of the frame (same size).
+    if (frame->hdr_view) {
+        device.destroyImageView(frame->hdr_view);
+        frame->hdr_view = vk::ImageView{};
+    }
+    if (frame->hdr_image) {
+        vmaDestroyImage(instance.GetAllocator(), frame->hdr_image, frame->hdr_allocation);
+        frame->hdr_image = vk::Image{};
+    }
+    frame->hdr_ready = false;
+    if (hdr_output) {
+        VkImageCreateInfo hdr_info = static_cast<VkImageCreateInfo>(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = vk::Format::eA2B10G10R10UnormPack32,
+            .extent = {width, height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
+        });
+        VkImage hdr_image{};
+        VmaAllocationCreateInfo over_budget = alloc_info;
+        over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        if (vmaCreateImage(instance.GetAllocator(), &hdr_info, &over_budget, &hdr_image,
+                           &frame->hdr_allocation, nullptr) == VK_SUCCESS) {
+            frame->hdr_image = vk::Image{hdr_image};
+            frame->hdr_view = Check<"create hdr frame view">(device.createImageView({
+                .image = frame->hdr_image,
+                .viewType = vk::ImageViewType::e2D,
+                .format = vk::Format::eA2B10G10R10UnormPack32,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            }));
+        }
+    }
 }
 
 Frame* Presenter::PrepareLastFrame() {
@@ -583,6 +632,66 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
 
+    // bbport: HDR output: the overlay over the SDR frame, then the frame and the game's picture
+    // before its UI into the HDR10 image presented in its place.
+    frame->hdr_ready = false;
+    if (hdr_output && frame->hdr_image) {
+        const auto frame_barrier = [&](vk::Image image, vk::ImageLayout from, vk::ImageLayout to,
+                                       vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
+                                       vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
+            const vk::ImageMemoryBarrier2 b{
+                .srcStageMask = src,
+                .srcAccessMask = src_access,
+                .dstStageMask = dst,
+                .dstAccessMask = dst_access,
+                .oldLayout = from,
+                .newLayout = to,
+                .image = image,
+                .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+            };
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        };
+        const auto attachment = vk::PipelineStageFlagBits2::eColorAttachmentOutput;
+        const auto write = vk::AccessFlagBits2::eColorAttachmentWrite;
+        const auto read_access = vk::AccessFlagBits2::eColorAttachmentRead | write;
+        if (BbOverlay::Visible()) {
+            frame_barrier(frame->image, vk::ImageLayout::eGeneral,
+                          vk::ImageLayout::eColorAttachmentOptimal, attachment, write, attachment,
+                          read_access);
+            BbOverlay::Render(cmdbuf, frame->image_view, {frame->width, frame->height});
+            frame_barrier(frame->image, vk::ImageLayout::eColorAttachmentOptimal,
+                          vk::ImageLayout::eShaderReadOnlyOptimal, attachment, write,
+                          vk::PipelineStageFlagBits2::eFragmentShader,
+                          vk::AccessFlagBits2::eShaderRead);
+        } else {
+            frame_barrier(frame->image, vk::ImageLayout::eGeneral,
+                          vk::ImageLayout::eShaderReadOnlyOptimal, attachment, write,
+                          vk::PipelineStageFlagBits2::eFragmentShader,
+                          vk::AccessFlagBits2::eShaderRead);
+        }
+        frame_barrier(frame->hdr_image, vk::ImageLayout::eUndefined,
+                      vk::ImageLayout::eColorAttachmentOptimal, vk::PipelineStageFlagBits2::eAllCommands,
+                      vk::AccessFlagBits2::eNone, attachment, write);
+        const vk::ImageView hudless = rasterizer->HdrHudless(cpu_address);
+        const vk::ImageView scene = rasterizer->HdrScene(cpu_address);
+        const auto& s = BbSettings::Get();
+        const HostPasses::HdrPass::Params params{
+            .paper_nits = s.hdr_paper.load(),
+            .peak_nits = s.hdr_peak.load(),
+            .has_hudless = hudless ? 1.0f : 0.0f,
+        };
+        hdr_pass.Render(cmdbuf, frame->image_view, hudless, scene, frame->hdr_view,
+                        {frame->width, frame->height}, params);
+        frame_barrier(frame->hdr_image, vk::ImageLayout::eColorAttachmentOptimal,
+                      vk::ImageLayout::eGeneral, attachment, write,
+                      vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eMemoryRead);
+        frame_barrier(frame->image, vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eGeneral,
+                      vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead,
+                      vk::PipelineStageFlagBits2::eAllCommands,
+                      vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite);
+        frame->hdr_ready = true;
+    }
+
     // bbport: frame generation: the frames between the previous frame and this one.
     frame->generated_count = 0;
     frame_generator->SetOutputSize(frame->width, frame->height);
@@ -593,7 +702,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // bbport: also for the upscaled display (outputs other than 1080p): composed the same way.
     if (frame_generator->Wanted() && frame_generator->Paused()) {
         frame_generator->Skip(); // paused with F8: everything stays set up
-    } else if (!frame_generator->Wanted() || frame->is_hdr) {
+    } else if (!frame_generator->Wanted() || frame->is_hdr || hdr_output) {
         ReleaseFrameGen(frame);
         frame_generator->Skip(); // HDR: this frame's inputs are not used
     } else {
@@ -708,6 +817,7 @@ Frame* Presenter::PrepareBlankFrame(bool present_thread) {
     // Request a free presentation frame.
     Frame* frame = GetRenderFrame();
     frame->generated_count = 0;
+    frame->hdr_ready = false; // black: the frame itself is presented
 
     auto& scheduler = present_thread ? present_scheduler : draw_scheduler;
     scheduler.EndRendering();
@@ -1076,7 +1186,12 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
                    vk::to_string(reset_result));
     }
 
-    // bbport: the frame is blitted (letterboxed) straight into the swapchain image.
+    // bbport: the frame is blitted (letterboxed) straight into the swapchain image; with HDR
+    // output its HDR10 picture, which already has the overlay.
+    const bool hdr_frame = hdr_output && frame->hdr_ready && image == frame->image;
+    if (hdr_frame) {
+        image = frame->hdr_image;
+    }
     const vk::Image swapchain_image = swapchain.Image();
     auto& scheduler = present_scheduler;
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -1137,7 +1252,7 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
                          vk::Filter::eLinear);
         // bbport: the settings menu / FPS counter over the frame, at display resolution.
         BbOverlay::NotePresent();
-        const bool overlay = BbOverlay::Visible();
+        const bool overlay = BbOverlay::Visible() && !hdr_output;
         const std::array post_barriers{
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
@@ -1245,7 +1360,7 @@ Frame* Presenter::GetRenderFrame() {
     }
 
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
-        frame->is_hdr != swapchain.GetHDR()) {
+        frame->is_hdr != GameHdr() || (hdr_output && !frame->hdr_image)) {
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
     }
 

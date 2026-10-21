@@ -13,6 +13,7 @@
 
 #include "core/libraries/videoout/buffer.h"
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
+#include "video_core/renderer_vulkan/host_passes/hdr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -42,6 +43,12 @@ struct Frame {
     u64 ready_tick;
     bool is_hdr{false};
     u8 id{};
+
+    /// bbport: HDR output of the game's SDR picture (HdrPass): what is presented in its place.
+    VmaAllocation hdr_allocation{};
+    vk::Image hdr_image{};
+    vk::ImageView hdr_view{};
+    bool hdr_ready{false};
 
     /// bbport: frame generation: frames between the previous game frame and this one,
     /// presented before it (FrameGenerator), the first `generated_count` of them.
@@ -88,7 +95,9 @@ public:
     }
 
     void SetHDR(bool enable) {
-        if (!IsHDRSupported()) {
+        // bbport: with HDR output the swapchain stays HDR10 whatever the game's output mode
+        // (it asks for SDR every frame).
+        if (!IsHDRSupported() || hdr_output) {
             return;
         }
         swapchain.SetHDR(enable);
@@ -146,6 +155,14 @@ private:
     HostPasses::FsrPass::Settings fsr_settings{};
     HostPasses::PostProcessingPass::Settings pp_settings{};
     HostPasses::PostProcessingPass pp_pass;
+    /// bbport: BB_HDR=1 with the display in HDR mode: the swapchain is HDR10 and each frame goes
+    /// through hdr_pass (the game itself makes an SDR picture and never asks for HDR).
+    bool hdr_output{false};
+    HostPasses::HdrPass hdr_pass;
+    /// The game's own HDR output (the swapchain in HDR for a game that asked for it).
+    bool GameHdr() const {
+        return swapchain.GetHDR() && !hdr_output;
+    }
     AmdGpu::Liverpool* liverpool;
     Scheduler draw_scheduler;
     std::deque<u64> recent_frame_ticks; ///< bbport: BB_FRAMES_AHEAD bound (PrepareFrame)
