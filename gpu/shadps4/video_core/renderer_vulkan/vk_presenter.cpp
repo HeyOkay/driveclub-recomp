@@ -50,6 +50,8 @@
 #undef MemoryBarrier // bbport: winnt.h macro (through fmt), clashes with vk::MemoryBarrier
 #endif
 
+extern "C" void runtime_file_miss_stats(uint64_t* slow, uint64_t* fast, uint64_t* slow_us);
+
 namespace Vulkan {
 
 namespace {
@@ -1055,6 +1057,18 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                                             : BbSettings::FrameGenName(cfg.frame_gen),
                         BbSettings::AaName(cfg.aa_mode));
             std::printf("; worst frame %.0f ms, %u over 50 ms", status_worst_ms, status_hitches);
+            {
+                // Game files looked for and not found (runtime_file.c): on disk, and answered from memory.
+                static u64 last_slow = 0, last_fast = 0, last_us = 0;
+                u64 slow = 0, fast = 0, us = 0;
+                runtime_file_miss_stats(&slow, &fast, &us);
+                if (slow != last_slow || fast != last_fast) {
+                    std::printf("; missing game files %llu on disk (%.0f ms), %llu from memory",
+                                static_cast<unsigned long long>(slow - last_slow), (us - last_us) / 1000.0,
+                                static_cast<unsigned long long>(fast - last_fast));
+                }
+                last_slow = slow, last_fast = fast, last_us = us;
+            }
 #ifdef _WIN32
             {
                 PROCESS_MEMORY_COUNTERS counters{};
