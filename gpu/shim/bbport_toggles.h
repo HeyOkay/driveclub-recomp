@@ -2,6 +2,7 @@
 // see runtime_memory.c), to find which one changes rendering without restarting.
 #pragma once
 #include <atomic>
+#include <cstdio>
 #include <csetjmp>
 #include <chrono>
 #include <cstdint>
@@ -88,6 +89,73 @@ inline std::atomic<std::uint64_t> image_upload_bytes{0};
 inline std::atomic<std::uint64_t> buffer_upload_bytes{0};
 inline std::atomic<int> gpu_thread_clock{-1}; ///< clockid_t of the GPU command thread
 inline std::atomic<std::uint64_t> draws{0}, dispatches{0}, submissions{0};
+/// BB_PIPE_CE_NODRAIN: the exact guest bytes constant-RAM dumps have written (16-byte blocks, gpu_byte_map.h)
+/// and whether a resource read live by the recording thread or the copy threads ever overlapped them; once one
+/// has, dumps drain. Defined in buffer_cache.cpp.
+inline std::atomic<bool> ce_dump_conflict{false};
+void NoteCeDump(std::uint64_t addr, std::uint64_t size);
+bool CeDumpOverlaps(std::uint64_t addr, std::uint64_t size);
+/// A resource read live (buffer binding, upload): if it overlaps dumped bytes, dumps drain from now on.
+inline void CheckCeConflict(std::uint64_t addr, std::uint64_t size, const char* what) {
+    if (!ce_dump_conflict.load(std::memory_order_relaxed) && CeDumpOverlaps(addr, size) &&
+        !ce_dump_conflict.exchange(true)) {
+        std::printf("Draw pipe: %s at %llx (%llu bytes) overlaps constant-RAM dump data: dumps drain the pipe "
+                    "from now on\n",
+                    what, static_cast<unsigned long long>(addr), static_cast<unsigned long long>(size));
+    }
+}
+/// BB_PIPE_CHECK=1 (two-stage draw pipe debugging). While draw packets are in flight, stage B owns the draw
+/// scheduler and the caches: a call from any other thread is reported (bbport_sampler.cpp). `object` restricts the
+/// scheduler checks to the draw scheduler (the presenter has its own).
+inline std::atomic<std::uint32_t> pipe_owner{0};
+inline std::atomic<std::uint32_t> pipe_stage_b{0};
+inline std::atomic<const void*> pipe_scheduler{nullptr};
+inline bool (*pipe_in_flight)() = nullptr;
+/// Read once at startup: the checks on per-draw paths are a load of a constant when off.
+inline const bool pipe_check = [] {
+    const char* env = std::getenv("BB_PIPE_CHECK");
+    return env && env[0] == '1';
+}();
+inline bool PipeCheckEnabled() {
+    return pipe_check;
+}
+void PipeCheckViolation(const char* what);
+#define BB_PIPE_CHECK_OBJ(what, object)                                                             \
+    do {                                                                                           \
+        if (BbStats::PipeCheckEnabled() && BbStats::pipe_in_flight &&                              \
+            (!(object) || (object) == BbStats::pipe_scheduler.load(std::memory_order_relaxed))) {  \
+            const std::uint32_t tid_ = static_cast<std::uint32_t>(gettid());                       \
+            if (tid_ != BbStats::pipe_stage_b.load(std::memory_order_relaxed) &&                   \
+                (BbStats::pipe_owner.load(std::memory_order_acquire) != 0 ||                       \
+                 BbStats::pipe_in_flight())) {                                                     \
+                BbStats::PipeCheckViolation(what);                                                 \
+            }                                                                                      \
+        }                                                                                          \
+    } while (0)
+#define BB_PIPE_CHECK(what) BB_PIPE_CHECK_OBJ(what, static_cast<const void*>(nullptr))
+/// BB_FAULT_EMULATE=1: guest read faults on bytes the GPU did not write, served by emulating the load
+/// (page_manager.cpp); declined (instruction not handled) and GPU-written bytes take the usual download.
+inline std::atomic<std::uint64_t> fault_emulated{0}, fault_emulate_declined{0}, fault_emulate_gpu{0};
+/// BB_FAULT_EMULATE=1: guest write faults on bytes the GPU did not write, done as a store plus an inline
+/// update of the GPU copy; and those that took the usual download.
+inline std::atomic<std::uint64_t> store_emulated{0}, store_emulate_declined{0};
+/// Why stores were not emulated: 0 instruction, 1 operands, 2 address, 3 source, 4 page without GPU data,
+/// 5 GPU-written bytes, 6 download in flight, 7 arena.
+inline std::atomic<std::uint64_t> store_why[8]{};
+/// Instructions of write faults the emulation does not handle (rip, count), for BB_FRAME_STATS.
+inline std::atomic<std::uint64_t> store_skip_rip[64]{}, store_skip_count[64]{};
+inline void NoteStoreSkip(std::uint64_t rip) {
+    for (std::uint32_t i = 0, h = std::uint32_t((rip >> 2) * 2654435761u) & 63; i < 64; ++i, h = (h + 1) & 63) {
+        std::uint64_t cur = store_skip_rip[h].load(std::memory_order_relaxed);
+        if (cur == 0 && store_skip_rip[h].compare_exchange_strong(cur, rip)) {
+            cur = rip;
+        }
+        if (cur == rip) {
+            store_skip_count[h].fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 /// Frames the GPU command thread has started (display pass), for per-frame diagnostics.
 inline std::atomic<std::uint64_t> gpu_frames{0};
 /// Wall time spent in operations suspected of stalls (ns, all threads).
@@ -136,8 +204,28 @@ struct PhaseTimer {
 /// 3 present pacing, 4 Finish, 5 WaitSubmitted.
 inline std::atomic<std::uint64_t> wait_site_ns[8]{};
 /// Guest read paths into BufferCache::ReadMemory: 0 offloaded, 1 window split, 2 unresolved (sync fallback),
-/// 3 locked caller (sync), 4 offload disabled.
-inline std::atomic<std::uint64_t> readback_paths[8]{};
+/// 3 locked caller (sync), 4 offload disabled, 5 direct, 6 direct mismatch, 7 early copy used, 8 early copy made,
+/// 9 early copy verified, 10 early copy deferred (the draw writing the window was not recorded yet).
+inline std::atomic<std::uint64_t> readback_paths[11]{};
+/// WAIT_REG_MEM on memory (BB_FRAME_STATS): [0] graphics / [1] compute waits whose first test failed, and the
+/// ns they waited. By polled address (8 slots): reads through the guest view (the 32nd unmet poll), of those
+/// the ones that met the condition, their ns, and function << 32 | reference.
+inline std::atomic<std::uint64_t> wrm_waits[2]{}, wrm_wait_ns[2]{};
+inline std::atomic<std::uint64_t> wrm_addr[8]{}, wrm_forced[8]{}, wrm_forced_met[8]{}, wrm_forced_ns[8]{},
+    wrm_info[8]{};
+inline void NoteWaitViewRead(std::uint64_t addr, std::uint64_t info, bool met, std::uint64_t ns) {
+    for (unsigned i = 0, at = static_cast<unsigned>((addr >> 2) * 0x9E3779B1u) & 7; i < 8; ++i, at = (at + 1) & 7) {
+        std::uint64_t expected = 0;
+        if (wrm_addr[at].load(std::memory_order_relaxed) == addr ||
+            wrm_addr[at].compare_exchange_strong(expected, addr) || expected == addr) {
+            wrm_forced[at].fetch_add(1, std::memory_order_relaxed);
+            wrm_forced_met[at].fetch_add(met ? 1 : 0, std::memory_order_relaxed);
+            wrm_forced_ns[at].fetch_add(ns, std::memory_order_relaxed);
+            wrm_info[at].store(info, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
 /// Read faults taken by the GPU command thread itself, by faulting instruction (BB_FRAME_STATS).
 inline std::atomic<std::uint64_t> gpu_fault_rip[32]{}, gpu_fault_count[32]{};
 inline void NoteGpuReadFault(std::uint64_t rip) {

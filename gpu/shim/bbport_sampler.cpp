@@ -272,3 +272,48 @@ extern "C" void BbDescribeAddress(unsigned long long, char* out, unsigned long s
 }
 extern "C" void BbStartSampler() {}
 #endif
+
+// bbport: BB_PIPE_CHECK=1 (see bbport_toggles.h): a scheduler or cache entry point called by a thread other than
+// stage B while stage B runs a draw packet. Each distinct call stack is printed once (first 64).
+namespace BbStats {
+void PipeCheckViolation(const char* what) {
+    void* frames[10]{};
+    const USHORT n = CaptureStackBackTrace(1, 10, frames, nullptr);
+    std::uint64_t key = reinterpret_cast<std::uintptr_t>(what);
+    for (USHORT i = 0; i < n && i < 6; ++i) {
+        key = key * 0x9E3779B97F4A7C15ull + reinterpret_cast<std::uintptr_t>(frames[i]);
+    }
+    static std::atomic<std::uint64_t> seen[64]{};
+    static std::atomic<std::uint32_t> count{0};
+    static std::atomic<std::uint64_t> total{0};
+    const std::uint64_t t = total.fetch_add(1, std::memory_order_relaxed) + 1;
+    for (auto& slot : seen) {
+        std::uint64_t cur = slot.load(std::memory_order_relaxed);
+        if (cur == key) {
+            return;
+        }
+        if (cur == 0 && slot.compare_exchange_strong(cur, key)) {
+            break;
+        }
+        if (cur == key) {
+            return;
+        }
+    }
+    if (count.fetch_add(1) >= 64) {
+        return;
+    }
+    const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    std::printf("Pipe check: %s called by thread %lu while stage B runs a packet (violation %llu):", what,
+                GetCurrentThreadId(), static_cast<unsigned long long>(t));
+    for (USHORT i = 0; i < n; ++i) {
+        const auto a = reinterpret_cast<std::uintptr_t>(frames[i]);
+        if (a >= base && a < base + 0x10000000) {
+            std::printf(" exe+%llx", static_cast<unsigned long long>(a - base));
+        } else {
+            std::printf(" %llx", static_cast<unsigned long long>(a));
+        }
+    }
+    std::printf("\n");
+    std::fflush(stdout);
+}
+} // namespace BbStats

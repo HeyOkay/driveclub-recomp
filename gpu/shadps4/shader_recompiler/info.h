@@ -162,6 +162,15 @@ struct Info : InfoPersistent {
     /// bbport: user data of this stage as a draw saw it. The GPU command thread refreshes
     /// user_data/flattened_ud_buf for every draw it decodes, while the draw recording thread
     /// (vk_draw_pipe.h) may still work on an earlier draw: that thread installs snapshots here.
+    /// bbport: a V# the GPU command thread read through a user-data pointer (fetch shader tables, which the
+    /// constant engine dumps into a ring of guest memory): the recording thread uses this copy, so a later
+    /// DumpConstRam over the table does not change what an earlier draw binds.
+    struct PointerRead {
+        u8 ptr_index;
+        u8 dword_offset;
+        u16 pad;
+        u32 words[4];
+    };
     struct UdSnapshot {
         const Info* info;
         const u32* user_data;
@@ -169,6 +178,8 @@ struct Info : InfoPersistent {
         const u32* flat;
         u32 flat_size;
         VAddr pgm_base;
+        const PointerRead* pointer_reads;
+        u32 num_pointer_reads;
     };
     static constexpr u32 MaxUdSnapshots = 6;
     static inline thread_local UdSnapshot ud_snapshots[MaxUdSnapshots];
@@ -210,6 +221,17 @@ struct Info : InfoPersistent {
     template <typename T>
     T ReadUdReg(u32 ptr_index, u32 dword_offset) const noexcept {
         T data;
+        if constexpr (sizeof(T) <= sizeof(PointerRead::words)) {
+            if (const auto* snapshot = Snapshot(); snapshot && snapshot->num_pointer_reads) [[unlikely]] {
+                for (u32 i = 0; i < snapshot->num_pointer_reads; ++i) {
+                    const auto& read = snapshot->pointer_reads[i];
+                    if (read.ptr_index == ptr_index && read.dword_offset == dword_offset) {
+                        std::memcpy(&data, read.words, sizeof(T));
+                        return data;
+                    }
+                }
+            }
+        }
         const auto ud = UserData();
         const u32* base = ud.data();
         if (ptr_index != IR::NumScalarRegs) {

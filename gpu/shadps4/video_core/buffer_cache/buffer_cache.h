@@ -16,7 +16,9 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/fault_manager.h"
 #include "video_core/buffer_cache/range_set.h"
+#include "video_core/buffer_cache/gpu_byte_map.h"
 #include "video_core/renderer_vulkan/vk_semaphore.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -78,6 +80,33 @@ public:
         return stream_buffer;
     }
 
+    /// bbport: whether the GPU wrote (or a download is under way for) any byte of the range: a guest read of
+    /// other bytes on the same protected pages needs no download (BB_FAULT_EMULATE). Any thread, lock-free.
+    [[nodiscard]] bool IsRangeGpuWritten(VAddr addr, u64 size) const {
+        return gpu_byte_map.Any(addr, size);
+    }
+
+    /// bbport: BB_FAULT_EMULATE, any thread: a guest store to bytes no GPU write holds, on a page protected for
+    /// other bytes. Written to guest memory now; the arena copy is updated by the cache owner before it records
+    /// further work (ApplyQueuedStores). False when not eligible.
+    bool QueueUntrackedStore(VAddr addr, const void* data, u32 size);
+    /// The checks of QueueUntrackedStore without the store (any thread).
+    bool CanQueueUntrackedStore(VAddr addr, u32 size);
+    /// The cache owner (GPU command thread or draw recording thread): inline updates of the queued stores.
+    void ApplyQueuedStores();
+
+    /// bbport: see gpu_byte_map.h.
+    GpuByteMap gpu_byte_map;
+    struct QueuedStore {
+        VAddr lo, hi;
+    };
+    std::mutex queued_store_mutex;
+    std::vector<QueuedStore> queued_stores;
+    std::atomic<u32> num_queued_stores{0};
+
+    /// bbport: the stream buffer: only the host writes it, no GPU hazard to track.
+    [[nodiscard]] bool IsHostWrittenBuffer(const Buffer* buffer) const noexcept;
+
     /// Returns minimum granularity of a sparse memory bind.
     u32 GetSparsePageShift() const noexcept {
         return block_shift;
@@ -114,6 +143,15 @@ public:
 
     /// Commits pending sparse buffer memory binds. Must be called before every scheduler submit.
     void SubmitPendingArenaBinds(Vulkan::SubmitInfo& info);
+
+    /// bbport: BB_READBACK_EARLY: at the end of each submission (submit callback, GPU thread), copies the
+    /// GPU-modified ranges of the readback windows it wrote that the guest read recently into staging. A guest
+    /// read then waits for that submission only, not for everything recorded until the read fault.
+    void RecordEarlyReadbacks();
+    /// bbport: the draw or dispatch whose bindings were stamped is recorded (Rasterizer::ResetBindings).
+    void NoteBindingsRecorded() {
+        unrecorded_windows.clear();
+    }
 
 private:
     struct ArenaBinds {
@@ -224,7 +262,33 @@ private:
     std::atomic<bool> direct_readback{true};
     u32 direct_reads{};
     std::array<u64, 4096> window_write_tick{};
+    /// bbport: BB_READBACK_LOG: per window (hashed like window_write_tick) the last writer's tag, when it was
+    /// recorded (steady ns), and how many write bindings since the window was last read back.
+    std::array<u64, 4096> window_writer{};
+    std::array<s64, 4096> window_write_ns{};
+    std::array<u32, 4096> window_writes{};
     void StampGpuWrite(VAddr device_addr, u64 size);
+
+    /// bbport: early readbacks (RecordEarlyReadbacks). Hot: the window was read back in the last ticks.
+    struct EarlyReadback {
+        VAddr window{};
+        DownloadCopies copies{}; ///< srcOffset from the arena, dstOffset into staging.
+        Vulkan::StagingBufferRef staging{};
+        VAddr arena_base{};
+        u64 write_seq{};
+        u64 tick{};
+    };
+    bool early_readback{false};
+    std::array<VAddr, 4096> hot_window{};
+    std::array<u64, 4096> hot_tick{};
+    std::vector<VAddr> early_pending;
+    /// bbport: windows stamped by bindings whose draw/dispatch is not recorded yet. A submission made
+    /// inside the binding (an allocation-induced flush) must not take their early copy: the draw writes after it,
+    /// in the next tick, without a new write sequence. They stay pending until NoteBindingsRecorded.
+    std::vector<VAddr> unrecorded_windows;
+    bool early_binding_guard = true;
+    std::vector<EarlyReadback> early_readbacks;
+    void DropEarlyReadback(VAddr window);
 
     bool readback_offload{true};
     std::mutex readback_mutex;

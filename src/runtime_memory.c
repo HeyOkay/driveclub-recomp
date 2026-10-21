@@ -299,6 +299,23 @@ static int pool(void) {
     runtime_memory_reserve();
     uint64_t bytes=POOL_SIZE+FLEX_SPAN;
     section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+    /* bbport: refused for lack of commit (error 1450/1455): Windows does not grow a system-managed page file for one
+     * request this large, but does while the charge rises in steps. Commit (never touch) 256 MB blocks until as much
+     * as the section plus 1 GB is held or a step fails, release them, retry; up to 15 s in all. */
+    for (int attempt=0; !section && attempt<30; ++attempt) {
+        const DWORD err=GetLastError();
+        if (err!=ERROR_NO_SYSTEM_RESOURCES && err!=ERROR_COMMITMENT_LIMIT && err!=ERROR_NOT_ENOUGH_MEMORY) break;
+        if (attempt==0) fprintf(stderr,"Runtime: %" PRIu64 " MiB of guest memory refused (error %lu); growing the page file and retrying\n",bytes>>20,err);
+        enum { STEP=256u<<20, MAX_STEPS=96 };
+        void *steps[MAX_STEPS]; int held=0;
+        for (int fails=0; held<MAX_STEPS && (uint64_t)held*STEP<bytes+(UINT64_C(1)<<30) && fails<8;) {
+            void *p=VirtualAlloc(NULL,STEP,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+            if (p) { steps[held++]=p; fails=0; } else { ++fails; Sleep(100); }
+        }
+        for (int i=0; i<held; ++i) VirtualFree(steps[i],0,MEM_RELEASE);
+        section=CreateFileMapping2(INVALID_HANDLE_VALUE,NULL,FILE_MAP_ALL_ACCESS,PAGE_EXECUTE_READWRITE,SEC_COMMIT,bytes,NULL,NULL,0);
+        if (!section) Sleep(500);
+    }
     if (!section) { fprintf(stderr,"Runtime: cannot create %" PRIu64 " MiB of guest memory (error %lu); is the page file large enough?\n",bytes>>20,GetLastError()); return -1; }
     backing_base=MapViewOfFile3(section,GetCurrentProcess(),NULL,0,bytes,0,PAGE_READWRITE,NULL,0);
     return backing_base ? 0 : -1;
@@ -782,15 +799,19 @@ void *runtime_low_map(size_t size, int prot) {
 /* Bits 32 and up: the draw pipeline and related GPU thread work (gpu/shim/bbport_toggles.h). */
 /* DriveClub: draw-preparation workers (4096 | 8192) read vertex/texture descriptors before the game finished
  * updating them, which showed up as vertex explosions, green textures and flicker. Off by default. */
-uint64_t runtime_disabled_optimizations=4096|8192|16384|524288|(1ull<<37);
+uint64_t runtime_disabled_optimizations=4096|8192|16384|524288|(1ull<<41);
 /* Speculative readers of guest memory (GPU draw-preparation workers) register a recovery
  * point: a fault on that thread jumps back to it instead of terminating (probe.c). */
 __thread sigjmp_buf *runtime_fault_recover;
 static void *toggle_watcher(void *path) {
     for (unsigned long long last=ULLONG_MAX;;) {
         FILE *f=fopen(path,"r");
-        unsigned long long value=0;
-        if (f) { if (fscanf(f,"%llu",&value)!=1) value=0; fclose(f); }
+        unsigned long long value=last;
+        int parsed=0;
+        if (f) { parsed=fscanf(f,"%llu",&value)==1; fclose(f); }
+        /* bbport: a missing, empty (being rewritten) or garbled file keeps the last mask; it no longer turns
+         * every optimization on. The first read without a file keeps the built-in default. */
+        if (!parsed) value=last==ULLONG_MAX ? runtime_disabled_optimizations : last;
         if (value!=last) {
             __atomic_store_n(&runtime_disabled_optimizations,(uint64_t)value,__ATOMIC_RELEASE);
             printf("Runtime: disabled optimizations mask=%llu\n",value);

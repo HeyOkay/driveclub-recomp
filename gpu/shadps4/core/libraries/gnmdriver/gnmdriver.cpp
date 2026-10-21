@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include "bbport_frametrace.h"
 #include "gnm_error.h"
 #include "gnmdriver.h"
 
@@ -87,6 +88,13 @@ static void ResetSubmissionLock(Platform::InterruptId irq) {
 static void WaitGpuIdle() {
     HLE_TRACE;
     std::unique_lock lock{m_wait_idle};
+    if (BbTrace::enabled && submission_lock != 0) {
+        const s64 start = BbTrace::NowNs();
+        cv_lock.wait(lock, [] { return submission_lock == 0; });
+        BbTrace::submit_lock_ns.fetch_add(u64(BbTrace::NowNs() - start), std::memory_order_relaxed);
+        BbTrace::submit_lock_waits.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     cv_lock.wait(lock, [] { return submission_lock == 0; });
 }
 
@@ -2295,6 +2303,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitAndFlipCommandBuffersForWorkload(
     auto* cmdbuf = dcb_gpu_addrs[count - 1];
     const auto size_dw = dcb_sizes_in_bytes[count - 1] / 4;
 
+    if (BbTrace::enabled) {
+        BbTrace::last_submit_flip_ns.store(BbTrace::NowNs(), std::memory_order_relaxed);
+    }
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
 
@@ -2355,6 +2366,9 @@ s32 PS4_SYSV_ABI sceGnmSubmitCommandBuffers(u32 count, const u32* dcb_gpu_addrs[
 s32 PS4_SYSV_ABI sceGnmSubmitDone() {
     HLE_TRACE;
     LOG_DEBUG(Lib_GnmDriver, "called");
+    if (BbTrace::enabled) {
+        BbTrace::last_submit_done_ns.store(BbTrace::NowNs(), std::memory_order_relaxed);
+    }
     std::scoped_lock lk{m_submit_lock};
     WaitGpuIdle();
     if (!liverpool->IsGpuIdle()) {

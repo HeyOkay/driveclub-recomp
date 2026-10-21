@@ -55,9 +55,12 @@ public:
 
     /// Unmarks a range inside one region as GPU modified when no GPU write was marked in it since
     /// GpuWriteSeq returned write_seq; returns whether it did.
-    bool TryUnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, u64 write_seq) noexcept {
+    template <typename OnUnmark = void (*)()>
+    bool TryUnmarkRegionAsGpuModified(VAddr cpu_addr, u64 size, u64 write_seq,
+                                      OnUnmark&& on_unmark = [] {}) noexcept {
         auto* manager = top_tier[cpu_addr >> TRACKER_HIGHER_PAGE_BITS];
         if (!manager) {
+            on_unmark();
             return true;
         }
         std::scoped_lock lk{manager->lock};
@@ -66,6 +69,7 @@ public:
             return false;
         }
         manager->template ChangeRegionState<Type::GPU, false>(manager->GetCpuAddr() + offset, size);
+        on_unmark(); // bbport: under the lock (gpu_byte_map.h)
         return true;
     }
 

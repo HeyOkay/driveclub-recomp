@@ -38,6 +38,10 @@ unsigned bbgpu_symbol_count(void);
 unsigned long long bbgpu_flip_count(void);
 /* The last draws and dispatches recorded (shader hashes), for crash and freeze reports. */
 void bbgpu_print_recent_passes(void);
+/* BB_SHARED_LOG / BB_SHARED_PAD (gpu/shim/bbport_shared_log.cpp): wrapper for the call sites of the game's SystemShared
+ * heap allocator (eboot 0x753a80) and the GDS-count site of the VideoShared one; called as wrapper(size, align, tag, site).
+ * 0: not enabled. */
+uintptr_t bbgpu_shared_alloc_hook(uintptr_t real_alloc, uintptr_t image_base);
 #ifdef __cplusplus
 }
 #endif

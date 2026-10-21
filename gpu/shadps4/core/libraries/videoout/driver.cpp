@@ -7,12 +7,14 @@
 #include <vector>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <time.h>
 #ifndef _WIN32
 #include <sys/resource.h>
 #endif
 #include "common/assert.h"
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 
 extern "C" void BbDescribeAddress(unsigned long long rip, char* out, unsigned long size);
 extern "C" void runtime_benchmark_flip(void); // src/runtime_benchmark.c (BB_BENCHMARK)
@@ -293,15 +295,113 @@ int VideoOutDriver::ChangeBufferAttribute(VideoOutPort* port, s32 attributeIndex
     return 0;
 }
 
+// bbport: BB_FRAME_TRACE=<file> (bbport_frametrace.h): where each frame's time went.
+static void TraceFlip(s64 now_ns, s64 queued_ns, s64 guest_flip_ns, u64 prep_ns, u64 ahead_ns) {
+    static FILE* file = [] {
+        const char* path = std::getenv("BB_FRAME_TRACE");
+        FILE* f = path && path[0] ? std::fopen(path, "w") : nullptr;
+        if (f) {
+            std::setvbuf(f, nullptr, _IOFBF, 1 << 16);
+            std::fprintf(f, "# wall_ms interval_ms queue_ms prep_ms ahead_ms guest_flip_to_flip_ms "
+                            "submit_done_to_flip_ms gpu_idle_ms lock_ms lock_waits rf_n rf_ms "
+                            "rf_thread_max_ms wf_ms present_ms compiles evictions img_mb buf_mb draws rf_first_ms rf_last_end_ms\n");
+        }
+        return f;
+    }();
+    if (!file) {
+        return;
+    }
+    static s64 last_ns = now_ns;
+    static u64 last_idle, last_lock, last_lock_waits, last_rf, last_rf_ns, last_wf_ns, last_compiles,
+        last_evictions, last_img, last_buf, last_draws;
+    static u32 unflushed = 0;
+    const u64 idle = BbTrace::gpu_idle_ns.load(), lock = BbTrace::submit_lock_ns.load(),
+              lock_waits = BbTrace::submit_lock_waits.load(), rf = BbStats::read_faults.load(),
+              rf_ns = BbStats::t_read_faults.load(), wf_ns = BbStats::t_write_faults.load(),
+              compiles = BbTrace::compiles.load(), evictions = BbTrace::evictions.load(),
+              img = BbStats::image_upload_bytes.load(), buf = BbStats::buffer_upload_bytes.load(),
+              draws = BbStats::draws.load();
+    const u64 rf_max = BbTrace::read_fault_thread_max_ns.exchange(0);
+    const s64 rf_first = BbTrace::read_fault_first_ns.exchange(0);
+    const s64 rf_last_end = BbTrace::read_fault_last_end_ns.exchange(0);
+    BbTrace::frame_gen.fetch_add(1, std::memory_order_relaxed);
+    const s64 done_ns = BbTrace::last_submit_done_ns.load();
+    const double wall_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    std::fprintf(file,
+                 "%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %llu %llu %.3f %.3f %.3f %.3f %llu "
+                 "%llu %.2f %.2f %llu %.3f %.3f\n",
+                 wall_ms, (now_ns - last_ns) / 1e6, (now_ns - queued_ns) / 1e6, prep_ns / 1e6,
+                 ahead_ns / 1e6, guest_flip_ns ? (now_ns - guest_flip_ns) / 1e6 : -1.0,
+                 done_ns ? (now_ns - done_ns) / 1e6 : -1.0, (idle - last_idle) / 1e6,
+                 (lock - last_lock) / 1e6, (unsigned long long)(lock_waits - last_lock_waits),
+                 (unsigned long long)(rf - last_rf), (rf_ns - last_rf_ns) / 1e6, rf_max / 1e6,
+                 (wf_ns - last_wf_ns) / 1e6, BbTrace::present_ns.load() / 1e6,
+                 (unsigned long long)(compiles - last_compiles),
+                 (unsigned long long)(evictions - last_evictions), (img - last_img) / 1e6,
+                 (buf - last_buf) / 1e6, (unsigned long long)(draws - last_draws),
+                 rf_first ? (rf_first - last_ns) / 1e6 : -1.0, rf_first ? (rf_last_end - last_ns) / 1e6 : -1.0);
+    last_ns = now_ns;
+    last_idle = idle;
+    last_lock = lock;
+    last_lock_waits = lock_waits;
+    last_rf = rf;
+    last_rf_ns = rf_ns;
+    last_wf_ns = wf_ns;
+    last_compiles = compiles;
+    last_evictions = evictions;
+    last_img = img;
+    last_buf = buf;
+    last_draws = draws;
+    if (++unflushed >= 60) {
+        std::fflush(file);
+        unflushed = 0;
+    }
+}
+
 void VideoOutDriver::Flip(const Request& req) {
+    if (BbTrace::enabled) {
+        TraceFlip(BbTrace::NowNs(), req.queued_ns, req.guest_flip_ns, req.prep_ns, req.ahead_ns);
+    }
     // Update HDR status before presenting, then present the frame (bbport: on the swap thread).
     RunPresenter([this, frame = req.frame, hdr = req.port->is_hdr] {
         presenter->SetHDR(hdr);
+        const s64 start = BbTrace::enabled ? BbTrace::NowNs() : 0;
         presenter->Present(frame);
+        if (BbTrace::enabled) {
+            BbTrace::present_ns.store(u64(BbTrace::NowNs() - start), std::memory_order_relaxed);
+        }
     });
     Vulkan::FrameCapture::OnFlip(req.index >= 0 ? req.port->buffer_slots[req.index].address_left
                                                 : 0);
     runtime_benchmark_flip();
+
+    // bbport: BB_FRAME_LOG=<file> - one line per flip: wall-clock time (ms since 1970, to line up with
+    // a benchmark script) and the interval since the previous flip (ms), for 1%/0.1% lows and spikes.
+    static FILE* frame_log = [] {
+        const char* path = std::getenv("BB_FRAME_LOG");
+        FILE* file = path && path[0] ? std::fopen(path, "w") : nullptr;
+        if (file) {
+            std::setvbuf(file, nullptr, _IOFBF, 1 << 16);
+        }
+        return file;
+    }();
+    if (frame_log) {
+        static auto last_flip = std::chrono::steady_clock::now();
+        static u32 unflushed = 0;
+        const auto flip = std::chrono::steady_clock::now();
+        const double wall_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
+        std::fprintf(frame_log, "%.3f %.3f\n", wall_ms,
+                     std::chrono::duration<double, std::milli>(flip - last_flip).count());
+        last_flip = flip;
+        if (++unflushed >= 60) {
+            std::fflush(frame_log);
+            unflushed = 0;
+        }
+    }
 
     // bbport: BB_FRAME_STATS=1 prints flip rate and frame time spread every 5 seconds.
     static const bool frame_stats = EmulatorSettingsImpl::Flag("BB_FRAME_STATS", false);
@@ -482,16 +582,67 @@ void VideoOutDriver::Flip(const Request& req) {
                         BbStats::wait_site_ns[5].exchange(0) / (window * 1e7),
                         BbStats::wait_site_ns[6].exchange(0) / (window * 1e7),
                         BbStats::wait_site_ns[7].exchange(0) / (window * 1e7));
+            std::printf("Read faults per second emulated (bytes the GPU did not write): %.0f; not emulated: "
+                        "instruction %.0f, GPU-written bytes %.0f; write faults emulated %.0f, not %.0f\n",
+                        BbStats::fault_emulated.exchange(0) / window,
+                        BbStats::fault_emulate_declined.exchange(0) / window,
+                        BbStats::fault_emulate_gpu.exchange(0) / window,
+                        BbStats::store_emulated.exchange(0) / window,
+                        BbStats::store_emulate_declined.exchange(0) / window);
+            std::printf("Write faults not emulated: instruction %.0f, operands %.0f, address %.0f, source %.0f, "
+                        "page without GPU data %.0f, GPU-written bytes %.0f, download in flight %.0f, arena %.0f\n",
+                        BbStats::store_why[0].exchange(0) / window, BbStats::store_why[1].exchange(0) / window,
+                        BbStats::store_why[2].exchange(0) / window, BbStats::store_why[3].exchange(0) / window,
+                        BbStats::store_why[4].exchange(0) / window, BbStats::store_why[5].exchange(0) / window,
+                        BbStats::store_why[6].exchange(0) / window, BbStats::store_why[7].exchange(0) / window);
+            {
+                std::printf("Write faults not emulated by instruction:");
+                for (int pass = 0; pass < 8; ++pass) {
+                    int best = -1;
+                    std::uint64_t most = 0;
+                    for (int i = 0; i < 64; ++i) {
+                        const std::uint64_t n = BbStats::store_skip_count[i].load(std::memory_order_relaxed);
+                        if (n > most) {
+                            most = n;
+                            best = i;
+                        }
+                    }
+                    if (best < 0) {
+                        break;
+                    }
+                    std::printf(" %llx x%.0f/s", static_cast<unsigned long long>(BbStats::store_skip_rip[best].load()),
+                                most / window);
+                    BbStats::store_skip_count[best].store(0);
+                }
+                for (int i = 0; i < 64; ++i) {
+                    BbStats::store_skip_count[i].store(0);
+                    BbStats::store_skip_rip[i].store(0);
+                }
+                std::printf("\n");
+            }
             std::printf("Guest reads per second: offloaded %.0f, window split %.0f, unresolved %.0f, "
                         "locked caller %.0f, offload off %.0f; read directly from video memory %.0f, direct read "
-                        "mismatches %.0f\n",
+                        "mismatches %.0f; early copies made %.0f, used %.0f (verified %.0f, deferred mid-binding %.0f)\n",
                         BbStats::readback_paths[0].exchange(0) / window,
                         BbStats::readback_paths[1].exchange(0) / window,
                         BbStats::readback_paths[2].exchange(0) / window,
                         BbStats::readback_paths[3].exchange(0) / window,
                         BbStats::readback_paths[4].exchange(0) / window,
                         BbStats::readback_paths[5].exchange(0) / window,
-                        BbStats::readback_paths[6].exchange(0) / window);
+                        BbStats::readback_paths[6].exchange(0) / window,
+                        BbStats::readback_paths[8].exchange(0) / window,
+                        BbStats::readback_paths[7].exchange(0) / window,
+                        BbStats::readback_paths[9].exchange(0) / window,
+                        BbStats::readback_paths[10].exchange(0) / window);
+            {
+                // bbport: where offloaded readbacks wait (ms per second over all guest threads).
+                const u64 jobs = BbTrace::rb_jobs.exchange(0);
+                std::printf("Readback waits: %.0f copies/s; ms/s waiting for the GPU "
+                            "command thread %.1f, for the copy %.1f, for another thread's copy %.1f\n",
+                            jobs / window, BbTrace::rb_pickup_ns.exchange(0) / 1e6 / window,
+                            BbTrace::rb_gpu_ns.exchange(0) / 1e6 / window,
+                            BbTrace::rb_pending_ns.exchange(0) / 1e6 / window);
+            }
             std::printf("Small scene (%llu color targets) draws per frame: %.0f seen (%.0f depth-only, never skipped), "
                         "%.0f skipped (of %.0f draws)\n",
                         static_cast<unsigned long long>(BbStats::mirror_targets.load()),
@@ -588,6 +739,25 @@ void VideoOutDriver::Flip(const Request& req) {
                     BbDescribeAddress(faults[i].second & ~(1ull << 63), where, sizeof(where));
                     line += fmt::format(" {}x {}{};", faults[i].first,
                                         (faults[i].second >> 63) ? "WRITE " : "read ", where);
+                }
+                std::printf("%s\n", line.c_str());
+            }
+            {
+                // bbport: WAIT_REG_MEM on memory: unmet waits and the polled labels read through the guest view.
+                std::string line = fmt::format(
+                    "Label waits (unmet at first test)/s: graphics {:.0f} ({:.1f} ms/s), compute {:.0f} ({:.1f} ms/s); "
+                    "view reads by label:",
+                    BbStats::wrm_waits[0].exchange(0) / window, BbStats::wrm_wait_ns[0].exchange(0) / 1e6 / window,
+                    BbStats::wrm_waits[1].exchange(0) / window, BbStats::wrm_wait_ns[1].exchange(0) / 1e6 / window);
+                for (u32 i = 0; i < 8; ++i) {
+                    if (const u64 n = BbStats::wrm_forced[i].exchange(0)) {
+                        const u64 info = BbStats::wrm_info[i].load();
+                        line += fmt::format(" {:#x} x{:.0f}/s met {:.0f}/s {:.1f} ms/s (func {} ref {:#x});",
+                                            BbStats::wrm_addr[i].load(), n / window,
+                                            BbStats::wrm_forced_met[i].exchange(0) / window,
+                                            BbStats::wrm_forced_ns[i].exchange(0) / 1e6 / window, info >> 32,
+                                            info & 0xffffffffu);
+                    }
                 }
                 std::printf("%s\n", line.c_str());
             }
@@ -730,6 +900,10 @@ void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_
             .flip_arg = flip_arg,
             .index = index,
             .eop = is_eop,
+            .queued_ns = BbTrace::enabled ? BbTrace::NowNs() : 0,
+            .guest_flip_ns = BbTrace::last_submit_flip_ns.load(std::memory_order_relaxed),
+            .prep_ns = BbTrace::prep_ns.load(std::memory_order_relaxed),
+            .ahead_ns = BbTrace::ahead_wait_ns.load(std::memory_order_relaxed),
         });
     }
     request_cv.notify_one();

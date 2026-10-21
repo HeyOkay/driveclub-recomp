@@ -104,6 +104,10 @@ public:
     /// Returns true when the task was handed to the recording thread (not run yet).
     bool RunInOrder(OrderedTask task, const void* data, u32 size,
                     u64 toggle = BbToggle::PipelinedTasks);
+    /// bbport: stage A, before a pipeline selection: WriteData/DMA queued for stage B may write the
+    /// descriptor tables the selection walks; wait until stage B has run the last one.
+    void WaitQueuedMemoryWrites();
+    u64 last_memory_task = 0;
     /// Stage A: the draw pipe position after the last handed-over packet, and whether the
     /// recording thread has run everything before a position.
     [[nodiscard]] u64 DrawPipeHead() const {
@@ -136,6 +140,13 @@ public:
     /// A guest write hit a protected page.
     bool OnWriteFault(VAddr addr, bool assume_locks);
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
+    /// bbport: BB_FAULT_EMULATE: true unless every byte of the range is GPU mapped and not GPU written.
+    bool IsRangeGpuWritten(VAddr addr, u64 size);
+    /// bbport: BB_FAULT_EMULATE: queues a guest store that touches no GPU-written byte (BufferCache::
+    /// QueueUntrackedStore); false when the usual write fault path must run.
+    bool StoreUntracked(VAddr addr, const void* data, u32 size);
+    /// bbport: BB_FAULT_EMULATE: whether the page holds GPU data (lock-free, any thread).
+    bool IsPageGpuModified(VAddr addr);
     void ProcessDownloadImages();
     bool IsMapped(VAddr addr, u64 size);
     void MapMemory(VAddr addr, u64 size);
@@ -502,6 +513,9 @@ private:
         u64 position;
     };
     std::vector<PendingWrite> pending_writes;
+    /// bbport: position of a write noted for the packet being built (resolved after its Commit).
+    static constexpr u64 UnresolvedWrite = ~0ull;
+    void ResolvePendingWrites();
     VAddr pending_min = ~VAddr{0}, pending_max = 0; ///< bounds of pending_writes
     u32 pending_checks = 0;
     u64 proxy_samples = 0; ///< texture bindings that read a scene proxy (statistics)

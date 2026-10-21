@@ -4,6 +4,7 @@
 #pragma once
 
 #include <atomic>
+#include "common/bytes_equal.h"
 #include <chrono>
 #include <cstring>
 #include <condition_variable>
@@ -59,7 +60,7 @@ struct RenderState {
     u16 num_color_attachments;
 
     bool operator==(const RenderState& other) const noexcept {
-        return std::memcmp(this, &other, sizeof(RenderState)) == 0;
+        return Common::BytesEqual<sizeof(RenderState)>(this, &other);
     }
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
@@ -749,6 +750,7 @@ public:
     /// everything it uses (capture by value): it may run later on the recording thread.
     template <typename Func>
     void Record(Func&& func) {
+        BB_PIPE_CHECK_OBJ("Scheduler::Record", static_cast<const void*>(this));
         if (!recording_threaded || direct_mode) {
             func(current_cmdbuf);
             return;

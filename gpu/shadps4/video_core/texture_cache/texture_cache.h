@@ -93,6 +93,16 @@ public:
     [[nodiscard]] u64 RegistryGeneration() const noexcept {
         return registry_generation.load(std::memory_order_acquire);
     }
+    /// bbport: changes only when an image is registered or unregistered, not on a depth/color form switch (which
+    /// changes the image's backing: memos that check each entry's backing can use this one). Equal to
+    /// RegistryGeneration with BB_MEMO_MEMBERSHIP=0.
+    [[nodiscard]] u64 MembershipGeneration() const noexcept {
+        static const bool on = [] {
+            const char* env = std::getenv("BB_MEMO_MEMBERSHIP");
+            return !(env && env[0] == '0');
+        }();
+        return on ? membership_generation.load(std::memory_order_acquire) : RegistryGeneration();
+    }
 
     /// bbport: FindImage's access tick for an image found by a memoized lookup. The LRU touch
     /// FindImage also does happens in UpdateImage (FindTexture), which every binding reaches.
@@ -435,6 +445,7 @@ private:
     };
     std::array<FindImageCacheEntry, 1024> find_image_cache{};
     std::atomic<u64> registry_generation{0};
+    std::atomic<u64> membership_generation{0};
     std::mutex samplers_mutex;
     std::mutex download_images_mutex;
     struct MetaDataInfo {

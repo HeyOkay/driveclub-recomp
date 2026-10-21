@@ -10,6 +10,7 @@
 #include <time.h>
 #include "bbport_copy.h"
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 #include <cstdio>
 #include <boost/preprocessor/stringize.hpp>
 
@@ -68,17 +69,61 @@ extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64
 // page the GPU has written is read-protected, and each read of it was a synchronous GPU download. A
 // label the CPU or the fence handlers wrote is already in the backing; one written by a shader is
 // not, so every 32nd unmet poll reads through the view, which brings it up to date.
-static bool TestWaitRegMem(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, u32& polls) {
+// bbport: BB_LABEL_VIEW_GPU_ONLY (default on): the 32nd poll reads through the view only when the GPU wrote (or a download is
+// under way for) the label's bytes; for any other label the backing already holds the latest value, and the view
+// read only forced a synchronous download of the page's other GPU data.
+static bool TestWaitRegMem(const PM4CmdWaitRegMem* wait, std::span<const u32> regs, u32& polls,
+                           Vulkan::Rasterizer* rasterizer) {
     if (wait->mem_space.Value() != PM4CmdWaitRegMem::MemSpace::Memory) {
         return wait->Test(regs);
     }
+    // Measured in a DriveClub race: GPU-thread "buffer watch" waits 17% -> 2% of its time, p99 frame ~20.5 -> ~18.9 ms.
+    // Default on; =0 reverts.
+    // Every 4096th unmet poll still reads through the view: a GPU write the byte map missed costs a delay, not a hang.
+    static const bool view_gpu_only = EmulatorSettingsImpl::Flag("BB_LABEL_VIEW_GPU_ONLY", true);
     u32 value;
-    if ((++polls & 31) == 0 ||
-        !runtime_memory_read_backing(wait->Address<uintptr_t>(), &value, sizeof(value))) {
-        return wait->Test(regs);
+    const bool backing = runtime_memory_read_backing(wait->Address<uintptr_t>(), &value, sizeof(value));
+    if (backing && view_gpu_only && rasterizer && ((polls + 1) & 4095) != 0 &&
+        !rasterizer->IsRangeGpuWritten(wait->Address<VAddr>(), sizeof(value))) {
+        ++polls;
+        return wait->TestValue(value);
+    }
+    if ((++polls & 31) == 0 || !backing) {
+        // Stats only for the real view reads: host labels (no backing) are polled 100k+ times/s.
+        if (!BbStats::enabled || (polls & 31) != 0) {
+            return wait->Test(regs);
+        }
+        const auto start = std::chrono::steady_clock::now();
+        const bool met = wait->Test(regs);
+        BbStats::NoteWaitViewRead(wait->Address<uintptr_t>(),
+                                  (u64(wait->function.Value()) << 32) | wait->ref, met,
+                                  std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                      std::chrono::steady_clock::now() - start)
+                                      .count());
+        return met;
     }
     return wait->TestValue(value);
 }
+
+// bbport: BB_FRAME_STATS time of a WAIT_REG_MEM whose first test failed ([0] graphics, [1] compute).
+struct WaitRegMemTimer {
+    u32 queue;
+    std::chrono::steady_clock::time_point start{};
+    void Begin() {
+        if (BbStats::enabled && start == std::chrono::steady_clock::time_point{}) {
+            start = std::chrono::steady_clock::now();
+        }
+    }
+    ~WaitRegMemTimer() {
+        if (start != std::chrono::steady_clock::time_point{}) {
+            BbStats::wrm_waits[queue].fetch_add(1, std::memory_order_relaxed);
+            BbStats::wrm_wait_ns[queue].fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                      std::chrono::steady_clock::now() - start)
+                                                      .count(),
+                                                  std::memory_order_relaxed);
+        }
+    }
+};
 
 static std::span<const u32> NextPacket(std::span<const u32> span, size_t offset) {
     if (offset > span.size()) {
@@ -105,11 +150,13 @@ Liverpool::~Liverpool() {
 }
 
 void Liverpool::ProcessCommands() {
-    if (num_commands && rasterizer) {
-        rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands); // bbport: commands touch the caches
-    }
     // Process incoming commands with high priority
     while (num_commands) {
+        // bbport: commands touch the caches and record: stage B must be idle. Drained per command: one checked
+        // before the loop let a command that arrived after that check run while stage B recorded (BB_PIPE_CHECK).
+        if (rasterizer) {
+            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCommands);
+        }
         Common::UniqueFunction<void> callback{};
         {
             std::scoped_lock lk{submit_mutex};
@@ -142,10 +189,11 @@ void Liverpool::Process(std::stop_token stoken) {
             std::unique_lock lk{submit_mutex};
             Common::CondvarWait(submit_cv, lk, stoken,
                                 [this] { return num_commands || num_submits || submit_done; });
-            BbStats::gpu_idle_ns.fetch_add(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now() - idle_start).count(),
-                std::memory_order_relaxed);
+            const auto idle_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - idle_start)
+                                     .count();
+            BbStats::gpu_idle_ns.fetch_add(idle_ns, std::memory_order_relaxed);
+            BbTrace::gpu_idle_ns.fetch_add(idle_ns, std::memory_order_relaxed);
         }
         if (stoken.stop_requested()) {
             break;
@@ -444,11 +492,29 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             break;
         }
         case PM4ItOpcode::DumpConstRam: {
-            // bbport: earlier draws on the recording thread may still read constants here.
-            if (rasterizer) {
-                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
-            }
+            // bbport: earlier draws on the recording thread may still read constants here. They carry the
+            // vertex V#s read through these tables (Info::PointerRead), the other sharps in their flattened
+            // user data: a dump does not wait for them.
+            static const bool no_drain = [] {
+                const char* env = std::getenv("BB_PIPE_CE_NODRAIN");
+                // Default on (BB_PIPE_CE_NODRAIN=0: drain at every dump). Stage B and the copy threads still read
+                // some guest memory live (large buffers, vertex/index data, uploads): any of those overlapping the
+                // dumped range turns the drain back on (BbStats::CheckCeConflict).
+                return !(env && env[0] == '0');
+            }();
             const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+            if (rasterizer) {
+                if (!no_drain || BbStats::ce_dump_conflict.load(std::memory_order_relaxed)) {
+                    rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonConstRam);
+                } else {
+                    // Without the drain: a WriteData/DMA still queued for the recording thread must not land
+                    // over this dump later (write order), and the range is recorded so that any resource read
+                    // live that overlaps it turns the drain back on (BbStats::CheckCeConflict).
+                    rasterizer->WaitQueuedMemoryWrites();
+                    const u64 dst = dump_const->Address<u64>();
+                    BbStats::NoteCeDump(dst, dump_const->Size());
+                }
+            }
             memcpy(dump_const->Address<void*>(),
                    cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
             break;
@@ -499,7 +565,7 @@ u64 Liverpool::HashRegisterPacket(u64 checksum, const u32* words, u32 count) {
 }
 
 void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header, u64& checksum,
-                                             RegDirty* dirty) {
+                                             RegDirty* dirty, bool hash) {
     const u32 count = header->type3.NumWords();
     const auto* payload = reinterpret_cast<const u32*>(header + 2);
     const auto mark = [&](u32 word, u32 words) {
@@ -616,7 +682,10 @@ void Liverpool::ApplyGraphicsRegisterPacket(Regs& regs, const PM4Header* header,
     default:
         return;
     }
-    checksum = HashRegisterPacket(checksum, reinterpret_cast<const u32*>(header), count + 1);
+    // bbport: only draw preparation compares checksums; without its workers nobody reads it.
+    if (hash) {
+        checksum = HashRegisterPacket(checksum, reinterpret_cast<const u32*>(header), count + 1);
+    }
 }
 
 // bbport: BB_DCB_STATS=1 - structure of graphics command buffers (read-only scan, printed every
@@ -732,6 +801,8 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     if (draw_prep) {
         draw_prep->BeginSubmission(seq, regs, gfx_reg_checksum);
     }
+    // Nested buffers (no draw_prep here) must keep the checksum in step while the workers run.
+    const bool hash_registers = rasterizer && rasterizer->GetDrawPreparation().Enabled();
     static const bool dcb_stats = EmulatorSettingsImpl::Flag("BB_DCB_STATS", false);
     const int dcb_depth = g_dcb_depth;
     if (dcb_stats) {
@@ -773,7 +844,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
             BbStats::PhaseTimer opcode_timer{BbStats::opcode_ns[static_cast<u32>(opcode) & 255]};
-            ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty);
+            ApplyGraphicsRegisterPacket(regs, header, gfx_reg_checksum, &pipe_dirty, hash_registers);
             // DmaData to 0x3022C does nothing here (skipped below): no need to wait.
             if (rasterizer && !PipelinedOpcode(opcode) &&
                 !(opcode == PM4ItOpcode::DmaData &&
@@ -1266,7 +1337,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // Else the value may come from a fence that thread has yet to write: let it
                 // catch up before yielding to other queues.
                 u32 polls = 0;
-                while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls)) {
+                WaitRegMemTimer timer{0};
+                while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls, rasterizer)) {
+                    timer.Begin();
                     if (rasterizer && !rasterizer->DrawPipeIdle()) {
                         rasterizer->DrainDrawPipe(static_cast<u32>(opcode));
                         continue;
@@ -1386,7 +1459,24 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
     while (!acb.empty()) {
         ProcessCommands();
         if (rasterizer) {
-            rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute); // bbport: compute work uses the caches
+            // bbport: compute work uses the caches, so the recording thread must be idle first. Padding, Nop and
+            // register writes do no work: no drain for them (~6000 compute drains/s in races, most before
+            // register packets). The recording thread draws from its own register snapshots (Rasterizer::Regs).
+            // BB_COMPUTE_STATE_NODRAIN=0 drains before every packet again.
+            static const bool state_nodrain = [] {
+                const char* env = std::getenv("BB_COMPUTE_STATE_NODRAIN");
+                return !(env && env[0] == '0');
+            }();
+            const auto* peek = reinterpret_cast<const PM4Header*>(acb.data());
+            const bool state_only =
+                state_nodrain && queue.tmp_dwords == 0 &&
+                (peek->type == 2 ||
+                 (peek->type == 3 && (peek->type3.opcode == PM4ItOpcode::Nop ||
+                                      peek->type3.opcode == PM4ItOpcode::SetShReg ||
+                                      peek->type3.opcode == PM4ItOpcode::SetQueueReg)));
+            if (!state_only) {
+                rasterizer->DrainDrawPipe(Vulkan::DrawPipe::ReasonCompute);
+            }
         }
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
@@ -1612,7 +1702,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             u32 polls = 0;
-            while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls)) {
+            WaitRegMemTimer timer{1};
+            while (!TestWaitRegMem(wait_reg_mem, regs.reg_array, polls, rasterizer)) {
+                timer.Begin();
                 YIELD_ASC(vqid);
             }
             break;

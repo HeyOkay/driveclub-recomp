@@ -7,6 +7,7 @@
 #include <xxhash.h>
 
 #include "bbport_toggles.h"
+#include "bbport_frametrace.h"
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -156,11 +157,31 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     }
 }
 
+namespace {
+// bbport: the hash of guest memory read through the backing view: a page the GPU wrote is protected, and
+// hashing it through the guest view faulted (a download, or a deadlock when the caller holds this cache's lock
+// in a guest-thread fault handler).
+extern "C" int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
+u64 HashGuestMemory(VAddr addr, u64 size) {
+    static thread_local XXH3_state_t* state = XXH3_createState(); // opaque in this xxhash build
+    XXH3_64bits_reset(state);
+    alignas(64) static thread_local u8 chunk[64 * 1024];
+    for (u64 done = 0; done < size;) {
+        const u64 n = std::min<u64>(sizeof(chunk), size - done);
+        if (!runtime_memory_read_backing(addr + done, chunk, n)) {
+            return XXH3_64bits(std::bit_cast<const u8*>(addr), size);
+        }
+        XXH3_64bits_update(state, chunk, n);
+        done += n;
+    }
+    return XXH3_64bits_digest(state);
+}
+} // namespace
+
 void TextureCache::MarkAsMaybeDirty(ImageId image_id, Image& image) {
     if (image.hash == 0) {
         // Initialize hash
-        const u8* addr = std::bit_cast<u8*>(image.info.guest_address);
-        image.hash = XXH3_64bits(addr, image.info.guest_size);
+        image.hash = HashGuestMemory(image.info.guest_address, image.info.guest_size);
     }
     image.flags |= ImageFlagBits::MaybeCpuDirty;
     UntrackImage(image_id);
@@ -713,6 +734,7 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info_ref, ImageId image_id) {
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
+    BB_PIPE_CHECK("TextureCache::FindImage");
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
@@ -984,6 +1006,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 }
 
 void TextureCache::RefreshImage(Image& image) {
+    BbStats::CheckCeConflict(image.info.guest_address, image.info.guest_size, "an image upload");
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
         return;
     }
@@ -1106,6 +1129,7 @@ void TextureCache::RegisterImage(ImageId image_id) {
                "Trying to register an already registered image");
     image.flags |= ImageFlagBits::Registered;
     ++registry_generation;
+    ++membership_generation;
     total_used_memory += Common::AlignUp(image.info.guest_size, 1024);
     image.lru_id = lru_cache.Insert(image_id, gc_tick);
     image.lru_touched_tick = gc_tick;
@@ -1119,6 +1143,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
                "Trying to unregister an already unregistered image");
     image.flags &= ~ImageFlagBits::Registered;
     ++registry_generation;
+    ++membership_generation;
     lru_cache.Free(image.lru_id);
     total_used_memory -= Common::AlignUp(image.info.guest_size, 1024);
     ForEachPage(image.info.guest_address, image.info.guest_size, [this, image_id](u64 page) {
@@ -1260,7 +1285,16 @@ void TextureCache::GarbageCollectImages() {
             const char* env = std::getenv("BB_GC_BUDGET_MB");
             return env ? std::strtoull(env, nullptr, 10) << 20 : 0;
         }();
-        if (instance.IsIntegrated() || forced_budget) {
+        // bbport: on discrete GPUs too (BB_GC_DRIVER_BUDGET=0 reverts to the startup rule). With the startup
+        // rule an 8 GB card got a 2.5 GB pressure mark, compared with all device memory in use (buffers,
+        // swapchain, ...: ~3.6 GB in a race), so every submission evicted textures that were then created and
+        // uploaded again (~67 evictions per 5 s). Measured, 3 pairs: day 1% low 39.3 -> 43.9, 0.1% 32.8 ->
+        // 38.3, night 1% 46.9 -> 50.0 FPS (BB_GC_BUDGET_MB=7000 vs default).
+        static const bool driver_budget = [] {
+            const char* env = std::getenv("BB_GC_DRIVER_BUDGET");
+            return !(env && env[0] == '0');
+        }();
+        if (instance.IsIntegrated() || driver_budget || forced_budget) {
             const u64 budget = forced_budget ? forced_budget : instance.GetDeviceMemoryBudgetNow();
             if (budget != 0) {
                 trigger_gc_memory = budget / 10 * 7;
@@ -1328,6 +1362,7 @@ void TextureCache::GarbageCollectImages() {
             ++gc_downloads;
         }
         ++gc_evictions;
+        BbTrace::evictions.fetch_add(1, std::memory_order_relaxed);
         FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {

@@ -6,6 +6,7 @@
 #include <psapi.h>
 #endif
 #include "bbport_frame_info.h"
+#include "bbport_frametrace.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
 #include "common/io_file.h"
@@ -478,6 +479,7 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
+    const s64 trace_start = BbTrace::enabled ? BbTrace::NowNs() : 0;
     // bbport: BB_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
     // guest display buffer and presented image are written to BB_DUMP_DIR (default out/dump)
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
@@ -682,15 +684,22 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         const char* env = std::getenv("BB_FRAMES_AHEAD");
         return env ? u32(std::max(0, std::atoi(env))) : 1u;
     }();
+    s64 ahead_start = 0, ahead_end = 0;
     if (frames_ahead) {
         recent_frame_ticks.push_back(frame->ready_tick);
         while (recent_frame_ticks.size() > frames_ahead) {
             const u64 tick = recent_frame_ticks.front();
             recent_frame_ticks.pop_front();
             if (recent_frame_ticks.size() == frames_ahead) {
+                ahead_start = BbTrace::enabled ? BbTrace::NowNs() : 0;
                 draw_scheduler.Wait(tick, 3);
+                ahead_end = BbTrace::enabled ? BbTrace::NowNs() : 0;
             }
         }
+    }
+    if (BbTrace::enabled) {
+        BbTrace::prep_ns.store(u64(BbTrace::NowNs() - trace_start), std::memory_order_relaxed);
+        BbTrace::ahead_wait_ns.store(u64(ahead_end - ahead_start), std::memory_order_relaxed);
     }
     return frame;
 }
