@@ -716,6 +716,69 @@ static void patch_shared_alloc(unsigned char *image, uint64_t size) {
     protect(thunks, page_size, 5);
     printf("BB_SHARED_LOG/PAD: %d SystemShared allocator sites patched (log %d, pad %d)\n", patched, log, padding);
 }
+/* BB_EXPOSURE_STALE=1 (opt-in; gpu/shadps4/video_core/page_manager.cpp): the auto-exposure's two histogram copies
+ * (eboot 0x702ad2 and 0x702afc: mov edx, 0x400; call memcpy 0x123e3b0) and its value read (0x702b0d: xor ecx, ecx;
+ * call getter 0x758980) call host hooks through near thunks (movabs rax, hook; jmp rax): same arguments, and they
+ * return to the site. All three or none: every site's bytes and reach are checked before any is written. */
+static void patch_exposure_copy(unsigned char *image, uint64_t size) {
+    static const uint64_t sites[3] = {0x702ad2, 0x702afc, 0x702b0d}, targets[3] = {0x123e3b0, 0x123e3b0, 0x758980};
+    static const unsigned char mov_edx_400[5] = {0xba, 0x00, 0x04, 0x00, 0x00};
+    if (size < 0x123e3b0 + 16) return;
+    uintptr_t hooks[3];
+    hooks[0] = hooks[1] = bbgpu_exposure_hook();
+    if (!hooks[0]) return;
+    hooks[2] = bbgpu_exposure_value_hook((uintptr_t)image + targets[2]);
+    unsigned char *thunk = allocate(page_size);
+    for (int c = 0; c < 3; ++c) {
+        unsigned char *site = image + sites[c], *t = thunk + 16 * c;
+        int32_t rel;
+        memcpy(&rel, site + 1, 4);
+        const int before = c < 2 ? !memcmp(site - 5, mov_edx_400, 5) : site[-2] == 0x31 && site[-1] == 0xc9;
+        const int64_t to = (int64_t)((uintptr_t)t - ((uintptr_t)site + 5));
+        if (!hooks[c] || site[0] != 0xe8 || (int64_t)sites[c] + 5 + (int64_t)rel != (int64_t)targets[c] || !before ||
+            to != (int32_t)to) {
+            printf("BB_EXPOSURE_STALE: site %#" PRIx64 " does not match; nothing patched\n", sites[c]);
+            protect(thunk, page_size, 5);
+            return;
+        }
+        t[0] = 0x48; t[1] = 0xb8; memcpy(t + 2, &hooks[c], 8); /* movabs rax, hook */
+        t[10] = 0xff; t[11] = 0xe0;                              /* jmp rax */
+    }
+    for (int c = 0; c < 3; ++c) {
+        unsigned char *site = image + sites[c];
+        const int32_t rel = (int32_t)((int64_t)((uintptr_t)(thunk + 16 * c) - ((uintptr_t)site + 5)));
+        memcpy(site + 1, &rel, 4);
+    }
+    protect(thunk, page_size, 5);
+    printf("BB_EXPOSURE_STALE: 3 of 3 exposure readback sites patched\n");
+}
+/* BB_CLOUD_STALE=1 (opt-in; gpu/shadps4/video_core/page_manager.cpp): trueSKY's cloud sample asks the readback getter
+ * at 0x60265e (lea rcx, [rbp-0x14c]; call 0x758980); the call goes to the host hook through a near thunk. */
+static void patch_cloud_get(unsigned char *image, uint64_t size) {
+    static const uint64_t site_at = 0x60265e, getter = 0x758980;
+    if (size < getter + 16) return;
+    uintptr_t hook = bbgpu_cloud_hook((uintptr_t)image);
+    if (!hook) return;
+    unsigned char *site = image + site_at;
+    int32_t rel;
+    memcpy(&rel, site + 1, 4);
+    if (site[0] != 0xe8 || (int64_t)site_at + 5 + (int64_t)rel != (int64_t)getter || site[-7] != 0x48 || site[-6] != 0x8d) {
+        printf("BB_CLOUD_STALE: site %#" PRIx64 " is not the cloud sample's getter call; not patched\n", site_at);
+        return;
+    }
+    unsigned char *thunk = allocate(page_size);
+    thunk[0] = 0x48; thunk[1] = 0xb8; memcpy(thunk + 2, &hook, 8); /* movabs rax, hook */
+    thunk[10] = 0xff; thunk[11] = 0xe0;                              /* jmp rax */
+    protect(thunk, page_size, 5);
+    int64_t to = (int64_t)((uintptr_t)thunk - ((uintptr_t)site + 5));
+    if (to != (int32_t)to) {
+        printf("BB_CLOUD_STALE: thunk out of range; not patched\n");
+        return;
+    }
+    rel = (int32_t)to;
+    memcpy(site + 1, &rel, 4);
+    printf("BB_CLOUD_STALE: cloud sample getter call patched\n");
+}
 /* BBPATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -1284,6 +1347,8 @@ int main(int argc, char **argv) {
     if (!cpu_only) apply_upscale_render_size(image, size);
     if (!cpu_only) apply_cull_scale(image, size);
     if (!cpu_only) patch_shared_alloc(image, size);
+    if (!cpu_only) patch_exposure_copy(image, size);
+    if (!cpu_only) patch_cloud_get(image, size);
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif

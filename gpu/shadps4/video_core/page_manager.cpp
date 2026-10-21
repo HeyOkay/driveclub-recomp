@@ -16,6 +16,15 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
+
 #ifndef _WIN64
 #include <sys/mman.h>
 #include "common/adaptive_mutex.h"
@@ -825,6 +834,7 @@ struct PageManager::Impl {
             BbStats::Timer timer{BbStats::t_read_faults};
             BbTrace::fault_rip = Common::FaultInstructionPointer(context);
 #ifdef _WIN64
+            BbTrace::fault_ret = *reinterpret_cast<const u64*>(((EXCEPTION_POINTERS*)context)->ContextRecord->Rsp);
             // Only read faults from GPU read protection (a page holding GPU data).
             if (!is_gpu_thread && FaultEmulation() && rasterizer->IsPageGpuModified(addr) &&
                 PageEmulationBudgetLeft(addr)) {
@@ -1274,4 +1284,304 @@ extern "C" int bbgpu_guest_write(uintptr_t addr, const void* data, uint64_t size
 extern "C" int bbgpu_guest_gpu_pages(uintptr_t addr, uint64_t size) {
     auto* r = VideoCore::g_memops_rasterizer;
     return r && GuestMemops() && size != 0 && !r->IsGpuSideThread() && AnyGpuPage(r, addr, size);
+}
+
+// bbport: BB_EXPOSURE_STALE=1 (opt-in; src/probe.c retargets the calls): DriveClub's auto-exposure (eboot
+// FUN_00702750) asks the readback getter for its two luminance histograms in latency mode and copies each one (1 KB)
+// with memcpy at 0x702ad2 / 0x702afc. The game expects them 2-3 frames old (it reads in latency mode), but
+// here the GPU runs ~3 submissions behind the recording, so each copy waited for the GPU on the main thread. While a
+// histogram still holds GPU-written bytes not delivered, the copy returns the last histogram delivered from that
+// address and a helper thread fetches the new one (it takes the fault and the wait); otherwise it is a plain copy.
+// Exposure never sees missing data: the first copy from an address always waits.
+namespace {
+struct ExposureShadow {
+    uintptr_t src = 0;
+    u64 size = 0;
+    bool valid = false;
+    bool fetching = false;
+    std::chrono::steady_clock::time_point delivered{}; ///< when `data` was read from the GPU or guest memory
+    std::array<u8, 4096> data{};
+};
+// A shadow older than this is not served (the address may belong to another object by now: the real read runs).
+constexpr auto kShadowMaxAge = std::chrono::milliseconds(250);
+bool Fresh(const ExposureShadow& s) {
+    return s.valid && std::chrono::steady_clock::now() - s.delivered < kShadowMaxAge;
+}
+std::mutex g_exposure_mutex;
+std::condition_variable g_exposure_cv;
+std::array<ExposureShadow, 16> g_exposure{};
+std::deque<size_t> g_exposure_queue;
+u64 g_exposure_stale = 0, g_exposure_plain = 0, g_exposure_fetched = 0;
+
+// Under g_exposure_mutex. Null when the table is full (then the copy is plain).
+ExposureShadow* ExposureSlot(uintptr_t src, u64 size) {
+    for (auto& s : g_exposure) {
+        if (s.src == src && s.size == size) {
+            return &s;
+        }
+    }
+    for (auto& s : g_exposure) {
+        if (!s.src) {
+            s.src = src;
+            s.size = size;
+            return &s;
+        }
+    }
+    return nullptr;
+}
+
+void ExposureFetcher() {
+    BbTrace::lazy_readback = true; // its downloads ride the next submission
+    std::array<u8, 4096> buf;
+    std::unique_lock lk{g_exposure_mutex};
+    for (;;) {
+        g_exposure_cv.wait(lk, [] { return !g_exposure_queue.empty(); });
+        auto& slot = g_exposure[g_exposure_queue.front()];
+        g_exposure_queue.pop_front();
+        const uintptr_t src = slot.src;
+        const u64 size = slot.size;
+        lk.unlock();
+        // A snapshot of the GPU's bytes, waited for here; guest memory when the GPU no longer holds the range. Not
+        // a guest read: a read fault would deliver the window and, when the GPU keeps rewriting it, end in a
+        // synchronous download on the GPU command thread (every ~8 frames with BB_CLOUD_STALE).
+        auto* r = VideoCore::g_memops_rasterizer;
+        bool got = r && r->SnapshotGpuRange(src, size, buf.data());
+        // A failed snapshot also means its bounded GPU wait may have timed out. Backing bytes
+        // are authoritative only after no undelivered GPU bytes remain. Otherwise keep the
+        // previous delivery time: publishing stale backing as fresh would defeat the age limit.
+        if (!got && (!r || !r->IsRangeGpuWritten(src, size))) {
+            got = runtime_memory_read_backing(src, buf.data(), size) != 0;
+        }
+        lk.lock();
+        if (got) {
+            std::memcpy(slot.data.data(), buf.data(), size);
+            slot.valid = true;
+            slot.delivered = std::chrono::steady_clock::now();
+        }
+        slot.fetching = false;
+        ++g_exposure_fetched;
+    }
+}
+
+PS4_SYSV_ABI void* ExposureCopy(void* dst, const void* src, u64 size) {
+    auto* r = VideoCore::g_memops_rasterizer;
+    const auto at = reinterpret_cast<uintptr_t>(src);
+    const bool tracked = size <= 4096;
+    if (r && tracked && r->IsRangeGpuWritten(at, size)) {
+        std::scoped_lock lk{g_exposure_mutex};
+        auto* slot = ExposureSlot(at, size);
+        if (slot && Fresh(*slot)) {
+            if (!slot->fetching) {
+                slot->fetching = true;
+                g_exposure_queue.push_back(size_t(slot - g_exposure.data()));
+                g_exposure_cv.notify_one();
+            }
+            std::memcpy(dst, slot->data.data(), size);
+            if ((++g_exposure_stale & 4095) == 0) {
+                std::printf("Exposure histograms: %llu served from the last delivered copy, %llu plain, %llu fetched\n",
+                            (unsigned long long)g_exposure_stale, (unsigned long long)g_exposure_plain,
+                            (unsigned long long)g_exposure_fetched);
+            }
+            return dst;
+        }
+    }
+    std::memcpy(dst, src, size); // delivered, or the first copy from this address: the real data
+    if (tracked) {
+        std::scoped_lock lk{g_exposure_mutex};
+        if (auto* slot = ExposureSlot(at, size); slot && !slot->fetching) {
+            std::memcpy(slot->data.data(), dst, size);
+            slot->valid = true;
+            slot->delivered = std::chrono::steady_clock::now();
+        }
+        ++g_exposure_plain;
+    }
+    return dst;
+}
+
+// The exposure value (8 bytes, eboot 0x702b0d: the getter for obj+0x10, then vmovss from the pointer it returns at
+// 0x702b29 / 0x702b2d): the same, by returning a pointer to the last delivered value. Main thread only.
+using ReadbackGetter = PS4_SYSV_ABI bool (*)(void* obj, u32 frame, void** out, u32* count);
+ReadbackGetter g_real_getter = nullptr;
+alignas(16) thread_local u8 g_served_value[16]; // read by the caller after return: per thread
+
+PS4_SYSV_ABI bool ExposureValueGet(void* obj, u32 frame, void** out, u32* count) {
+    if (!g_real_getter(obj, frame, out, count)) {
+        return false;
+    }
+    auto* r = VideoCore::g_memops_rasterizer;
+    const auto at = reinterpret_cast<uintptr_t>(*out);
+    constexpr u64 size = 8;
+    if (!r || !at) {
+        return true;
+    }
+    if (r->IsRangeGpuWritten(at, size)) {
+        std::scoped_lock lk{g_exposure_mutex};
+        auto* slot = ExposureSlot(at, size);
+        if (!slot) {
+            return true;
+        }
+        if (!slot->fetching) {
+            slot->fetching = true;
+            g_exposure_queue.push_back(size_t(slot - g_exposure.data()));
+            g_exposure_cv.notify_one();
+        }
+        if (Fresh(*slot)) {
+            std::memcpy(g_served_value, slot->data.data(), size);
+            *out = g_served_value;
+            ++g_exposure_stale;
+        }
+        return true; // not valid yet: the game reads the real value (and waits) this once
+    }
+    u8 value[size];
+    std::memcpy(value, reinterpret_cast<const void*>(at), size);
+    std::scoped_lock lk{g_exposure_mutex};
+    if (auto* slot = ExposureSlot(at, size); slot && !slot->fetching) {
+        std::memcpy(slot->data.data(), value, size);
+        slot->valid = true;
+        slot->delivered = std::chrono::steady_clock::now();
+    }
+    ++g_exposure_plain;
+    return true;
+}
+
+std::once_flag g_fetcher_started;
+void StartFetcher() {
+    std::call_once(g_fetcher_started, [] { std::thread(ExposureFetcher).detach(); });
+}
+
+// Under g_exposure_mutex: queues a fetch of the slot unless one is queued or running.
+void QueueFetch(ExposureShadow* slot) {
+    if (!slot->fetching) {
+        slot->fetching = true;
+        g_exposure_queue.push_back(size_t(slot - g_exposure.data()));
+        g_exposure_cv.notify_one();
+    }
+}
+
+// BB_CLOUD_STALE=1 (opt-in; src/probe.c retargets eboot 0x60265e): trueSKY's cloud sample (FUN_00601df0) asks the
+// getter for the previous frame's result (a 16-byte point and a GDS count) and keeps its old point when told "not
+// ready" (the last completed copy is safe for it: it feeds the lightning state machine).
+// The getter's count read waited for the GPU (~4 ms, the main thread's largest wait once exposure stopped waiting).
+// The slot is picked exactly as the getter does (labels included); while its count or point holds GPU bytes not
+// delivered, the last delivered pair is returned and the helper thread fetches the new one.
+uintptr_t g_image_base = 0;
+alignas(16) thread_local u8 g_served_cloud[16];
+u64 g_cloud_stale = 0, g_cloud_plain = 0;
+
+struct GetterPick {
+    bool ok = false;
+    uintptr_t data = 0, count = 0;
+};
+// Mirrors eboot FUN_00758980 without reading the count.
+GetterPick PickGetterSlot(const u8* obj, u32 frame) {
+    const u32 flags = *reinterpret_cast<const u32*>(obj + 0x10);
+    u32 slot = 0, want = frame;
+    if (flags & 0x10) {
+        const u32 cur = *reinterpret_cast<const u32*>(obj + 0x80);
+        if (frame != 0) {
+            slot = cur;
+            if (*reinterpret_cast<const u32*>(obj + 0x48 + slot * 0x30) != frame) {
+                return {};
+            }
+        } else {
+            const u32 owner = *reinterpret_cast<const u32*>(obj + 0x84);
+            const u32 gen = *reinterpret_cast<const u32*>(obj + 0x88);
+            const bool mine = owner == *reinterpret_cast<const u32*>(g_image_base + 0x2749f58);
+            const u32 lag = mine ? 3 : 2;
+            if (gen <= lag) {
+                return {};
+            }
+            slot = mine ? 1 - cur : cur;
+            want = gen - lag;
+        }
+    }
+    // obj+0x40 holds a pointer to the label's pointer (758a11-758a19: two loads, then the compare).
+    const u32* label = **reinterpret_cast<u32** const*>(obj + 0x40 + slot * 0x30);
+    if (*label != want) {
+        return {};
+    }
+    return {true, *reinterpret_cast<const uintptr_t*>(obj + 0x20 + slot * 0x30),
+            (flags & 0x20) ? *reinterpret_cast<const uintptr_t*>(obj + 0x28 + slot * 0x30) : 0};
+}
+
+PS4_SYSV_ABI bool CloudGet(void* obj, u32 frame, void** out, u32* count) {
+    auto* r = VideoCore::g_memops_rasterizer;
+    const GetterPick pick = r ? PickGetterSlot(static_cast<const u8*>(obj), frame) : GetterPick{};
+    if (!pick.ok || !pick.data || !pick.count) {
+        return g_real_getter(obj, frame, out, count); // not ready (or not a counted buffer): as before
+    }
+    constexpr u64 size = 16;
+    if (r->IsRangeGpuWritten(pick.count, 4) || r->IsRangeGpuWritten(pick.data, size)) {
+        std::scoped_lock lk{g_exposure_mutex};
+        auto* c = ExposureSlot(pick.count, 4);
+        auto* d = ExposureSlot(pick.data, size);
+        if (c && d) {
+            QueueFetch(c);
+            QueueFetch(d);
+            if (Fresh(*c) && Fresh(*d)) {
+                std::memcpy(g_served_cloud, d->data.data(), size);
+                u32 n;
+                std::memcpy(&n, c->data.data(), 4);
+                const u32 most = *reinterpret_cast<const u32*>(static_cast<const u8*>(obj) + 0xc);
+                *out = g_served_cloud;
+                *count = n > most ? most : n;
+                ++g_cloud_stale;
+                return true;
+            }
+        }
+        // Nothing delivered yet: the real getter (it waits) this once.
+    }
+    const bool ok = g_real_getter(obj, frame, out, count);
+    u8 point[size];
+    u32 n;
+    std::memcpy(point, reinterpret_cast<const void*>(pick.data), size);
+    std::memcpy(&n, reinterpret_cast<const void*>(pick.count), 4);
+    std::scoped_lock lk{g_exposure_mutex};
+    auto* c = ExposureSlot(pick.count, 4);
+    auto* d = ExposureSlot(pick.data, size);
+    if (c && d && !c->fetching && !d->fetching) {
+        std::memcpy(c->data.data(), &n, 4);
+        std::memcpy(d->data.data(), point, size);
+        c->valid = d->valid = true;
+        c->delivered = d->delivered = std::chrono::steady_clock::now();
+    }
+    if ((++g_cloud_plain & 1023) == 0) {
+        std::printf("Cloud sample: %llu served from the last delivered pair, %llu plain\n",
+                    (unsigned long long)g_cloud_stale, (unsigned long long)g_cloud_plain);
+    }
+    return ok;
+}
+} // namespace
+
+// For src/probe.c: the hook of the exposure value's getter call; real_getter is eboot 0x758980. 0 unless
+// BB_EXPOSURE_STALE=1: the last delivered value is served without matching the generation the getter selected.
+extern "C" uintptr_t bbgpu_exposure_value_hook(uintptr_t real_getter) {
+    const char* env = std::getenv("BB_EXPOSURE_STALE");
+    if (!env || env[0] != '1') { // opt-in: the served value can be older than the generation the game selected
+        return 0;
+    }
+    g_real_getter = reinterpret_cast<ReadbackGetter>(real_getter);
+    return reinterpret_cast<uintptr_t>(&ExposureValueGet);
+}
+
+// For src/probe.c: the hook of the cloud sample's getter call (BB_CLOUD_STALE=1), or 0.
+extern "C" uintptr_t bbgpu_cloud_hook(uintptr_t image_base) {
+    const char* env = std::getenv("BB_CLOUD_STALE");
+    if (!(env && env[0] == '1')) {
+        return 0;
+    }
+    g_image_base = image_base;
+    g_real_getter = reinterpret_cast<ReadbackGetter>(image_base + 0x758980);
+    StartFetcher();
+    return reinterpret_cast<uintptr_t>(&CloudGet);
+}
+
+// The hook for src/probe.c, or 0 unless BB_EXPOSURE_STALE=1.
+extern "C" uintptr_t bbgpu_exposure_hook(void) {
+    const char* env = std::getenv("BB_EXPOSURE_STALE");
+    if (!env || env[0] != '1') { // opt-in: the served value can be older than the generation the game selected
+        return 0;
+    }
+    StartFetcher();
+    return reinterpret_cast<uintptr_t>(&ExposureCopy);
 }

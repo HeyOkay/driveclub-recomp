@@ -86,6 +86,12 @@ public:
         return gpu_byte_map.Any(addr, size);
     }
 
+    /// bbport: for a background reader (the stale-serving helper, page_manager.cpp): the GPU's bytes of a GPU
+    /// modified range as of everything recorded so far, copied to staging and waited for here. Nothing is delivered
+    /// to guest memory (the range stays GPU modified), so it never retries or falls back to a synchronous download.
+    /// False when the range is not GPU modified (guest memory holds it). Any thread but the GPU threads.
+    bool SnapshotGpuRange(VAddr addr, u64 size, void* out);
+
     /// bbport: BB_FAULT_EMULATE, any thread: a guest store to bytes no GPU write holds, on a page protected for
     /// other bytes. Written to guest memory now; the arena copy is updated by the cache owner before it records
     /// further work (ApplyQueuedStores). False when not eligible.
@@ -268,6 +274,9 @@ private:
     std::atomic<bool> direct_readback{true};
     u32 direct_reads{};
     std::array<u64, 4096> window_write_tick{};
+    /// bbport: the newest tick of a lazy (background, not flushed) readback copy; a caller that has to wait for
+    /// pending readbacks flushes first when it is not submitted yet (it may be the one that would submit it).
+    u64 lazy_readback_tick{};
     /// bbport: BB_READBACK_LOG: per window (hashed like window_write_tick) the last writer's tag, when it was
     /// recorded (steady ns), and how many write bindings since the window was last read back.
     std::array<u64, 4096> window_writer{};

@@ -44,6 +44,12 @@ void bbgpu_print_recent_passes(void);
  * heap allocator (eboot 0x753a80) and the GDS-count site of the VideoShared one; called as wrapper(size, align, tag, site).
  * 0: not enabled. */
 uintptr_t bbgpu_shared_alloc_hook(uintptr_t real_alloc, uintptr_t image_base);
+/* BB_EXPOSURE_STALE=1 (gpu/shadps4/video_core/page_manager.cpp): the hook for the auto-exposure histogram copies
+ * (SysV memcpy signature). 0: not enabled. */
+uintptr_t bbgpu_exposure_hook(void);
+uintptr_t bbgpu_exposure_value_hook(uintptr_t real_getter);
+/* BB_CLOUD_STALE=1: the hook of the cloud sample's getter call (eboot 0x60265e). 0: not enabled. */
+uintptr_t bbgpu_cloud_hook(uintptr_t image_base);
 #ifdef __cplusplus
 }
 #endif

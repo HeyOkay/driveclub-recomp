@@ -153,6 +153,10 @@ public:
     bool ReadMemory(VAddr addr, u64 size, bool assume_locks = false);
     /// bbport: BB_FAULT_EMULATE: true unless every byte of the range is GPU mapped and not GPU written.
     bool IsRangeGpuWritten(VAddr addr, u64 size);
+    /// bbport: BufferCache::SnapshotGpuRange (background readers).
+    bool SnapshotGpuRange(VAddr addr, u64 size, void* out) {
+        return buffer_cache.SnapshotGpuRange(addr, size, out);
+    }
     /// bbport: BB_FAULT_EMULATE: queues a guest store that touches no GPU-written byte (BufferCache::
     /// QueueUntrackedStore); false when the usual write fault path must run.
     bool StoreUntracked(VAddr addr, const void* data, u32 size);

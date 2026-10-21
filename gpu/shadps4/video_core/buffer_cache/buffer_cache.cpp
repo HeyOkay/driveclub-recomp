@@ -397,6 +397,9 @@ u64 BufferCache::CollectDownloads(const Buffer* arena, VAddr device_addr, u64 si
 }
 
 void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size) {
+    if (lazy_readback_tick >= scheduler.CurrentTick()) {
+        scheduler.Flush(); // a lazy readback in the range would otherwise wait for this thread to submit
+    }
     {
         // A pending offloaded readback owns the GPU modified pages of its window until it finishes.
         std::unique_lock lk{readback_mutex};
@@ -444,7 +447,7 @@ FILE* ReadbackLog() {
         if (f) {
             std::setvbuf(f, nullptr, _IOFBF, 1 << 16);
             std::fprintf(f, "# t_ms frame tid rip addr path write pickup_us data_us copy_us bytes ncopies stamped_tick "
-                            "open_tick gpu_tick writer writer_age_us writes fault_range_lo fault_range_hi page_gpu_bytes nearest_gpu_byte\n");
+                            "open_tick gpu_tick writer writer_age_us writes fault_range_lo fault_range_hi page_gpu_bytes nearest_gpu_byte ret0\n");
         }
         return f;
     }();
@@ -515,6 +518,8 @@ struct BufferCache::Readback {
     u64 write_seq{};
     u64 tick{};
     bool busy{};
+    /// Requested by a background thread (BbTrace::lazy_readback): no flush of the open submission.
+    bool lazy{};
     /// Read from the arena mapping once the tick has passed; verify: the usual copy is made too and compared.
     bool direct{};
     bool verify{};
@@ -540,6 +545,7 @@ bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
     const bool timed = log || BbTrace::enabled;
     while (attempts < 2) {
         Readback job{.window = window, .fault = device_addr};
+        job.lazy = BbTrace::lazy_readback;
         // bbport: where a read fault's time goes (BB_FRAME_STATS 'Readback waits', BB_READBACK_LOG).
         const s64 t_start = timed ? BbTrace::NowNs() : 0;
         liverpool->SendCommand<true>([this, &job] { RecordReadback(job); });
@@ -570,7 +576,7 @@ bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
                     BbTrace::rb_jobs.fetch_add(1, std::memory_order_relaxed);
                     if (log) {
                         std::scoped_lock lk{g_readback_log_mutex};
-                        std::fprintf(log, "%.3f %u %lu %llx %llx o %d %.0f %.0f %.0f %llu %zu %llu %llu %llu %016llx %.0f %u %llx %llx %llu %llu\n",
+                        std::fprintf(log, "%.3f %u %lu %llx %llx o %d %.0f %.0f %.0f %llu %zu %llu %llu %llu %016llx %.0f %u %llx %llx %llu %llu %llx\n",
                                      t_start / 1e6, BbTrace::frame_gen.load(std::memory_order_relaxed), LogThreadId(),
                                      (unsigned long long)BbTrace::fault_rip, (unsigned long long)device_addr,
                                      int(is_write), (t_recorded - t_start) / 1e3, (t_data - t_recorded) / 1e3,
@@ -579,7 +585,8 @@ bool BufferCache::OffloadReadback(VAddr device_addr, u64 size, bool is_write) {
                                      (unsigned long long)job.log_gpu, (unsigned long long)job.log_writer,
                                      job.log_write_ns ? (t_start - job.log_write_ns) / 1e3 : -1.0, job.log_writes,
                                      (unsigned long long)job.fault_lo, (unsigned long long)job.fault_hi,
-                                     (unsigned long long)job.page_gpu_bytes, (unsigned long long)job.nearest);
+                                     (unsigned long long)job.page_gpu_bytes, (unsigned long long)job.nearest,
+                                     (unsigned long long)(is_write ? 0 : BbTrace::fault_ret));
                     }
                 }
                 FinishReadback(job);
@@ -604,9 +611,16 @@ void BufferCache::RecordReadback(Readback& job) {
         std::scoped_lock lk{readback_mutex};
         if (IsReadbackPending(job.window, READBACK_WINDOW_SIZE)) {
             job.busy = true;
-            return;
+        } else {
+            MergeReadbackReturns();
         }
-        MergeReadbackReturns();
+    }
+    if (job.busy) {
+        // The caller waits for the pending copy: submit it if it is a lazy one still in the open submission.
+        if (!job.lazy && lazy_readback_tick >= scheduler.CurrentTick()) {
+            scheduler.Flush();
+        }
+        return;
     }
     ApplyQueuedStores();
     const u64 block = job.window >> block_shift;
@@ -751,10 +765,47 @@ void BufferCache::RecordReadback(Readback& job) {
         job.tick = scheduler.CurrentTick();
     }
     if (job.tick >= scheduler.CurrentTick()) {
-        scheduler.Flush();
+        if (job.lazy) {
+            lazy_readback_tick = std::max(lazy_readback_tick, job.tick);
+        } else {
+            scheduler.Flush();
+        }
     }
     std::scoped_lock lk{readback_mutex};
     pending_readbacks.push_back(job.window);
+}
+
+bool BufferCache::SnapshotGpuRange(VAddr addr, u64 size, void* out) {
+    Vulkan::StagingBufferRef staging{};
+    u64 tick = 0;
+    bool modified = false;
+    liverpool->SendCommand<true>([&] {
+        if (size == 0 || !memory_tracker->IsRegionGpuModified(addr, size)) {
+            return;
+        }
+        modified = true;
+        ApplyQueuedStores();
+        const auto* arena = GetArena(addr >> block_shift, (addr + size - 1) >> block_shift);
+        staging = staging_pool.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+        DownloadCopies copies;
+        copies.push_back(vk::BufferCopy{.srcOffset = addr - arena->cpu_addr, .dstOffset = staging.offset, .size = size});
+        runtime.CopyBuffer(arena, staging.buffer, copies);
+        // The host reads the staging memory after the wait below: the submission must end with the transfer ->
+        // host dependency (waiting and invalidating do not make device writes visible to the host by themselves).
+        scheduler.RequestHostReadBarrier();
+        tick = scheduler.CurrentTick(); // no flush: it rides the next submission
+    });
+    if (!modified) {
+        return false;
+    }
+    // Bounded: no submission may come (loading, shutdown); the staging is freed once the GPU passes it either way.
+    const bool done = scheduler.GetWorkSemaphore()->WaitFor(tick, 250'000'000);
+    if (done) {
+        staging.buffer->Invalidate(staging.offset, staging.size);
+        std::memcpy(out, staging.mapped, size);
+    }
+    liverpool->SendCommand([this, staging] { staging_pool.FreeDeferred(staging); });
+    return done;
 }
 
 void BufferCache::FinishReadback(const Readback& job) {
