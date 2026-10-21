@@ -73,6 +73,7 @@ struct Ctl {
   RectF info{};                        // the (i) after the name, where it was last drawn (pixels; empty when not shown)
   const wchar_t* more = nullptr;       // the details the (i) opens, after the hint
   int min = 0, max = 0;                // slider range
+  const wchar_t* unit = L"%";          // after a slider's value
   bool physics_only = false;           // a steering wheel row shown with the physics force model only
   int loaded = 0;                      // steering wheel rows: the value default.ini had, so only changes are written
 };
@@ -269,6 +270,10 @@ int g_lang_id = 1;
 int up_saved = 0;     // "Upscaling" choice, from launcher.ini
 int sharp_saved = -1;  // "Sharpness" percent, from launcher.ini (-1: not saved yet)
 int g_sharp = -1;
+// HDR output (BB_HDR): on/off, and the brightness of white and of the highlights in nits (hdr=, hdr_paper=,
+// hdr_peak= in launcher.ini; -1: not saved yet).
+int g_hdr = -1, g_hdr_paper = -1, g_hdr_peak = -1;
+int hdr_saved = -1, hdr_paper_saved = -1, hdr_peak_saved = -1;
 void NameNativeUpscale();
 int aa_saved = 0;     // "Anti-aliasing" choice, from launcher.ini
 int fgen_saved = 0;   // "Frame generation" choice, from launcher.ini
@@ -378,6 +383,9 @@ void ApplyDrivePreset(int p) {
   for (int k = 0; k < 4; ++k) if (g_drive[k].row >= 0) g_c[g_drive[k].row].sel = kDrivePreset[p][k];
 }
 std::wstring CameraIniPath() { return g_data + L"\\user\\camera.ini"; }
+// HDR brightness: Page Up / Page Down change it while playing and save it in data\user\hdr.ini paper= (gpu/shim/
+// bbport_settings.cpp); it wins over launcher.ini's, being newer.
+std::wstring HdrIniPath() { return g_data + L"\\user\\hdr.ini"; }
 
 // The last result, from data\user\benchmark\result.txt.
 struct BenchResult {
@@ -424,6 +432,8 @@ bool RowHidden(const Ctl& c) {
   if (c.physics_only && !PhysicsChosen()) return true;
   if ((g_up >= 0 && &c == &g_c[g_up]) || (g_sharp >= 0 && &c == &g_c[g_sharp])) return g_aa >= 0 && g_c[g_aa].sel == 0;
   if (g_inres >= 0 && &c == &g_c[g_inres]) return UpscaleActive();
+  if ((g_hdr_paper >= 0 && &c == &g_c[g_hdr_paper]) || (g_hdr_peak >= 0 && &c == &g_c[g_hdr_peak]))
+    return g_hdr >= 0 && g_c[g_hdr].sel == 0;
   return false;
 }
 bool IsWheelRow(const Ctl& c) { return c.patches[0].rfind("@ffb:", 0) == 0 || c.patches[0].rfind("@wheel", 0) == 0; }
@@ -693,6 +703,27 @@ void BuildModel() {
                                L"Records each frame's draw commands on a second thread, so the thread that runs the game's "
                                L"graphics commands waits less. Faster on most PCs. Turn it off if you see flicker or broken graphics.",
                                "@twothread", true);
+  g_hdr = toggle(L"HDR",
+                 L"For HDR monitors and TVs: brighter highlights (the sun, lights, reflections) and deeper contrast. Turn on \"Use HDR\" in Windows' display settings first.",
+                 "@hdr", false);
+  {
+    Ctl c{L"HDR brightness", L"How bright white is: the HUD, menus and the scene overall. Raise it if the picture looks dull or dark, lower it if it is tiring. While playing: Page Up brighter, Page Down darker.",
+          Kind::Slider, {}, {"@hdr_paper"}, 350, 350};
+    c.min = 100;
+    c.max = 600;
+    c.unit = L" nits";
+    g_hdr_paper = int(g_c.size());
+    g_c.push_back(std::move(c));
+  }
+  {
+    Ctl c{L"HDR peak brightness", L"The brightest your screen can show; the sun and lights reach it. Set it to your screen's HDR peak (for example 600 or 1000 nits).",
+          Kind::Slider, {}, {"@hdr_peak"}, 1000, 1000};
+    c.min = 400;
+    c.max = 2000;
+    c.unit = L" nits";
+    g_hdr_peak = int(g_c.size());
+    g_c.push_back(std::move(c));
+  }
   const int showfps = toggle(L"Show FPS counter", L"Draws the frame rate in the top right corner while playing.", "@fps", false);
   const int full = toggle(L"Fullscreen", L"Plays borderless fullscreen. Turn off for a window.", "@full", true);
   const int unlock = toggle(L"Unlock DLC content",
@@ -781,9 +812,10 @@ void BuildModel() {
   // The cards flow into as many columns as the window width allows (see LayoutPass), on the page of their tab.
   g_cards.push_back({L"FRAME RATE AND RESOLUTION", {g_preset, fps, outres, inres, wide, fov, twothread}, 0, kTabGraphics});
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
+  g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter."});
+                     L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});
@@ -884,6 +916,9 @@ void LoadSettings() {
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
     if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
     if (line.rfind("two_thread=", 0) == 0) g_two_thread = line.substr(11) == "1";
+    if (line.rfind("hdr=", 0) == 0) hdr_saved = atoi(line.substr(4).c_str());
+    if (line.rfind("hdr_paper=", 0) == 0) hdr_paper_saved = atoi(line.substr(10).c_str());
+    if (line.rfind("hdr_peak=", 0) == 0) hdr_peak_saved = atoi(line.substr(9).c_str());
     for (const auto& d : g_drive) {
       const size_t n = std::strlen(d.key);
       if (d.row < 0 || line.compare(0, n, d.key) != 0) continue;
@@ -958,7 +993,21 @@ void LoadSettings() {
     g_c[g_lang].items[0] = kLangName[g_lang_id];
   }
   if (g_up >= 0 && up_saved >= 1 && up_saved <= 4) g_c[g_up].sel = up_saved;
-  if (g_sharp >= 0 && sharp_saved >= 0) g_c[g_sharp].sel = (std::clamp)(sharp_saved, 0, 100);
+  // The sliders' saved values, else their defaults (the patch list sets nothing for them).
+  if (g_sharp >= 0) g_c[g_sharp].sel = sharp_saved >= 0 ? (std::clamp)(sharp_saved, 0, 100) : g_c[g_sharp].def;
+  if (g_hdr >= 0 && hdr_saved >= 0) g_c[g_hdr].sel = hdr_saved ? 1 : 0;
+  {
+    std::ifstream hdr_ini(HdrIniPath().c_str());
+    std::string hdr_line;
+    while (std::getline(hdr_ini, hdr_line))
+      if (hdr_line.rfind("paper=", 0) == 0) hdr_paper_saved = atoi(hdr_line.substr(6).c_str());
+  }
+  if (g_hdr_paper >= 0) {
+    g_c[g_hdr_paper].sel = hdr_paper_saved >= 0 ? (std::clamp)(hdr_paper_saved, 100, 600) : g_c[g_hdr_paper].def;
+    g_c[g_hdr_paper].loaded = g_c[g_hdr_paper].sel;
+  }
+  if (g_hdr_peak >= 0)
+    g_c[g_hdr_peak].sel = hdr_peak_saved >= 0 ? (std::clamp)(hdr_peak_saved, 400, 2000) : g_c[g_hdr_peak].def;
   if (g_aa >= 0 && aa_saved >= 1 && aa_saved <= 2) g_c[g_aa].sel = aa_saved;
   if (g_fgen >= 0 && fgen_saved >= 1 && fgen_saved <= 4) g_c[g_fgen].sel = fgen_saved;
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
@@ -1035,11 +1084,17 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@autoplay") g_auto_play = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
         << "\r\nbench_rain=" << g_c[g_brain].sel << "\r\nbench_length=" << g_c[g_blen].sel << "\r\n";
     for (const auto& d : g_drive) if (d.row >= 0) ini << d.key << g_c[d.row].sel << "\r\n";
+    // Only when moved here: the game may have saved a newer one since this window read it.
+    if (g_hdr_paper >= 0 && g_c[g_hdr_paper].sel != g_c[g_hdr_paper].loaded) {
+      std::ofstream hdr_ini(HdrIniPath().c_str(), std::ios::binary | std::ios::trunc);
+      hdr_ini << "paper=" << g_c[g_hdr_paper].sel << "\r\n";
+      g_c[g_hdr_paper].loaded = g_c[g_hdr_paper].sel;
+    }
     if (g_fov >= 0 && (g_c[g_fov].sel != 100 || Exists(CameraIniPath()))) {
       std::ofstream cam(CameraIniPath().c_str(), std::ios::binary | std::ios::trunc);
       cam << "fov=" << g_c[g_fov].sel << "\r\n";
@@ -1482,7 +1537,7 @@ void Paint(HDC hdc, int w, int h) {
       if (c.kind == Kind::Slider) {
         // Label and value above a track with a knob.
         RowLabel(g, c, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width - 70 * S, 22 * S));
-        Text(g, std::to_wstring(c.sel) + L"%", fSegBold, RectF(row.X + row.Width - 70 * S, row.Y + 2 * S, 70 * S, 22 * S),
+        Text(g, std::to_wstring(c.sel) + c.unit, fSegBold, RectF(row.X + row.Width - 90 * S, row.Y + 2 * S, 90 * S, 22 * S),
              hot ? kWhite : kText, StringAlignmentFar);
         const float t = c.max > c.min ? float((std::clamp)(c.sel, c.min, c.max) - c.min) / float(c.max - c.min) : 0.f;
         const RectF track(ct.X + 8 * S, ct.Y + ct.Height / 2 - 3 * S, ct.Width - 16 * S, 6 * S);
@@ -1931,6 +1986,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     const int u = UpscaleActive() ? g_c[g_up].sel : 0;
     SetEnvironmentVariableW(L"BB_AA_SCALE", u == 0 ? L"native" : u == 1 ? L"quality" : u == 2 ? L"balanced"
                                             : u == 3 ? L"performance" : L"ultra_performance");
+  }
+  if (g_hdr >= 0 && !UserEnv(L"BB_HDR")) {
+    const bool hdr = g_c[g_hdr].sel != 0;
+    SetEnvironmentVariableW(L"BB_HDR", hdr ? L"1" : nullptr);
+    // The brightness is in hdr.ini (SaveSettings, or the game's Page Up / Page Down).
+    SetEnvironmentVariableW(L"BB_HDR_PAPER", nullptr);
+    SetEnvironmentVariableW(L"BB_HDR_PEAK", hdr ? std::to_wstring(g_c[g_hdr_peak].sel).c_str() : nullptr);
   }
   if (g_sharp >= 0 && !UserEnv(L"BB_FSR_SHARPNESS")) {  // FSR's RCAS, and the one after DLSS
     wchar_t v[16];
@@ -2603,6 +2665,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
             else if (GpuBlocked()) { g_status = g_gpu_problem; g_status_color = kBad; }
           }
           g_changed = true;
+          if (c == g_hdr) Relayout(h);  // its sliders show or hide
         } else if (seg >= 0) {
           // choices that show or hide other rows (RowHidden)
           const bool model_changed = (c == g_ffb_model || c == g_aa || c == g_up) && ctl.sel != seg;

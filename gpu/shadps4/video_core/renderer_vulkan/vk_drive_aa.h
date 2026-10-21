@@ -73,6 +73,18 @@ public:
     /// Upscales `color` to the output size; the draw then samples the result (Redirect).
     void OnComposite(VideoCore::ImageId color);
 
+    /// The last upscaled picture (RGBA16F, General layout; the caller knows it was made this
+    /// frame): HDR output reads the scene from it.
+    [[nodiscard]] bool UpscaledResult(vk::Image& image, u32& w, u32& h) const {
+        if (!ready || !result_image) {
+            return false;
+        }
+        image = vk::Image(result_image);
+        w = out_width;
+        h = out_height;
+        return true;
+    }
+
 private:
     struct CachedView {
         vk::Image image;

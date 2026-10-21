@@ -62,7 +62,7 @@ Any gamepad works. Keyboard, mouse and gamepad can be used at the same time.
 | D-pad | Arrow keys |
 | Look around | I J K L or the mouse |
 
-F5 and F6 narrow and widen the view. F7 turns mouse look on or off. F9 and F10 are the anti-aliasing keys above. F12 hides and shows the FPS counter. The bindings are in `data\user\input_config\default.ini` and can be changed there.
+F5 and F6 narrow and widen the view. F7 turns mouse look on or off. F9 and F10 are the anti-aliasing keys above. F12 hides and shows the FPS counter. With HDR on, Page Up and Page Down make the picture brighter or darker. The bindings are in `data\user\input_config\default.ini` and can be changed there.
 
 ### Steering wheels
 Any wheel that Windows lists as a game controller works: the game sees it as a PS4 wheel. Pedals with a clutch, an H-pattern shifter (on the wheel or as a controller of its own, such as a Logitech Driving Force Shifter on a USB adapter) and a handbrake with a USB of its own work too. Everything is set up on the launcher's **Driving** tab, under **Wheel and force feedback**.
@@ -119,6 +119,8 @@ The window that opens when you start `DriveClub.exe` has every setting. Press **
 **Anti-aliasing:** **Game** keeps the original. **FSR 3.1** works on any graphics card, **DLSS (RTX)** needs a GeForce RTX card; if it is not available the launcher falls back to FSR. Do not turn on the community patch "Disable motion blur and depth of field" with it: they do not work together and the game keeps its own anti-aliasing then.
 
 **Upscaling:** with FSR 3.1 or DLSS: **DLAA** (**Native** with FSR) draws every pixel; **Quality**, **Balanced**, **Performance** and **Ultra Perf.** draw the game at 1/1.5, 1/1.7, 1/2 and 1/3 of the output size and rebuild the full picture, for more FPS each. The Render resolution choice does not apply then. With upscaling, F9 leaves FSR or DLSS on: the game draws at the smaller size, so there is no full-resolution picture to switch to. **Sharpness:** 0 to 100 (80 by default).
+
+**HDR:** for HDR monitors and TVs; turn on "Use HDR" in Windows' display settings first. The game makes an SDR picture, so the port turns it into HDR10: the HUD and menus at a comfortable white, and the 3D scene's highlights (the sun, lights, reflections, glints) brighter, taken from the game's own scene before its tone mapping where the SDR picture runs out. White surfaces such as snow and painted lines stay white, not glaring. **HDR brightness** (100 to 600 nits, 350 by default; Page Up / Page Down while playing, kept for the next start) sets how bright white is; **HDR peak brightness** (400 to 2000 nits, 1000 by default) should match your screen's HDR peak. Frame generation is off with HDR.
 
 **Anisotropic filtering:** keeps textures on roads and terrain sharp at a shallow angle. **Automatic** is 16x (4x on integrated graphics); you can also choose Off, 2x, 4x, 8x or 16x.
 

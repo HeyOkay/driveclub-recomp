@@ -75,6 +75,12 @@ inline bool UpscalerOptIn() {
 }
 
 struct Values {
+    /// HDR output (BB_HDR=1 and a display in HDR mode): set by the presenter; the rasterizer then
+    /// keeps the picture before the UI. Brightness of SDR white (UI, menus) and of the brightest
+    /// highlight, in nits (BB_HDR_PAPER, BB_HDR_PEAK).
+    std::atomic<bool> hdr_output{false};
+    std::atomic<float> hdr_paper{350.0f};
+    std::atomic<float> hdr_peak{1000.0f};
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
@@ -165,5 +171,8 @@ const char* UpscalerName(int upscaler);
 const char* FrameGenName(int frame_gen);
 const char* AaName(int aa);
 const char* AaScaleName(int scale);
+/// HDR brightness changed while playing (Page Up / Page Down): hdr.ini next to the settings file
+/// (the launcher shows it on its slider; read at start when BB_HDR_PAPER is not set).
+void SaveHdrBrightness(int nits);
 float AaScaleFactor(int scale);
 } // namespace BbSettings

@@ -55,6 +55,13 @@ public:
         return texture_cache;
     }
 
+    /// bbport: HDR output: the game's picture before its UI for the display buffer at `address`
+    /// (a UNORM view of an 8-bit copy, ShaderReadOnlyOptimal), or null when that frame had no 3D
+    /// scene (menus). The presenter reads it after the frame, on the same queue.
+    [[nodiscard]] vk::ImageView HdrHudless(VAddr address) const;
+    /// The same frame's 3D scene before tone mapping (linear HDR, ShaderReadOnlyOptimal), or null.
+    [[nodiscard]] vk::ImageView HdrScene(VAddr address) const;
+
     void Draw(bool is_indexed, u32 index_offset = 0, const PreparedDraw* prepared = nullptr);
 
     /// bbport: draw preparation workers (vk_draw_prep.h), fed and consumed by Liverpool.
@@ -221,6 +228,8 @@ private:
     bool FilterDraw();
     bool FilterDrawPasses() const;
     void FlushLongBatch();
+    void CaptureHdrHudless(VideoCore::ImageId display, VAddr address);
+    void InvalidateHdrHudless(VAddr address);
     u32 batch_draws{};
     u64 batch_tick{};
     /// Everything of a direct draw after the pipeline selection (GPU thread or stage B).
@@ -353,6 +362,28 @@ private:
     /// since other work (the UI starts: the picture before it is the HUD-less frame).
     VideoCore::ImageId fg_depth{};
     u64 fg_depth_area = 0;
+    /// HDR output: a 3D scene since the last display draw; the next display draw (the UI's first)
+    /// copies the display buffer first; the copies, one per display buffer.
+    bool hdr_scene = false, hdr_capture_next = false, hdr_capture_pending = false;
+    /// The composite's HDR scene: a game image, or DriveAA's upscaled picture.
+    VideoCore::ImageId hdr_scene_image{};
+    bool hdr_scene_upscaled = false;
+    struct HdrHudlessCopy {
+        VAddr address{};
+        VideoCore::UniqueImage image;
+        vk::UniqueImageView view;
+        u32 width{}, height{};
+        vk::Format format{};
+        std::atomic<bool> valid{false};
+        /// The scene before tone mapping (linear), copied at the same time; its view samples it.
+        VideoCore::UniqueImage scene;
+        vk::UniqueImageView scene_view;
+        u32 scene_width{}, scene_height{};
+        vk::Format scene_format{};
+        std::atomic<bool> scene_valid{false};
+    };
+    std::array<HdrHudlessCopy, 4> hdr_hudless;
+    u32 hdr_hudless_next = 0;
     bool fg_in_display = false;
     u32 fg_display_draws = 0; ///< draws into the display buffer since other work
     bool fg_capture_pending = false;

@@ -318,6 +318,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // bbport: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
     // main camera (shadow passes bind the same layout with the light's camera).
     gbuffer_draw = camera_motion->Enabled() && std::popcount(key.mrt_mask) >= 5 && db_desc.first;
+    // HDR output: a 3D scene is drawn in this frame (its G-buffer: three or more targets and depth).
+    if (std::popcount(key.mrt_mask) >= 3 && db_desc.first &&
+        BbSettings::Get().hdr_output.load(std::memory_order_relaxed)) {
+        hdr_scene = true;
+    }
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
     }
@@ -1213,6 +1218,21 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         if (fg_display_draws == 2 && BbSettings::Get().frame_gen != BbSettings::FrameGenOff) {
             fg_capture_pending = true;
         }
+        // HDR output: the first display draw after a 3D scene is its composite; the next one
+        // starts the UI, and the display buffer before it is the picture before the UI.
+        if (BbSettings::Get().hdr_output.load(std::memory_order_relaxed)) {
+            const VAddr address = regs.color_buffers[0].Address();
+            if (hdr_scene) {
+                hdr_scene = false;
+                hdr_capture_next = true;
+                hdr_scene_image = {};
+                hdr_scene_upscaled = false;
+                InvalidateHdrHudless(address);
+            } else if (hdr_capture_next) {
+                hdr_capture_next = false;
+                hdr_capture_pending = true;
+            }
+        }
         fg_in_display = true;
     } else {
         fg_in_display = false;
@@ -1263,6 +1283,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     draw_inputs.pending = false;
     if (!bound) {
         return;
+    }
+    if (hdr_capture_pending) {
+        hdr_capture_pending = false;
+        CaptureHdrHudless(cb_descs[0].first, regs.color_buffers[0].Address());
     }
     std::optional<BbStats::PhaseTimer> phase;
     phase.emplace(BbStats::phase_ns[4]);
@@ -1454,6 +1478,218 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
 // Submits the open command buffer once it holds BB_FLUSH_DRAWS draws (0: only at the usual points). The GPU then
 // starts on the first draws of a frame while the rest are still recorded, and a guest readback waits for the last
 // batch only, not for the whole frame recorded so far.
+namespace {
+// The UNORM format of an 8-bit display buffer (the HDR pass compares sRGB encoded values), or
+// undefined for other formats.
+vk::Format HdrHudlessViewFormat(vk::Format format) {
+    switch (format) {
+    case vk::Format::eR8G8B8A8Unorm:
+    case vk::Format::eR8G8B8A8Srgb:
+        return vk::Format::eR8G8B8A8Unorm;
+    case vk::Format::eB8G8R8A8Unorm:
+    case vk::Format::eB8G8R8A8Srgb:
+        return vk::Format::eB8G8R8A8Unorm;
+    default:
+        return vk::Format::eUndefined;
+    }
+}
+} // namespace
+
+void Rasterizer::InvalidateHdrHudless(VAddr address) {
+    for (auto& copy : hdr_hudless) {
+        if (copy.address == address) {
+            copy.valid = false;
+            copy.scene_valid = false;
+        }
+    }
+}
+
+void Rasterizer::CaptureHdrHudless(VideoCore::ImageId display, VAddr address) {
+    if (!display) {
+        return;
+    }
+    auto& image = texture_cache.GetImage(display);
+    const vk::Format view_format = HdrHudlessViewFormat(image.info.pixel_format);
+    const u32 w = image.info.size.width, h = image.info.size.height;
+    if (view_format == vk::Format::eUndefined) {
+        return;
+    }
+    HdrHudlessCopy* copy = nullptr;
+    for (auto& c : hdr_hudless) {
+        if (c.address == address) {
+            copy = &c;
+        }
+    }
+    if (!copy) {
+        copy = &hdr_hudless[hdr_hudless_next++ % hdr_hudless.size()];
+        copy->address = address;
+        copy->width = 0;
+    }
+    if (copy->width != w || copy->height != h || copy->format != image.info.pixel_format) {
+        scheduler.WaitSubmitted();  // the presenter may still read the old one
+        copy->view.reset();
+        copy->image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
+        copy->image.Create(vk::ImageCreateInfo{
+            .flags = vk::ImageCreateFlagBits::eMutableFormat,
+            .imageType = vk::ImageType::e2D,
+            .format = image.info.pixel_format,
+            .extent = {w, h, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        copy->view = Check(instance.GetDevice().createImageViewUnique({
+            .image = vk::Image(copy->image),
+            .viewType = vk::ImageViewType::e2D,
+            .format = view_format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        copy->width = w;
+        copy->height = h;
+        copy->format = image.info.pixel_format;
+    }
+    scheduler.EndRendering();
+    runtime.Transit(&image, vk::ImageLayout::eTransferSrcOptimal,
+                    vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const auto barrier = [&](vk::ImageLayout from, vk::ImageLayout to, vk::PipelineStageFlags2 src,
+                             vk::AccessFlags2 src_access, vk::PipelineStageFlags2 dst,
+                             vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = from,
+            .newLayout = to,
+            .image = vk::Image(copy->image),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    };
+    barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+            vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead,
+            vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+    cmdbuf.copyImage(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal, vk::Image(copy->image),
+                     vk::ImageLayout::eTransferDstOptimal,
+                     vk::ImageCopy{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .extent = {w, h, 1}});
+    barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+            vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead);
+    copy->valid = true;
+
+    // The scene before tone mapping: DriveAA's upscaled picture (General) or the game's image.
+    vk::Image scene_source{};
+    vk::Format scene_format{};
+    u32 sw = 0, sh = 0;
+    if (hdr_scene_upscaled && drive_aa->UpscaledResult(scene_source, sw, sh)) {
+        scene_format = vk::Format::eR16G16B16A16Sfloat;
+        const vk::MemoryBarrier2 written{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask = vk::AccessFlagBits2::eTransferRead,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+    } else if (hdr_scene_image) {
+        auto& scene = texture_cache.GetImage(hdr_scene_image);
+        runtime.Transit(&scene, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eTransfer,
+                        vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        scene_source = scene.GetImage();
+        scene_format = scene.info.pixel_format;
+        sw = scene.info.size.width;
+        sh = scene.info.size.height;
+    }
+    copy->scene_valid = false;
+    if (!scene_source) {
+        return;
+    }
+    if (copy->scene_width != sw || copy->scene_height != sh || copy->scene_format != scene_format) {
+        scheduler.WaitSubmitted();
+        copy->scene_view.reset();
+        copy->scene = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
+        copy->scene.Create(vk::ImageCreateInfo{
+            .imageType = vk::ImageType::e2D,
+            .format = scene_format,
+            .extent = {sw, sh, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = vk::SampleCountFlagBits::e1,
+            .tiling = vk::ImageTiling::eOptimal,
+            .usage = vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eSampled,
+            .initialLayout = vk::ImageLayout::eUndefined,
+        });
+        copy->scene_view = Check(instance.GetDevice().createImageViewUnique({
+            .image = vk::Image(copy->scene),
+            .viewType = vk::ImageViewType::e2D,
+            .format = scene_format,
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        }));
+        copy->scene_width = sw;
+        copy->scene_height = sh;
+        copy->scene_format = scene_format;
+    }
+    const auto scene_barrier = [&](vk::ImageLayout from, vk::ImageLayout to,
+                                   vk::PipelineStageFlags2 src, vk::AccessFlags2 src_access,
+                                   vk::PipelineStageFlags2 dst, vk::AccessFlags2 dst_access) {
+        const vk::ImageMemoryBarrier2 b{
+            .srcStageMask = src,
+            .srcAccessMask = src_access,
+            .dstStageMask = dst,
+            .dstAccessMask = dst_access,
+            .oldLayout = from,
+            .newLayout = to,
+            .image = vk::Image(copy->scene),
+            .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
+        };
+        cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    };
+    scene_barrier(vk::ImageLayout::eUndefined, vk::ImageLayout::eTransferDstOptimal,
+                  vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead,
+                  vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+    cmdbuf.copyImage(scene_source, vk::ImageLayout::eGeneral, vk::Image(copy->scene),
+                     vk::ImageLayout::eTransferDstOptimal,
+                     vk::ImageCopy{.srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+                                   .extent = {sw, sh, 1}});
+    scene_barrier(vk::ImageLayout::eTransferDstOptimal, vk::ImageLayout::eShaderReadOnlyOptimal,
+                  vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite,
+                  vk::PipelineStageFlagBits2::eAllCommands, vk::AccessFlagBits2::eShaderRead);
+    copy->scene_valid = true;
+    static bool reported = false;
+    if (!reported) {
+        reported = true;
+        std::printf("HDR: the picture before the UI, %ux%u %s; the scene, %ux%u %s%s\n", w, h,
+                    vk::to_string(image.info.pixel_format).c_str(), sw, sh,
+                    vk::to_string(scene_format).c_str(), hdr_scene_upscaled ? " (upscaled)" : "");
+    }
+}
+
+vk::ImageView Rasterizer::HdrScene(VAddr address) const {
+    for (const auto& copy : hdr_hudless) {
+        if (copy.address == address && copy.valid && copy.scene_valid && copy.scene_view) {
+            return *copy.scene_view;
+        }
+    }
+    return {};
+}
+
+vk::ImageView Rasterizer::HdrHudless(VAddr address) const {
+    for (const auto& copy : hdr_hudless) {
+        if (copy.address == address && copy.valid && copy.view) {
+            return *copy.view;
+        }
+    }
+    return {};
+}
+
 void Rasterizer::FlushLongBatch() {
     static const u32 interval = [] {
         const char* env = std::getenv("BB_FLUSH_DRAWS");
@@ -2651,7 +2887,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
     const u32 first_image_idx = image_infos.size();
     TextureSet* set_slot = nullptr;
     // A draw into the display buffer may be the one OnComposite waits for: never a memoized set.
-    const bool composite_pending = fg_in_display && drive_aa->LatePending();
+    const bool composite_pending = fg_in_display && (drive_aa->LatePending() || hdr_capture_next);
     if (!on_helper && !composite_pending &&
         BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
         // Descriptor writes: one per image (no mip arrays in a memoized set).
@@ -2861,6 +3097,19 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             if (drive_redirect && composite_pending && binding_proxy_ok[binding_index] && !is_storage &&
                 !binding.is_target && drive_aa->WantsComposite(image)) {
                 drive_aa->OnComposite(image_id);
+            }
+            // HDR output: the scene picture the composite samples (the upscaled one when it
+            // stands in), copied with the picture before the UI.
+            if (hdr_capture_next && fg_in_display && !on_helper && !is_storage) {
+                if (drive_redirect && drive_aa->Redirects(image_id)) {
+                    hdr_scene_upscaled = true;
+                } else if (image.info.pixel_format == vk::Format::eB10G11R11UfloatPack32 &&
+                           (!hdr_scene_image ||
+                            u64(image.info.size.width) * image.info.size.height >
+                                u64(texture_cache.GetImage(hdr_scene_image).info.size.width) *
+                                    texture_cache.GetImage(hdr_scene_image).info.size.height)) {
+                    hdr_scene_image = image_id;
+                }
             }
             if (drive_redirect && binding_proxy_ok[binding_index] && !is_storage &&
                 !binding.force_general && !binding.is_target && drive_aa->Redirects(image_id)) {
