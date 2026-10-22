@@ -36,6 +36,7 @@
 #include "datx.h"
 #include "scene_track_names.h"
 #include "gpu_check.h"
+#include "graphics.h"
 #include "prepare.h"
 #include "unlock.h"
 
@@ -282,6 +283,14 @@ int mirror_saved = 0;  // "Mirror and reflection updates" choice, from launcher.
 int aniso_saved = 0;   // "Anisotropic filtering" choice, from launcher.ini
 std::wstring g_name = L"Player";  // in-game player name, from "name=" in launcher.ini
 int g_inres = -1, g_wide = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_aniso = -1, g_fps = -1, g_fgen = -1, g_aa = -1, g_up = -1, g_lang = -1;
+// Graphics detail rows (graphics.cpp): the control of each, and its choice from launcher.ini (-1 = not saved yet).
+enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
+              kGfxHaze, kGfxFxaa, kGfxRows };
+int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+const char* const kGfxKey[kGfxRows] = {"gfx_car=", "gfx_opponents=", "gfx_scenery=", "gfx_reflections=", "gfx_shadows=",
+                                       "gfx_particles=", "gfx_dynres=", "gfx_motion_blur=", "gfx_lens_dust=",
+                                       "gfx_heat_haze=", "gfx_fxaa="};
 bool unlocked_saved = false;  // "Unlocked" frame rate choice, from launcher.ini  // indices of the render resolution and widescreen choices
 
 // ------------------------------------------------------------------------------------------
@@ -730,6 +739,45 @@ void BuildModel() {
   const int unlock = toggle(L"Unlock DLC content",
                             L"Unlocks the DLC content: add-on cars, bikes, tours and livery decals. Cars you earn by playing still unlock through normal progression. Built from your own game files; the game folders are not modified.",
                             "@unlock", false);
+  // Graphics detail the PS4 version keeps low and the game's camera effects, from the game's own quality file
+  // (graphics.cpp). Costs measured on an RTX 3070 Laptop, 1440p render / 4K output, 60 FPS cap, Canada day.
+  g_gfx[kGfxCar] = toggle(L"Your car: full detail",
+                          L"Draws your own car with its most detailed model during races; the PS4 version uses the next one down. "
+                          L"Cost: none measurable.",
+                          "@gfx", false);
+  g_gfx[kGfxOpp] = toggle(L"Other cars: full detail",
+                          L"The other cars also get their most detailed models up close, and every car keeps its detailed parts a little further away. "
+                          L"Cost: in a race with seven other cars, the 1% low went from 55 to 45 FPS.",
+                          "@gfx", false);
+  g_gfx[kGfxScenery] = seg(L"Scenery detail (less pop-in)",
+                           L"Trees, rocks and roadside objects switch to their detailed models further away and small objects stay visible longer, so less pops in while you drive. "
+                           L"High uses the developers' own pre-race camera values, Ultra photo mode's. "
+                           L"Cost: none measurable alone on track; Ultra in a race with seven other cars: 1% low 55 to 48 FPS.",
+                           {L"Game", L"High", L"Ultra"}, {"@gfx", "", ""}, 0);
+  g_gfx[kGfxSsr] = toggle(L"High-quality reflections",
+                          L"Uses photo mode's finer reflections on the road and the cars in races; the difference is hard to see. "
+                          L"Cost: about -4 FPS.",
+                          "@gfx", false);
+  g_gfx[kGfxShadows] = seg(L"Shadow edges",
+                           L"The game smooths the edges of shadows near the car with 32 samples and of every shadow further than 4 m with 8. "
+                           L"High uses 16 samples, Ultra 32. Cost: none measurable at 60 FPS.",
+                           {L"Game", L"High", L"Ultra"}, {"@gfx", "", ""}, 0);
+  g_gfx[kGfxParticles] = toggle(L"More particles",
+                                L"Keeps the distant spray, smoke and dust that races drop (replays keep them), and allows 1.5 times as many particles. "
+                                L"Cost: none measurable in the dry; not measured in rain.",
+                                "@gfx", false);
+  g_gfx[kGfxDynres] = toggle(L"Dynamic resolution",
+                             L"On (as on PS4), the game draws at a lower resolution for a moment when a frame takes too long. "
+                             L"Off kept the same picture here and cost about -0.5 FPS and -4 FPS on the 1% low.",
+                             "@gfx", true);
+  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Off costs nothing.",
+                           "@gfx", true);
+  g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
+  g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
+  g_gfx[kGfxFxaa] = toggle(L"FXAA pass",
+                           L"With the game's anti-aliasing, an FXAA pass softens the picture after it (photo mode turns it off). "
+                           L"Off is a little sharper.",
+                           "@gfx", true);
   auto picker = [](const wchar_t* label, const wchar_t* hint, const char* tag) {
     Ctl c{label, hint, Kind::Picker, {L""}, {tag}, 0, 0};
     g_c.push_back(std::move(c));
@@ -814,6 +862,12 @@ void BuildModel() {
   g_cards.push_back({L"FRAME RATE AND RESOLUTION", {g_preset, fps, outres, inres, wide, fov, twothread}, 0, kTabGraphics});
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
+  g_cards.push_back({L"GRAPHICS DETAIL",
+                     {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
+                      g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
+                     0, kTabGraphics, L"Built from your own game files. Costs measured at 1440p on an RTX 3070 Laptop."});
+  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabGraphics,
+                     L"The game's own camera effects, each on as on PS4."});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
                      L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
@@ -928,6 +982,9 @@ void LoadSettings() {
     }
     if (line.rfind("auto_play=", 0) == 0) g_auto_play = line.substr(10) == "1";
     if (line.rfind("full=", 0) == 0) full_screen = line.substr(5) == "1";
+    for (int k = 0; k < kGfxRows; ++k) {
+      if (line.rfind(kGfxKey[k], 0) == 0) gfx_saved[k] = atoi(line.substr(strlen(kGfxKey[k])).c_str());
+    }
     if (line.rfind("dlc_unlock=", 0) == 0) unlock_dlc = line.substr(11) == "1";  // the "unlock=" of earlier versions is not read: off for everyone
     if (line.rfind("bench_track=", 0) == 0) g_bench_track = FindBench(kBenchTracks, kBenchTrackCount, line.substr(12), 0);
     if (line.rfind("bench_car=", 0) == 0) g_bench_car = FindBench(kBenchCars, kBenchCarCount, line.substr(10), kBenchDefaultCar);
@@ -1011,6 +1068,12 @@ void LoadSettings() {
     g_c[g_hdr_peak].sel = hdr_peak_saved >= 0 ? (std::clamp)(hdr_peak_saved, 400, 2000) : g_c[g_hdr_peak].def;
   if (g_aa >= 0 && aa_saved >= 1 && aa_saved <= 2) g_c[g_aa].sel = aa_saved;
   if (g_fgen >= 0 && fgen_saved >= 1 && fgen_saved <= 4) g_c[g_fgen].sel = fgen_saved;
+  for (int k = 0; k < kGfxRows; ++k) {
+    if (g_gfx[k] < 0) continue;
+    Ctl& c = g_c[g_gfx[k]];
+    const int choices = c.kind == Kind::Toggle ? 2 : int(c.items.size());
+    c.sel = gfx_saved[k] >= 0 && gfx_saved[k] < choices ? gfx_saved[k] : c.def;
+  }
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
   NameNativeUpscale();
   DerivePreset();
@@ -1086,6 +1149,9 @@ void SaveSettings() {
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
         << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
+    for (int k = 0; k < kGfxRows; ++k) {
+      if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
+    }
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
         << "\r\nbench_rain=" << g_c[g_brain].sel << "\r\nbench_length=" << g_c[g_blen].sel << "\r\n";
@@ -1957,10 +2023,38 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     if (problem.empty()) unlock_arg = L" --mods \"" + unlock_dir + L"\"";
     else MessageBoxW(nullptr, (L"The add-on content could not be unlocked (" + problem + L"). The game starts without it.").c_str(), L"DriveClub", MB_OK | MB_ICONWARNING);
   }
+  // Graphics detail: an edited copy of global.rpk, built from the player's own archive; none when all are default.
+  std::wstring graphics_arg;
+  {
+    GraphicsChoice gc;
+    // A row that is not shown keeps the game's value.
+    const auto sel = [](GfxRow k, int game) { return g_gfx[k] >= 0 ? g_c[g_gfx[k]].sel : game; };
+    gc.own_car = sel(kGfxCar, 0);
+    gc.opponents = sel(kGfxOpp, 0);
+    gc.scenery = sel(kGfxScenery, 0);
+    gc.reflections = sel(kGfxSsr, 0);
+    gc.shadows = sel(kGfxShadows, 0);
+    gc.particles = sel(kGfxParticles, 0);
+    gc.motion_blur = sel(kGfxBlur, 1);
+    gc.lens_dust = sel(kGfxDust, 1);
+    gc.heat_haze = sel(kGfxHaze, 1);
+    gc.fxaa = sel(kGfxFxaa, 1);
+    gc.dynamic_res = sel(kGfxDynres, 1);
+    const std::wstring graphics_dir = g_data + L"\\graphics";
+    bool active = false;
+    const std::wstring problem = BuildGraphics(g_folder[0].path, g_folder[1].path, graphics_dir, gc, active);
+    LauncherLog(!problem.empty() ? "graphics detail: " + Narrow(problem)
+                : active        ? std::string("graphics detail: ok")
+                                : std::string("graphics detail: game defaults"));
+    if (problem.empty() && active) graphics_arg = L" --mods \"" + graphics_dir + L"\"";
+    else if (!problem.empty())
+      MessageBoxW(nullptr, (L"The graphics detail settings could not be applied (" + problem + L"). The game starts with its own.").c_str(),
+                  L"DriveClub", MB_OK | MB_ICONWARNING);
+  }
   std::wstring cmd = L"\"" + exe + L"\" \"" + prep + L"\\boot-linked.bin\" --content-profile \"" + prep +
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
-                     unlock_arg + L" --stub-unresolved";
+                     unlock_arg + graphics_arg + L" --stub-unresolved";
   SetEnvironmentVariableW(L"BB_GPU_USER_DIR", user.c_str());
   SetEnvironmentVariableW(L"BB_PREFLIGHT_NOTE", g_preflight_note.empty() ? nullptr : std::wstring(g_preflight_note.begin(), g_preflight_note.end()).c_str());
   SetEnvironmentVariableW(L"BB_CRASH_DIR", (g_home + L"\\logs").c_str());
