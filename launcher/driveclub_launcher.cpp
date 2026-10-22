@@ -39,6 +39,7 @@
 #include "graphics.h"
 #include "prepare.h"
 #include "unlock.h"
+#include "carswitch.h"
 
 using namespace Gdiplus;
 
@@ -2050,6 +2051,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     else if (!problem.empty())
       MessageBoxW(nullptr, (L"The graphics detail settings could not be applied (" + problem + L"). The game starts with its own.").c_str(),
                   L"DriveClub", MB_OK | MB_ICONWARNING);
+  }
+  // Car select: the three showroom menu files with shorter blur animations, also from the player's archive.
+  {
+    const std::wstring carswitch_dir = g_data + L"\\carswitch";
+    const std::wstring problem = BuildFastCarSwitch(g_folder[0].path, g_folder[1].path, carswitch_dir);
+    LauncherLog(problem.empty() ? std::string("faster car switching: ok") : "faster car switching: " + Narrow(problem));
+    if (problem.empty()) unlock_arg += L" --mods \"" + carswitch_dir + L"\"";
   }
   std::wstring cmd = L"\"" + exe + L"\" \"" + prep + L"\\boot-linked.bin\" --content-profile \"" + prep +
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +

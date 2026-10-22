@@ -64,6 +64,8 @@ void runtime_file_configure(const char *app0, const char *user);
 /* Second game folder searched for /app0 files the first one lacks (update folder first, base game second). */
 void runtime_file_set_base(const char *dir);
 void runtime_file_add_mods(const char *dir);
+/* Game-file lookups that found nothing: on disk (and the time they took) and answered from memory. */
+void runtime_file_miss_stats(uint64_t *slow, uint64_t *fast, uint64_t *slow_us);
 /* Benchmark mode (BB_BENCHMARK, runtime_benchmark.c). */
 void runtime_benchmark_configure(const char *user);
 const char *runtime_benchmark_guest_arg(void);

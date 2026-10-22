@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <time.h>
 #ifdef _WIN32
 #include <windows.h>
 /* 64-bit sizes and times; directories are never opened as CRT descriptors. */
@@ -112,20 +113,122 @@ static void log_io_error(const char *what, const char *guest, int err) {
     if (__sync_fetch_and_add(&reported, 1) < 12)
         printf("Runtime: %s%s%s failed: %s (errno %d)\n", what, guest ? " " : "", guest ? guest : "", strerror(err), err);
 }
+/* The game looks for loose files that only exist inside its archives (gameNNN.dat): camera and crowd settings,
+ * world and livery packs. The PS4 answers those from memory; here each miss cost ~6 host lookups (both mods
+ * folders, the update and base folders, a stat and an open), ~0.45 ms on this laptop's NVMe SSD, and loading a
+ * car or a menu screen misses hundreds in a row: a run of 354 is a 150 ms frame, a 17-minute session had 13,453
+ * misses, and its 30 s windows with misses were the ones with frames over 50 ms. The game folders hold ~140
+ * loose files and are read-only, so a path found missing (or a folder found in none of them) stays missing:
+ * both are remembered and answered without touching the disk. BB_FILE_MISS_CACHE=0 turns this off. */
+#define MISS_SLOTS 16384 /* power of two; a long session misses ~4,000 distinct files in ~250 folders */
+enum { MISS_NONE, MISS_ABSENT, MISS_FOLDER };  /* MISS_ABSENT: no file or folder there; MISS_FOLDER: a folder */
+typedef struct { uint64_t hash; uint32_t offset, length; uint8_t kind; } MissSlot;
+static MissSlot miss_slots[MISS_SLOTS];
+static char *miss_names;
+static size_t miss_names_size, miss_names_cap, miss_used;
+static uint64_t miss_slow, miss_fast, miss_slow_us, folders_absent;
+static int miss_cache_on(void) {
+    static int v=-1;
+    if (v<0) { const char *e=getenv("BB_FILE_MISS_CACHE"); v=!(e && e[0]=='0'); }
+    return v;
+}
+static uint64_t miss_hash(const char *key,size_t length) {
+    uint64_t h=1469598103934665603ULL;
+    for (size_t i=0;i<length;++i) h=(h^(unsigned char)key[i])*1099511628211ULL;
+    return h;
+}
+/* The two below run under `lock`. */
+static int miss_find(const char *key,size_t length) {
+    const uint64_t h=miss_hash(key,length);
+    for (size_t i=h&(MISS_SLOTS-1);miss_slots[i].kind;i=(i+1)&(MISS_SLOTS-1)) {
+        const MissSlot *s=&miss_slots[i];
+        if (s->hash==h && s->length==length && !memcmp(miss_names+s->offset,key,length)) return s->kind;
+    }
+    return MISS_NONE;
+}
+static void miss_add(const char *key,size_t length,int kind) {
+    if (miss_used>=MISS_SLOTS/2 || miss_find(key,length)) return;  /* full: the rest just costs disk lookups */
+    if (miss_names_size+length>miss_names_cap) {
+        size_t cap=miss_names_cap ? miss_names_cap*2 : 65536;
+        while (cap<miss_names_size+length) cap*=2;
+        char *grown=realloc(miss_names,cap);
+        if (!grown) return;
+        miss_names=grown; miss_names_cap=cap;
+    }
+    const uint64_t h=miss_hash(key,length);
+    size_t i=h&(MISS_SLOTS-1);
+    while (miss_slots[i].kind) i=(i+1)&(MISS_SLOTS-1);
+    memcpy(miss_names+miss_names_size,key,length);
+    miss_slots[i]=(MissSlot){h,(uint32_t)miss_names_size,(uint32_t)length,(uint8_t)kind};
+    miss_names_size+=length; ++miss_used;
+}
+static void miss_reset(void) {
+    pthread_mutex_lock(&lock);
+    memset(miss_slots,0,sizeof(miss_slots)); miss_names_size=miss_used=0;
+    pthread_mutex_unlock(&lock);
+}
+static uint64_t file_now_us(void) {
+    struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+    return (uint64_t)t.tv_sec*1000000u+(uint64_t)t.tv_nsec/1000u;
+}
+/* Guest path as translate sees it: relative paths are under /app0. */
+static void guest_key(const char *guest,char *buffer,size_t size) {
+    if (guest[0]!='/') snprintf(buffer,size,"/app0/%s",guest);
+    else snprintf(buffer,size,"%s",guest);
+}
+/* A game path that does not exist in any game folder (open, stat or access said ENOENT). */
+static void note_missing(const char *guest,uint64_t started_us) {
+    __atomic_add_fetch(&miss_slow,1,__ATOMIC_RELAXED);
+    __atomic_add_fetch(&miss_slow_us,file_now_us()-started_us,__ATOMIC_RELAXED);
+    if (!guest || !*guest || !miss_cache_on()) return;
+    char key[1024];
+    guest_key(guest,key,sizeof(key));
+    if (strncmp(key,"/app0/",6)) return;
+    pthread_mutex_lock(&lock);
+    miss_add(key,strlen(key),MISS_ABSENT);
+    pthread_mutex_unlock(&lock);
+}
+void runtime_file_miss_stats(uint64_t *slow,uint64_t *fast,uint64_t *slow_us) {
+    *slow=__atomic_load_n(&miss_slow,__ATOMIC_RELAXED);
+    *fast=__atomic_load_n(&miss_fast,__ATOMIC_RELAXED);
+    *slow_us=__atomic_load_n(&miss_slow_us,__ATOMIC_RELAXED);
+}
 static char app0_base[600];
-void runtime_file_set_base(const char *dir) { snprintf(app0_base,sizeof(app0_base),"%s",dir ? dir : ""); }
+void runtime_file_set_base(const char *dir) { snprintf(app0_base,sizeof(app0_base),"%s",dir ? dir : ""); miss_reset(); }
 /* Files the player puts in this folder replace the game's own files of the same path (read only). */
 static char mods_dirs[4][600];
 static int mods_count;
 void runtime_file_add_mods(const char *dir) {
     if (dir && *dir && mods_count<4) snprintf(mods_dirs[mods_count++],sizeof(mods_dirs[0]),"%s",dir);
+    miss_reset();
+}
+/* Probe /app0 folder `key` (length bytes) in every overlay. Only ENOENT proves absence:
+ * an existing file or another stat error must not poison that path as missing.
+ * Runs under `lock`; `host` is the /app0 mount's host folder. */
+static int folder_present(const char *key,size_t length,const char *host) {
+    const char *roots[6]; int n=0;
+    int unknown=0;
+    for (int i=0;i<mods_count;++i) roots[n++]=mods_dirs[i];
+    roots[n++]=host;
+    if (app0_base[0]) roots[n++]=app0_base;
+    for (int i=0;i<n;++i) {
+        char path[1100]; HostStat s;
+        if ((size_t)snprintf(path,sizeof(path),"%s%.*s",roots[i],(int)(length-5),key+5)>=sizeof(path)) {
+            unknown=1;
+        } else if (!host_stat(path,&s)) {
+            if (S_ISDIR(s.st_mode)) return MISS_FOLDER;
+            unknown=1;
+        } else if (errno!=ENOENT) {
+            unknown=1;
+        }
+    }
+    return unknown ? MISS_NONE : MISS_ABSENT;
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
 static int translate(const char *guest,char *out,size_t size) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
-    if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
-    else snprintf(buffer,sizeof(buffer),"%s",guest);
+    guest_key(guest,buffer,sizeof(buffer));
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
         if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
     if (runtime_benchmark_marker(buffer)) return ENOENT; /* benchmark mode progress (runtime_benchmark.c) */
@@ -138,6 +241,29 @@ static int translate(const char *guest,char *out,size_t size) {
     int result=0;
     if (!m) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
+    if (!result && best==5 && !strncmp(buffer,"/app0/",6) && miss_cache_on()) {
+        /* Known missing, or under a folder no game folder has (see MISS_SLOTS). */
+        const size_t length=strlen(buffer);
+        int kind=miss_find(buffer,length);
+        const char *slash=strrchr(buffer,'/');
+        const size_t folder=(size_t)(slash-buffer);
+        if (kind!=MISS_ABSENT && folder>5) {
+            int above=miss_find(buffer,folder);
+            if (!above) {
+                above=folder_present(buffer,folder,m->host);
+                if (above!=MISS_NONE) miss_add(buffer,folder,above);
+                if (above==MISS_ABSENT && folders_absent++<24)
+                    printf("Runtime: game folder %.*s is in no game folder on disk (only in the archives): its files are answered from memory\n",
+                           (int)folder,buffer);
+            }
+            if (above==MISS_ABSENT) kind=MISS_ABSENT;
+        }
+        if (kind==MISS_ABSENT) {
+            pthread_mutex_unlock(&lock);
+            __atomic_add_fetch(&miss_fast,1,__ATOMIC_RELAXED);
+            return ENOENT;
+        }
+    }
     if (!result && mods_count && !strncmp(buffer,"/app0/",6)) {
         for (int i=0;i<mods_count;++i) {
             char alt[1024];
@@ -250,6 +376,7 @@ static int game_path(const char *p) {
 static int64_t do_open(const char *guest,int flags,int mode) {
     if (game_path(guest) && (flags & (3|0x8|0x200|0x400|0x800))) return -EROFS;
     char path[1024];
+    const uint64_t started=file_now_us();
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
 #ifdef _WIN32
@@ -258,18 +385,20 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     HostStat s;
     Listing *dir=NULL;
     int host=-1;
-    if (!host_stat(path,&s) && S_ISDIR(s.st_mode)) {
+    const int stat_result=host_stat(path,&s);
+    const int stat_error=stat_result ? errno : 0;
+    if (!stat_result && S_ISDIR(s.st_mode)) {
         if (flags&3) return -EISDIR;
         if (!(dir=list_directory(path))) return -EACCES;
     } else if (flags&0x20000) {
-        e=errno==ENOENT ? ENOENT : ENOTDIR;
-        if (e==ENOENT) { ++missing; log_missing(guest); }
+        e=stat_result && stat_error==ENOENT ? ENOENT : ENOTDIR;
+        if (e==ENOENT) { ++missing; log_missing(guest); note_missing(guest,started); }
         return -e;
     } else {
         host=open(path,host_flags(flags)&~O_DIRECTORY,_S_IREAD|_S_IWRITE);
         if (host<0) {
             e=errno;
-            if (e==ENOENT) { ++missing; log_missing(guest); }
+            if (e==ENOENT) { ++missing; log_missing(guest); note_missing(guest,started); }
             else log_io_error("open",guest,e);
             return -e;
         }
@@ -279,7 +408,7 @@ static int64_t do_open(const char *guest,int flags,int mode) {
     int host=open(path,host_flags(flags),mode ? mode : 0644);
     if (host<0) {
         e=errno;
-        if (e==ENOENT) { ++missing; log_missing(guest); }
+        if (e==ENOENT) { ++missing; log_missing(guest); note_missing(guest,started); }
         return -e;
     }
     struct stat s;
@@ -422,10 +551,15 @@ static int64_t do_fstat(int fd,GuestStat *out) {
 }
 static int64_t do_stat(const char *guest,GuestStat *out) {
     char path[1024]; HostStat s;
+    const uint64_t started=file_now_us();
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
     if (!out) return -EFAULT;
-    if (host_stat(path,&s)) return -errno;
+    if (host_stat(path,&s)) {
+        e=errno;
+        if (e==ENOENT) note_missing(guest,started);
+        return -e;
+    }
     convert_stat(&s,out); return 0;
 }
 static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {
@@ -538,13 +672,17 @@ static int64_t do_truncate(const char *guest,int64_t length) {
 static int64_t do_fsync(int fd) { int h=host_fd(fd); if (h<0) return -EBADF; return fsync(h) ? -errno : 0; }
 static int64_t do_access(const char *guest,int mode) {
     char path[1024];
+    const uint64_t started=file_now_us();
     int e=translate(guest,path,sizeof(path));
     if (e) return -e;
 #ifdef _WIN32
-    return access(path,mode&6) ? -errno : 0; /* X_OK is invalid for the CRT */
+    if (!access(path,mode&6)) return 0; /* X_OK is invalid for the CRT */
 #else
-    return access(path,mode&7) ? -errno : 0;
+    if (!access(path,mode&7)) return 0;
 #endif
+    e=errno;
+    if (e==ENOENT) note_missing(guest,started);
+    return -e;
 }
 
 /* Convention adapters: sceKernel* -> Orbis error codes, POSIX -> -1 + errno. */
