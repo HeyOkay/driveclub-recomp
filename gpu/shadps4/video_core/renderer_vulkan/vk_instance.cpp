@@ -13,6 +13,7 @@
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "video_core/renderer_vulkan/vk_neural_rendering.h"
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
@@ -469,6 +470,17 @@ bool Instance::CreateDevice() {
                 : IsComputeSubgroupSize32Required() ? ", compute pinned to 32"
                                                     : "");
     // bbport: DLSS (optional bridge DLL) needs its own device extensions on NVIDIA GPUs.
+    // Optional neural rendering (off by default) asks for its own device extensions.
+    std::vector<const char*> neural_extensions;
+    if (NeuralRendering::AppendDeviceExtensions(physical_device, neural_extensions)) {
+        for (const char* name : neural_extensions) {
+            if (std::none_of(enabled_extensions.begin(), enabled_extensions.end(),
+                             [&](const char* e) { return std::string_view{e} == name; }) &&
+                enabled_extensions.size() < enabled_extensions.capacity()) {
+                enabled_extensions.push_back(name);
+            }
+        }
+    }
     std::vector<const char*> dlss_extensions;
     if (Dlss* dlss = Dlss::Get()) {
         dlss->AppendDeviceExtensions(*instance, physical_device, dlss_extensions);
@@ -711,6 +723,7 @@ bool Instance::CreateDevice() {
     auto [device_result, dev] = physical_device.createDeviceUnique(device_chain.get());
     if (device_result != vk::Result::eSuccess) {
         LOG_CRITICAL(Render_Vulkan, "Failed to create device: {}", vk::to_string(device_result));
+        NeuralRendering::DisableDevice();
         return false;
     }
     device = std::move(dev);

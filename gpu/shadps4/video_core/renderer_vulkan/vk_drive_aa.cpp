@@ -12,6 +12,7 @@
 #include "video_core/host_shaders/drive_aa_copy_comp.h"
 #include "video_core/host_shaders/drive_aa_sharpen_comp.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "bbport_neural_settings.h"
 #include "video_core/renderer_vulkan/vk_drive_motion.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -65,7 +66,7 @@ void PrintIssues(const char* what, u64 issues) {
 DriveAA::DriveAA(const Instance& instance_, Scheduler& scheduler_,
                  VideoCore::TextureCache& texture_cache_, Runtime& runtime_, DriveMotion& motion_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_},
-      runtime{runtime_}, motion{motion_} {}
+      runtime{runtime_}, motion{motion_}, neural{std::make_unique<NeuralRendering>(instance_, scheduler_)} {}
 
 DriveAA::~DriveAA() {
     if (context) {
@@ -91,6 +92,7 @@ float DriveAA::MipBias() const {
 }
 
 void DriveAA::NextFrame() {
+    neural->BeginFrame();
     const int mode = BbSettings::Get().aa_mode;
     if (mode != applied_mode) {
         applied_mode = mode;
@@ -511,6 +513,12 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
             vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite, all,
             vk::AccessFlagBits2::eShaderRead);
 
+    // Optional neural rendering (off by default) before the upscale: the pass runs on the game's render pixels
+    // and DLSS or FSR then carries its result to the output size.
+    neural->Record(cmdbuf, BbNeural::PreUpscale,
+                   {color.GetImage(), color_view, color_format, w, h, true, true},
+                   {*motion_view, depth_view, w, h}, reset);
+
     const auto now = std::chrono::steady_clock::now();
     float frame_ms = std::chrono::duration<float, std::milli>(now - last_frame).count();
     if (!(frame_ms > 0.0f && frame_ms < 200.0f)) {
@@ -618,6 +626,7 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
     if (!dispatched) {
         return;
     }
+    const bool was_reset = reset;
     reset = false;
     last_run = std::chrono::steady_clock::now();
     BbSettings::Get().aa_running = true;
@@ -648,6 +657,16 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
         barrier(vk::Image(result_image), vk::ImageLayout::eGeneral,
                 vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderWrite, all, rw);
     }
+
+    // Optional neural rendering (off by default) on the upscaled picture. BB_NR_ENCODING: 0 sRGB, 1 linear SDR, 2 linear HDR.
+    static const int nr_encoding = [] {
+        const char* e = std::getenv("BB_NR_ENCODING");
+        return e ? std::atoi(e) : 2;
+    }();
+    neural->Record(cmdbuf, BbNeural::PostUpscale,
+                   {vk::Image(result_image), *result_view, vk::Format::eR16G16B16A16Sfloat, ow, oh,
+                    nr_encoding >= 1, nr_encoding == 2},
+                   {*motion_view, depth_view, w, h}, was_reset);
 
     if (upscale) {
         // The pass scaling the game's picture into its display buffer samples the upscaled one

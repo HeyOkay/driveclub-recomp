@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/host_passes/hdr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
+#include "video_core/renderer_vulkan/vk_neural_rendering.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -183,6 +184,7 @@ private:
     /// bbport: frame generation, and the interval of the game's frames its frames are paced
     /// in (present thread).
     std::unique_ptr<FrameGenerator> frame_generator;
+    std::unique_ptr<NeuralRendering> neural; // optional DLSS neural rendering on the final frame, off by default
     /// The game's picture before its UI, through the same passes as the frame.
     Frame hudless_frame{};
     std::chrono::steady_clock::time_point last_game_present{};

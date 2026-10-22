@@ -14,6 +14,7 @@
 
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
+#include "video_core/renderer_vulkan/vk_neural_rendering.h"
 #include "video_core/texture_cache/image.h"
 
 struct FfxVkPortableUpscaleContext;
@@ -108,6 +109,7 @@ private:
     VideoCore::TextureCache& texture_cache;
     Runtime& runtime;
     DriveMotion& motion;
+    std::unique_ptr<NeuralRendering> neural;
 
     std::array<CachedView, 8> views{};
     u64 view_uses = 0;

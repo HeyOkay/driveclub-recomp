@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_settings.h"
+#include "bbport_neural_settings.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -138,6 +139,7 @@ void Load() {
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
     }
+    BbNeural::Load(Path());
     // The HDR brightness last set while playing (the launcher passes its slider, which shows it).
     if (FILE* file = std::fopen(HdrIniPath().c_str(), "r")) {
         char line[64];

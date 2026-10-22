@@ -20,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_platform.h"
 #include "video_core/renderer_vulkan/vk_frame_generation.h"
 #include "bbport_overlay.h"
+#include "bbport_neural_settings.h"
 #include "bbport_settings.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
@@ -194,6 +195,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
                     num_images * (FrameGenerator::MaxGenerated + 1));
 
     frame_generator = std::make_unique<FrameGenerator>(instance, draw_scheduler);
+    neural = std::make_unique<NeuralRendering>(instance, draw_scheduler);
     swapchain_frame_gen = frame_generator->Wanted();
     rasterizer->GetUpscaler().SetFrameGenerator(frame_generator.get());
 }
@@ -531,6 +533,29 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
     const s64 trace_start = BbTrace::enabled ? BbTrace::NowNs() : 0;
+#ifdef _WIN32
+    {
+        // Neural rendering (off unless nr_enabled is set): F7 switches it off and on, F6 steps through the styles.
+        static bool f7_down = false, f6_down = false;
+        static const bool requested = BbNeural::Snapshot().enabled;
+        if (requested) {
+            const bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+            const bool f6 = (GetAsyncKeyState(VK_F6) & 0x8000) != 0;
+            if (f7 && !f7_down) {
+                BbNeural::Toggle();
+            }
+            if (f6 && !f6_down) {
+                auto config = BbNeural::Snapshot();
+                config.passes[0].style = (config.passes[0].style + 1) % BbNeural::StyleCount;
+                BbNeural::Set(config);
+            }
+            f7_down = f7;
+            f6_down = f6;
+        }
+    }
+#endif
+    // Before any command buffer of this frame is taken: a settings change finishes the scheduler.
+    neural->BeginFrame();
     // bbport: BB_FRAME_DUMP_TRIGGER=<file>: when the file exists it is removed and this frame's
     // guest display buffer and presented image are written to BB_DUMP_DIR (default out/dump)
     // as raw 32-bit pixels (menus and movies included; the upscaler dumps scene frames only).
@@ -641,6 +666,14 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     }();
     pp_settings.power = tv_gamma && !hdr_output ? 2.4f / 2.2f : 1.0f;
     pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+
+    // Neural rendering on the finished, display-referred frame (the UI is in it), before the HDR conversion.
+    if (!frame->is_hdr) {
+        neural->Record(cmdbuf, BbNeural::Present,
+                       {frame->image, frame->image_view, FrameGenerator::ColorFormat, frame->width,
+                        frame->height, false, false},
+                       {}, false);
+    }
 
     // bbport: HDR output: the overlay over the SDR frame, then the frame and the game's picture
     // before its UI into the HDR10 image presented in its place.
