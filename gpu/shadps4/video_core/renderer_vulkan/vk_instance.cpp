@@ -1028,6 +1028,9 @@ void Instance::LogDeviceLost() const {
     for (const auto& a : addresses) {
         line(fmt::format("GPU: device fault address: {} 0x{:x} precision 0x{:x}",
                          vk::to_string(a.addressType), u64(a.reportedAddress), u64(a.addressPrecision)));
+        if (g_bb_describe_fault) {
+            line(g_bb_describe_fault(u64(a.reportedAddress)));
+        }
     }
     for (const auto& v : vendors) {
         line(fmt::format("GPU: device fault vendor: {} code 0x{:x} data 0x{:x}", v.description.data(),

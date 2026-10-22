@@ -94,6 +94,8 @@ static std::optional<u32> FindHostVisibleArenaType(const Vulkan::Instance& insta
     return std::nullopt;
 }
 
+static BufferCache* g_bb_cache = nullptr;
+
 BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& scheduler_,
                          Vulkan::Runtime& runtime_, AmdGpu::Liverpool* liverpool_,
                          TextureCache& texture_cache_, PageManager& tracker)
@@ -203,6 +205,11 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
         instance, 0, bda_pagetable_size, MemoryType::DeviceLocal, "BDA Page Table Buffer");
     runtime.FillBuffer(bda_pagetable_buffer.get(), 0u, bda_pagetable_size, 0u);
 
+    Vulkan::g_bb_describe_fault = [](u64 address) -> std::string {
+        return g_bb_cache ? g_bb_cache->DescribeFault(address) : std::string{};
+    };
+    g_bb_cache = this;
+
     // The zeroed guard block, on the drivers that support aliasing one memory over many ranges (AMD
     // by default in this port). AMD faults a shader that reads an unbound page; NVIDIA answers zero.
     if (sparse_aliased_enabled) {
@@ -228,6 +235,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
 }
 
 BufferCache::~BufferCache() {
+    g_bb_cache = nullptr;
     if (guard_memory) {
         instance.GetDevice().freeMemory(guard_memory);
     }
@@ -1244,6 +1252,46 @@ void BufferCache::SynchronizeDmaBuffers() {
     }
 }
 
+std::string BufferCache::DescribeFault(u64 gpu_address) {
+    for (size_t i = 0; i < arenas.size(); ++i) {
+        const auto& arena = arenas[i];
+        const u64 base = arena.BufferDeviceAddress();
+        if (gpu_address < base || gpu_address >= base + arena.SizeBytes()) {
+            continue;
+        }
+        const u64 offset = gpu_address - base;
+        const u64 guest = arena.cpu_addr + offset;
+        const u64 block = guest >> block_shift;
+        bool resident = false;
+        resident_ranges.ForEachInRange(block, block + 1, [&](const Backing&) { resident = true; });
+        return fmt::format("GPU: fault is in arena {} (of {}), arena offset 0x{:x}, guest address 0x{:x}, "
+                           "block {}, resident {}, guard {}, aliased {}, resident ranges {}",
+                           i, arenas.size(), offset, guest, block, resident ? "yes" : "no",
+                           guard_memory ? "on" : "off", sparse_aliased_enabled ? "on" : "off",
+                           resident_ranges.Size());
+    }
+    return fmt::format("GPU: fault address is in none of the {} arenas", arenas.size());
+}
+
+// Every block of a new arena starts bound to the zeroed guard block, so a shader that reads a block the
+// game never made resident gets zeros like on NVIDIA instead of a page fault that loses the AMD device.
+// The resident ranges are bound after this and replace it.
+void BufferCache::GuardWholeArena(const Buffer* arena) {
+    if (!guard_memory) {
+        return;
+    }
+    auto* binds = BindsForArena(arena);
+    binds->binds.reserve(binds->binds.size() + arena->SizeBytes() / block_size);
+    for (u64 offset = 0; offset < arena->SizeBytes(); offset += block_size) {
+        binds->binds.push_back(vk::SparseMemoryBind{
+            .resourceOffset = offset,
+            .size = block_size,
+            .memory = guard_memory,
+            .memoryOffset = 0,
+        });
+    }
+}
+
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 first_page = first_block >> blocks_per_arena_page_shift;
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
@@ -1261,6 +1309,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
                                      num_pages << arena_page_bits, MemoryType::Sparse);
             address_space[first_page] = new_arena;
             address_space[last_page] = new_arena;
+            GuardWholeArena(new_arena);
         }
         return address_space[first_page];
     }
@@ -1275,6 +1324,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     const u64 total_size = first_size + last_size;
     const u64 end_block = (first_addr + total_size) >> block_shift;
     auto* new_arena = &arenas.emplace_back(instance, first_addr, total_size, MemoryType::Sparse);
+    GuardWholeArena(new_arena);
     auto* bind = BindsForArena(new_arena);
     resident_ranges.ForEachInRange(base_block, end_block, [&](const Backing& backing) {
         const u64 start = std::max(base_block, backing.start);

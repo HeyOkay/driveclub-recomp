@@ -167,6 +167,12 @@ private:
         return &pending_binds.emplace_back(arena);
     }
 
+    void GuardWholeArena(const Buffer* arena);
+
+public:
+    std::string DescribeFault(u64 gpu_address);
+
+private:
     const Buffer* GetArena(u64 first_block, u64 last_block);
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);

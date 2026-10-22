@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdlib>
+#include <string>
 #include <span>
 #include <unordered_map>
 
@@ -20,6 +21,9 @@ struct WindowSystemInfo;
 VK_DEFINE_HANDLE(VmaAllocator)
 
 namespace Vulkan {
+/// Set by the buffer cache: says which arena and guest address a faulting GPU address belongs to.
+inline std::string (*g_bb_describe_fault)(u64 gpu_address) = nullptr;
+
 
 class Instance {
 public:
