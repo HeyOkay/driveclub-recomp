@@ -45,7 +45,15 @@ inline void DrawFrameTimes(float scale) {
     peak = std::max(peak, frame_times[i]);
   const float latest =
       frame_times[(frame_next + frame_times.size() - 1) % frame_times.size()];
-  ImGui::Text("Frame time: %.1f ms   max %.1f ms", latest, peak);
+  static float shown_latest = 0, shown_peak = 0;
+  static auto last_label = std::chrono::steady_clock::time_point{};
+  const auto label_now = std::chrono::steady_clock::now();
+  if (label_now - last_label >= std::chrono::milliseconds(100)) {
+    last_label = label_now;
+    shown_latest = latest;
+    shown_peak = peak;
+  }
+  ImGui::Text("Frame time: %.1f ms   max %.1f ms", shown_latest, shown_peak);
   const float ceiling = std::max(50.0f, std::ceil(peak / 16.6667f) * 16.6667f);
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   const ImVec2 size(420.0f * scale, 64.0f * scale);
@@ -138,6 +146,10 @@ inline std::string TrackName(const std::string &id) {
   return id;
 }
 inline void Update() {
+  static auto last_update = std::chrono::steady_clock::time_point{};
+  const auto update_now = std::chrono::steady_clock::now();
+  if (update_now - last_update < std::chrono::milliseconds(100)) return;
+  last_update = update_now;
   State next;
   if (runtime_image_base && runtime_image_size > 0x1911108) {
     const auto global = Pointer(runtime_image_base + 0x1911100);
@@ -176,9 +188,15 @@ inline void Draw() {
   }
   ImGui::Separator();
   ImGui::Text("Track: %s", TrackName(state.track).c_str());
-  float hour = -1, compression = -1;
-  const bool live = runtime_scene_debug_time(&hour, &compression) &&
-                    std::isfinite(hour) && hour >= 0 && hour < 100000;
+  static float hour = -1, compression = -1;
+  static bool live = false;
+  static auto last_clock = std::chrono::steady_clock::time_point{};
+  const auto clock_now = std::chrono::steady_clock::now();
+  if (clock_now - last_clock >= std::chrono::milliseconds(100)) {
+    last_clock = clock_now;
+    live = runtime_scene_debug_time(&hour, &compression) &&
+           std::isfinite(hour) && hour >= 0 && hour < 100000;
+  }
   if (live) {
     const int seconds = int(std::fmod(hour, 24.0f) * 3600.0f);
     ImGui::Text("Time of Day: %02d:%02d:%02d", seconds / 3600,

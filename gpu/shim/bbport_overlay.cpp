@@ -255,11 +255,20 @@ void FpsCounter() {
     float fps_hint_y = 0.0f;
     {
         auto& s = BbSettings::Get();
-        const float text_frame_ms = frame_ms_avg;
-        const float text_game_fps = s.game_fps.load();
         const auto text_now = std::chrono::steady_clock::now();
         const bool expanded = SceneDebug::Enabled() && SceneDebug::expanded.load();
-        const auto lows = expanded ? SceneDebug::frame_stats.Get(text_now) : FrameTimingStats::Lows{};
+        static float text_frame_ms = 0, text_game_fps = 0;
+        static FrameTimingStats::Lows lows;
+        static auto last_text_update = std::chrono::steady_clock::time_point{};
+        static bool last_expanded = false;
+        if (text_now - last_text_update >= std::chrono::milliseconds(100) ||
+            expanded != last_expanded) {
+            last_text_update = text_now;
+            last_expanded = expanded;
+            text_frame_ms = frame_ms_avg;
+            text_game_fps = s.game_fps.load();
+            if (expanded) lows = SceneDebug::frame_stats.Get(text_now);
+        }
         const float shown = text_frame_ms > 0.0f ? 1000.0f / text_frame_ms : 0.0f;
         if (expanded) ImGui::Text("%.0f FPS", shown);
         else ImGui::Text("%.0f FPS  %.1f ms", shown, text_frame_ms);
