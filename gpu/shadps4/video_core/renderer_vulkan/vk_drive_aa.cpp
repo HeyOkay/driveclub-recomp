@@ -443,6 +443,19 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
     const auto color_view = View(color, color_format, vk::ImageAspectFlagBits::eColor);
     const auto depth_view = View(depth, depth_format, vk::ImageAspectFlagBits::eDepth);
 
+    // A new size or model makes a new DLSS feature. The old one's images and buffers may still be
+    // used by recorded or submitted work (this command buffer can already hold an evaluation), so
+    // all of it finishes on the GPU before they are released; then this command buffer starts
+    // afresh. WaitSubmitted released them while the GPU still wrote to them: a device loss
+    // (WriteInvalid) when leaving a race, where the sizes change.
+    const Dlss::FeatureDesc dlss_desc{w, h, ow, oh, upscale ? Dlss::QualityForScale(factor) : 0, true, true,
+                                      u32(BbSettings::Get().dlss_model.load())};
+    const bool new_feature = dlss && !dlss->HasFeature(dlss_desc);
+    if (new_feature) {
+        scheduler.Finish();
+        dlss->ReleaseFeature();
+    }
+
     scheduler.EndRendering();
     runtime.Transit(&depth, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eComputeShader,
                     vk::AccessFlagBits2::eShaderRead);
@@ -502,14 +515,9 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
                 all, rw);
     }
     if (dlss) {
-        // A new size or model makes a new feature.
-        const Dlss::FeatureDesc desc{w, h, ow, oh, upscale ? Dlss::QualityForScale(factor) : 0, true,
-                                     true, u32(settings.dlss_model.load())};
         bool ok = true;
-        if (!dlss->HasFeature(desc)) {
-            scheduler.WaitSubmitted();
-            dlss->ReleaseFeature();
-            ok = dlss->CreateFeature(cmdbuf, desc);
+        if (new_feature) {
+            ok = dlss->CreateFeature(cmdbuf, dlss_desc);
             reset = true;
         }
         if (ok) {
