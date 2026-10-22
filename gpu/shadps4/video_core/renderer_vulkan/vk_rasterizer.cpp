@@ -1984,13 +1984,21 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
             return texture_cache.GetImage(bound_images[i]).info.pixel_format;
         };
         constexpr auto hdr = vk::Format::eB10G11R11UfloatPack32;
-        if (bound_images.size() == 6 && cs.images.size() == 6 && format(0) == hdr &&
-            format(1) == vk::Format::eR8G8B8A8Unorm && format(2) == vk::Format::eR32Sfloat &&
-            format(5) == vk::Format::eR32Sfloat) {
-            // The anti-aliasing pass: the lit picture, the G-buffer, the linear depth and the
-            // history of both; it writes one of the two HDR images after the first.
-            const u32 out = cs.images[3].is_written ? 3 : cs.images[4].is_written ? 4 : 0;
-            if (out && format(out) == hdr) {
+        const u32 image_count = static_cast<u32>(bound_images.size());
+        if ((image_count == 6 || image_count == 7) && cs.images.size() == image_count &&
+            format(0) == hdr && format(1) == vk::Format::eR8G8B8A8Unorm &&
+            format(2) == vk::Format::eR32Sfloat &&
+            format(image_count - 1) == vk::Format::eR32Sfloat) {
+            // Car selection and pre-race cameras use seven-image variants: slot 3 is an
+            // R8 mask (read or written), slot 4 is the HDR result, and slots 5/6 are history.
+            // Keep the game's dispatch so it still produces the mask used by later passes.
+            const bool mask_variant = image_count == 7;
+            const bool valid_mask = !mask_variant ||
+                ((format(3) == vk::Format::eR8Srgb || format(3) == vk::Format::eR8Uint) &&
+                 format(5) == hdr);
+            const u32 out = mask_variant ? 4 :
+                cs.images[3].is_written ? 3 : cs.images[4].is_written ? 4 : 0;
+            if (valid_mask && out && cs.images[out].is_written && format(out) == hdr) {
                 drive_aa->OnTaa(bound_images[0], fg_depth, bound_images[out]);
             }
         }
