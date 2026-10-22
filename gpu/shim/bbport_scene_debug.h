@@ -53,7 +53,9 @@ inline void DrawFrameTimes(float scale) {
     shown_latest = latest;
     shown_peak = peak;
   }
-  ImGui::Text("Frame time: %.1f ms   max %.1f ms", shown_latest, shown_peak);
+  ImGui::Text("Frame time: %.1f ms", shown_latest);
+  ImGui::SameLine(210.0f * scale);
+  ImGui::Text("max %.1f ms", shown_peak);
   const float ceiling = std::max(50.0f, std::ceil(peak / 16.6667f) * 16.6667f);
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   const ImVec2 size(420.0f * scale, 64.0f * scale);

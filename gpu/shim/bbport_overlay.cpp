@@ -246,6 +246,12 @@ void FpsCounter() {
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - pad,
                                    viewport->WorkPos.y + pad),
                             ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    // Keep the right-anchored panel from moving when a counter gains a digit.
+    const bool expanded_view = SceneDebug::Enabled() && SceneDebug::expanded.load();
+    const bool showing_game_fps = BbSettings::Get().frame_gen != BbSettings::FrameGenOff;
+    const float panel_width = expanded_view && showing_game_fps ? 620.0f : expanded_view ? 520.0f : 480.0f;
+    ImGui::SetNextWindowSize(ImVec2(panel_width * base_scale, 0.0f),
+                             ImGuiCond_Always);
     ImGui::SetNextWindowBgAlpha(0.5f);
     ImGui::Begin("##fps", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
@@ -270,24 +276,43 @@ void FpsCounter() {
             if (expanded) lows = SceneDebug::frame_stats.Get(text_now);
         }
         const float shown = text_frame_ms > 0.0f ? 1000.0f / text_frame_ms : 0.0f;
-        if (expanded) ImGui::Text("%.0f FPS", shown);
-        else ImGui::Text("%.0f FPS  %.1f ms", shown, text_frame_ms);
+        // Fixed cells prevent changing numeric widths from shifting neighboring counters.
+        const auto cell = [](const char* text, float width, bool right_align = false) {
+            const ImVec2 pos = ImGui::GetCursorScreenPos();
+            const ImVec2 text_size = ImGui::CalcTextSize(text);
+            const float pixels = width * base_scale;
+            ImGui::Dummy(ImVec2(pixels, text_size.y));
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(pos.x + (right_align ? std::max(0.0f, pixels - text_size.x) : 0.0f), pos.y),
+                ImGui::GetColorU32(ImGuiCol_Text), text);
+        };
+        char value[64];
+        std::snprintf(value, sizeof(value), "%.0f FPS", shown);
+        cell(value, 68.0f, true);
+        if (!expanded) {
+            ImGui::SameLine(0, 12.0f * base_scale);
+            std::snprintf(value, sizeof(value), "%.1f ms", text_frame_ms);
+            cell(value, 70.0f, true);
+        }
         if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_now.load() > 0 && text_game_fps > 0) {
             ImGui::SameLine(0, 8.0f * base_scale);
-            ImGui::TextDisabled("(game %.0f)", text_game_fps);
+            std::snprintf(value, sizeof(value), "(game %.0f)", text_game_fps);
+            cell(value, 90.0f, true);
         }
         if (expanded) {
             const auto divider = [] {
-                ImGui::SameLine(0, 12.0f * base_scale);
+                ImGui::SameLine(0, 10.0f * base_scale);
                 ImGui::TextDisabled("|");
-                ImGui::SameLine(0, 12.0f * base_scale);
+                ImGui::SameLine(0, 10.0f * base_scale);
             };
             divider();
-            if (lows.ready) ImGui::Text("1%% low %.1f", lows.one);
-            else ImGui::Text("1%% low --");
+            if (lows.ready) std::snprintf(value, sizeof(value), "1%% low %.1f", lows.one);
+            else std::snprintf(value, sizeof(value), "1%% low --");
+            cell(value, 112.0f);
             divider();
-            if (lows.ready) ImGui::Text("0.1%% low %.1f", lows.point_one);
-            else ImGui::Text("0.1%% low --");
+            if (lows.ready) std::snprintf(value, sizeof(value), "0.1%% low %.1f", lows.point_one);
+            else std::snprintf(value, sizeof(value), "0.1%% low --");
+            cell(value, 125.0f);
         }
         const char* hint = expanded ? "F12: hide" : SceneDebug::Enabled() ? "F12: expand" : "F12: hide";
         ImGui::SameLine(0, 16.0f * base_scale);
