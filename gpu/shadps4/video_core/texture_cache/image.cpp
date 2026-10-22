@@ -231,6 +231,15 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget_ci, &unsafe_image,
                                 &allocation, &alloc_info);
     }
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        // Still full: a card with little memory (4 GB) keeps this image in system memory.
+        LOG_WARNING(Render_Vulkan, "Out of video memory, placing an image in system memory");
+        VmaAllocationCreateInfo host_ci = alloc_ci;
+        host_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        host_ci.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &host_ci, &unsafe_image,
+                                &allocation, &alloc_info);
+    }
     BbStats::alloc_count[1].fetch_add(1, std::memory_order_relaxed);
     BbStats::alloc_bytes[1].fetch_add(alloc_info.size, std::memory_order_relaxed);
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
