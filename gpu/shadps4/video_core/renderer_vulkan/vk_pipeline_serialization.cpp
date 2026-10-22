@@ -354,6 +354,18 @@ void PipelineCache::WarmUp() {
         return;
     }
 
+    // AMD: pipelines rebuilt from the cache crash on the second launch (device lost, reads of
+    // unmapped addresses) while a cold start is fine, so AMD compiles on demand. BB_PRELOAD=1 forces it.
+    const auto driver = instance.GetDriverID();
+    const bool amd = driver == vk::DriverId::eAmdProprietary || driver == vk::DriverId::eAmdOpenSource ||
+                     driver == vk::DriverId::eMesaRadv;
+    const char* force = std::getenv("BB_PRELOAD");
+    if (force ? force[0] != '1' : amd) {
+        LOG_INFO(Render, "Pipeline preload skipped");
+        Storage::DataBase::Instance().FinishPreload();
+        return;
+    }
+
     u32 num_pipelines{};
     u32 num_total_pipelines{};
 
