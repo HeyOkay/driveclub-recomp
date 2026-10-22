@@ -433,6 +433,7 @@ void DriveAA::Reconstruct(VideoCore::ImageId color_id, VideoCore::ImageId depth_
         reset = true;
         return;
     }
+    BbFrame::NoteScene(w, h);  // the overlay's Render size, also when it equals the output size
     const bool want_dlss = BbSettings::Get().aa_mode == BbSettings::AaDlss;
     Dlss* dlss = want_dlss ? Dlss::Get() : nullptr;
     if (want_dlss && (!dlss || !dlss->Available())) {

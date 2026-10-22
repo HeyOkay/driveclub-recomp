@@ -196,17 +196,19 @@ void runtime_file_miss_stats(uint64_t *slow,uint64_t *fast,uint64_t *slow_us) {
 static char app0_base[600];
 void runtime_file_set_base(const char *dir) { snprintf(app0_base,sizeof(app0_base),"%s",dir ? dir : ""); miss_reset(); }
 /* Files the player puts in this folder replace the game's own files of the same path (read only). */
-static char mods_dirs[4][600];
+#define MODS_MAX 8 /* unlock, graphics detail, car switching, the player's mods folder, benchmark: 4 was too few */
+static char mods_dirs[MODS_MAX][600];
 static int mods_count;
 void runtime_file_add_mods(const char *dir) {
-    if (dir && *dir && mods_count<4) snprintf(mods_dirs[mods_count++],sizeof(mods_dirs[0]),"%s",dir);
+    if (dir && *dir && mods_count<MODS_MAX) snprintf(mods_dirs[mods_count++],sizeof(mods_dirs[0]),"%s",dir);
+    else if (dir && *dir) printf("Runtime: too many mods folders, %s ignored\n",dir);
     miss_reset();
 }
 /* Probe /app0 folder `key` (length bytes) in every overlay. Only ENOENT proves absence:
  * an existing file or another stat error must not poison that path as missing.
  * Runs under `lock`; `host` is the /app0 mount's host folder. */
 static int folder_present(const char *key,size_t length,const char *host) {
-    const char *roots[6]; int n=0;
+    const char *roots[MODS_MAX+2]; int n=0;
     int unknown=0;
     for (int i=0;i<mods_count;++i) roots[n++]=mods_dirs[i];
     roots[n++]=host;

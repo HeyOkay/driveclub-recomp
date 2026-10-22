@@ -13,6 +13,14 @@ inline void NoteOutput(uint32_t w, uint32_t h) {
     output_h.store(h, std::memory_order_relaxed);
 }
 
+// The size DriveAA reconstructs from: known to be the scene, so it counts even when it equals the output size.
+inline void NoteScene(uint32_t w, uint32_t h) {
+    if (uint64_t(w) * h > uint64_t(scene_w.load(std::memory_order_relaxed)) * scene_h.load(std::memory_order_relaxed)) {
+        scene_w.store(w, std::memory_order_relaxed);
+        scene_h.store(h, std::memory_order_relaxed);
+    }
+}
+
 inline void NoteRender(uint32_t w, uint32_t h) {
     if (w == 0 || h == 0 || w > 8192 || h > 8192) {
         return;  // passes without a real extent report huge sizes
