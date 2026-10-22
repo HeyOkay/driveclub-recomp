@@ -113,6 +113,18 @@ void DriveAA::NextFrame() {
     redirect_valid = false;
     jitter_index = jitter_index % phases + 1;
     jitter = {Halton(jitter_index, 2) - 0.5f, Halton(jitter_index, 3) - 0.5f};
+    // The game's lighting and shadows rebuild positions from depth with the unshifted camera (it
+    // does not jitter its own), so a shift of the geometry moves every lookup by as much: shadows
+    // and the road mirage flickered when upscaling, where a render pixel covers several output
+    // pixels. A shift of half an output pixel (render / output of a render pixel) errs no more than
+    // at the render size, and still reaches the output pixels' centres. BB_AA_JITTER=<scale>: this
+    // scale instead (0: none).
+    static const float forced_scale = [] {
+        const char* env = std::getenv("BB_AA_JITTER");
+        return env && *env ? float(std::atof(env)) : -1.0f;
+    }();
+    const float jitter_scale = forced_scale >= 0.0f ? forced_scale : 1.0f / factor;
+    jitter = {jitter[0] * jitter_scale, jitter[1] * jitter_scale};
 }
 
 vk::ImageView DriveAA::View(const VideoCore::Image& image, vk::Format format,
