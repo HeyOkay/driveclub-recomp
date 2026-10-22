@@ -302,6 +302,7 @@ public:
     Id shared_memory_u16_type{};
     Id shared_memory_u32_type{};
     Id shared_memory_u64_type{};
+    u32 shared_bytes{};
 
     Id bary_coord{};
     Id bary_coord_smooth{};

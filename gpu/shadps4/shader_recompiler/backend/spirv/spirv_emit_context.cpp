@@ -1071,6 +1071,7 @@ void EmitContext::DefineSharedMemory() {
     ASSERT(info.hw_stage == HwStage::Compute);
     const u32 shared_memory_size =
         runtime_info.hw.cs.shared_memory_size + info.shared_memory_scratch_size;
+    shared_bytes = shared_memory_size;
 
     const auto make_type = [&](IR::Type type, Id element_type, u32 element_size,
                                std::string_view name) {
