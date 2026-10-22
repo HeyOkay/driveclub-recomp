@@ -524,6 +524,33 @@ void Runtime::CopyMip(VideoCore::Image* src, VideoCore::Image* dst, u32 mip, u32
 }
 
 bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    // bbport: two depth images of different formats (DriveClub reuses a D32 with stencil's memory for a
+    // D32 when it leaves a race): a direct copy needs the exact same depth format
+    // (VUID-vkCmdCopyImage-srcImage-01548), and NVIDIA wrote outside the destination (device lost,
+    // WriteInvalid). Both 32-bit float depths go through the copy buffer, depth only; other pairs are
+    // not copied (the caller then keeps to the guest's own copy or an upload from memory).
+    if (src->info.props.is_depth && dst->info.props.is_depth &&
+        src->info.pixel_format != dst->info.pixel_format) {
+        const auto float32 = [](vk::Format f) {
+            return f == vk::Format::eD32Sfloat || f == vk::Format::eD32SfloatS8Uint;
+        };
+        const bool same_shape = src->info.size.width == dst->info.size.width &&
+                                src->info.size.height == dst->info.size.height &&
+                                src->info.size.depth == dst->info.size.depth &&
+                                src->info.resources.levels == 1 && dst->info.resources.levels == 1 &&
+                                src->info.resources.layers == dst->info.resources.layers;
+        static constexpr size_t COPY_BUFFER_SIZE = 128_MB;
+        const u64 depth_bytes = u64(src->info.size.width) * src->info.size.height * src->info.size.depth *
+                                src->info.resources.layers * 4;
+        if (src->info.num_samples == 1 && dst->info.num_samples == 1 && same_shape &&
+            float32(src->info.pixel_format) && float32(dst->info.pixel_format) &&
+            depth_bytes <= COPY_BUFFER_SIZE) {
+            const auto copy_ref = staging_pool.Request(COPY_BUFFER_SIZE, VideoCore::MemoryType::DeviceLocal);
+            CopyImageWithBuffer(src, dst, copy_ref.buffer, copy_ref.offset);
+            return true;
+        }
+        return false;
+    }
     if (src->info.num_samples == 1 && dst->info.num_samples == 1) {
         if (instance.IsMaintenance8Supported() ||
             src->info.props.is_depth == dst->info.props.is_depth) {
