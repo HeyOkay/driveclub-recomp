@@ -45,15 +45,14 @@ inline void DrawFrameTimes(float scale) {
     peak = std::max(peak, frame_times[i]);
   const float latest =
       frame_times[(frame_next + frame_times.size() - 1) % frame_times.size()];
-  static float shown_latest = 0, shown_peak = 0;
+  static float shown_peak = 0;
   static auto last_label = std::chrono::steady_clock::time_point{};
   const auto label_now = std::chrono::steady_clock::now();
   if (label_now - last_label >= std::chrono::milliseconds(500)) {
     last_label = label_now;
-    shown_latest = latest;
     shown_peak = peak;
   }
-  ImGui::Text("Frame time: %.1f ms   max %.1f ms", shown_latest, shown_peak);
+  ImGui::Text("Frame time: %.1f ms   max %.1f ms", latest, shown_peak);
   const float ceiling = std::max(50.0f, std::ceil(peak / 16.6667f) * 16.6667f);
   const ImVec2 pos = ImGui::GetCursorScreenPos();
   const ImVec2 size(420.0f * scale, 64.0f * scale);
