@@ -7,10 +7,8 @@
 The source code is in this repository and the build is on the [Releases](../../releases) page.
 
 ## Planned for the next major release
-- **DLSS/FSR Upscaling (not just native DLAA/FSR AA)**
 - **DLSS/FSR Frame Generation, DLSS up to 4X, FSR up to 2X**
 - **DLSS Neural Rendering (Standard and Optimised model support)**
-- **Graphics improvements beyond what the PS4 offered**
 - **Further performance and stability improvements**
 
 ## New in 0.2.0: DLSS and FSR anti-aliasing
