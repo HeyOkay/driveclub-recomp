@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "datx.h"
+#include "scene_track_names.h"
 #include "gpu_check.h"
 #include "prepare.h"
 #include "unlock.h"
@@ -1938,6 +1939,10 @@ std::wstring StartGame(HANDLE* process = nullptr) {
                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   MakeDirs(g_home + L"\\mods");
   const std::wstring prep = g_data + L"\\prep", user = g_data + L"\\user";
+  MakeDirs(user);
+  const std::wstring track_names = user + L"\\scene_tracks.tsv";
+  const bool have_track_names = SceneTrackNames::Write(g_folder[0].path, g_folder[1].path, track_names);
+  SetEnvironmentVariableW(L"BB_SCENE_TRACK_NAMES", have_track_names ? track_names.c_str() : nullptr);
   // Add-on content: changed copies of three data lists, built from the player's own archive. Files in the mods
   // folder come first, so a player's own versions win.
   std::wstring unlock_arg;
