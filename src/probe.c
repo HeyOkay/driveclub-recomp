@@ -36,6 +36,7 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
+#include "runtime_scene_debug.inc"
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
 static uint64_t module_count;
@@ -1193,6 +1194,7 @@ int main(int argc, char **argv) {
         memcpy(image + relocs[i].target, &value, 8);
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+    if (!cpu_only) scene_debug_install();
     if (!cpu_only) apply_upscale_render_size(image, size);
     if (!cpu_only) patch_shared_alloc(image, size);
 #ifdef _WIN32

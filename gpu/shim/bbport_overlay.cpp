@@ -19,6 +19,7 @@
 #include <SDL3/SDL.h>
 #include "bbport_settings.h"
 #include "imgui.h"
+#include "bbport_scene_debug.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -161,7 +162,17 @@ void PollHotkeys() {
     };
     static bool f12_down = false;
     if (edge(VK_F12, f12_down)) {
-        s.show_fps = !s.show_fps;
+        if (!SceneDebug::Enabled()) {
+            s.show_fps = !s.show_fps;
+        } else if (!s.show_fps) {
+            SceneDebug::expanded = false;
+            s.show_fps = true;
+        } else if (!SceneDebug::expanded.load()) {
+            SceneDebug::expanded = true;
+        } else {
+            SceneDebug::expanded = false;
+            s.show_fps = false;
+        }
     }
     // F9: anti-aliasing on and off, F10: FSR 3.1 and DLAA (for comparing).
     static bool f9_down = false, f10_down = false;
@@ -240,14 +251,48 @@ void FpsCounter() {
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
                      ImGuiWindowFlags_NoFocusOnAppearing);
+    const char* fps_hint = nullptr;
+    float fps_hint_y = 0.0f;
     {
         auto& s = BbSettings::Get();
-        const float shown = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
-        if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_now.load() > 0 && s.game_fps > 0.0f) {
-            ImGui::Text("%.0f FPS (game %.0f)  (F12 off)", shown, s.game_fps.load());
-        } else {
-            ImGui::Text("%.0f FPS  %.1f ms  (F12 off)", shown, frame_ms_avg);
+        static float text_frame_ms=0.0f, text_game_fps=0.0f;
+        static FrameTimingStats::Lows lows;
+        static auto last_text_update=std::chrono::steady_clock::time_point{};
+        const auto text_now=std::chrono::steady_clock::now();
+        if (text_now-last_text_update>=std::chrono::milliseconds(500)) {
+            last_text_update=text_now;
+            text_frame_ms=frame_ms_avg;
+            text_game_fps=s.game_fps.load();
+            if (SceneDebug::Enabled()) lows=SceneDebug::frame_stats.Get(text_now);
         }
+        const float shown = text_frame_ms > 0.0f ? 1000.0f / text_frame_ms : 0.0f;
+        const bool expanded = SceneDebug::Enabled() && SceneDebug::expanded.load();
+        if (expanded) ImGui::Text("%.0f FPS", shown);
+        else ImGui::Text("%.0f FPS  %.1f ms", shown, text_frame_ms);
+        if (s.frame_gen != BbSettings::FrameGenOff && s.frame_gen_now.load() > 0 && text_game_fps > 0) {
+            ImGui::SameLine(0, 8.0f * base_scale);
+            ImGui::TextDisabled("(game %.0f)", text_game_fps);
+        }
+        if (expanded) {
+            const auto divider = [] {
+                ImGui::SameLine(0, 12.0f * base_scale);
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0, 12.0f * base_scale);
+            };
+            divider();
+            if (lows.ready) ImGui::Text("1%% low %.1f", lows.one);
+            else ImGui::Text("1%% low --");
+            divider();
+            if (lows.ready) ImGui::Text("0.1%% low %.1f", lows.point_one);
+            else ImGui::Text("0.1%% low --");
+        }
+        const char* hint = expanded ? "F12: hide" : SceneDebug::Enabled() ? "F12: expand" : "F12: hide";
+        ImGui::SameLine(0, 16.0f * base_scale);
+        fps_hint = hint;
+        fps_hint_y = ImGui::GetCursorScreenPos().y;
+        // Reserve space without feeding the previous width into auto-sizing.
+        ImGui::Dummy(ImGui::CalcTextSize(hint));
+        if (expanded) SceneDebug::DrawFrameTimes(base_scale);
         if (s.frame_gen != BbSettings::FrameGenOff) {
             if (s.frame_gen_paused) {
                 ImGui::Text("Frame generation: paused  (F8 on)");
@@ -280,6 +325,13 @@ void FpsCounter() {
         }
     }
     ImGui::Text("Render %ux%u  Output %ux%u  Screen %.0fx%.0f", shown_w, shown_h, BbFrame::output_w.load(), BbFrame::output_h.load(), viewport->Size.x, viewport->Size.y);
+    if (SceneDebug::Enabled() && SceneDebug::expanded.load()) SceneDebug::Draw();
+    if (fps_hint) {
+        const float x = ImGui::GetWindowPos().x + ImGui::GetWindowWidth() -
+                        ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(fps_hint).x;
+        ImGui::GetWindowDrawList()->AddText(ImVec2(x, fps_hint_y),
+                                          ImGui::GetColorU32(ImGuiCol_TextDisabled), fps_hint);
+    }
     ImGui::End();
 }
 
@@ -463,20 +515,26 @@ void NotePresent() {
     // the keys can be polled from: Render() is gated on Visible(), which is false once F12 has
     // hidden the readout, and the poll would stop with it.
     PollHotkeys();
-}
-
-void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
-    // Present interval for the FPS readout (measured also while nothing is drawn).
+    std::scoped_lock lock{imgui_mutex};
     const auto now = std::chrono::steady_clock::now();
     const float ms = std::chrono::duration<float, std::milli>(now - last_present).count();
+    if (last_present.time_since_epoch().count() && SceneDebug::Enabled()) SceneDebug::NoteFrame(ms,now);
     last_present = now;
     if (ms > 0.0f && ms < 1000.0f) {
         frame_ms_avg = frame_ms_avg == 0.0f ? ms : frame_ms_avg * 0.95f + ms * 0.05f;
     }
+}
+
+void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
+    // ImGui animation interval; present statistics are collected in NotePresent().
+    const auto now = std::chrono::steady_clock::now();
     if (!Visible()) {
         return;
     }
     std::scoped_lock lock{imgui_mutex};
+    static auto last_render = now;
+    const float ms = std::chrono::duration<float, std::milli>(now - last_render).count();
+    last_render = now;
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(float(extent.width), float(extent.height));
     io.DeltaTime = ms > 0.0f && ms < 1000.0f ? ms / 1000.0f : 1.0f / 60.0f;
