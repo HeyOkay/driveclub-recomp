@@ -89,6 +89,10 @@ public:
     void ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                       const VideoCore::SubresourceRange& src_range,
                       const VideoCore::SubresourceRange& dst_range);
+    /// Materialize a fast-cleared depth slice before a transfer reads it.
+    void ClearDepth(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
+                    float depth);
+
     void ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                     const vk::ClearValue& clear_value);
 

@@ -2635,6 +2635,24 @@ bool Rasterizer::IsComputeImageCopy(const Pipeline* pipeline) {
     // Perform image copy
     VideoCore::Image& src_image = desc0.is_written ? image1 : image0;
     VideoCore::Image& dst_image = desc0.is_written ? image0 : image1;
+    // Render-pass setup normally resolves HTILE fast clears. A compute copy can be
+    // the first reader when an empty depth pass has no draws, so materialize the
+    // clear before copying the source's old pixels (including depth-to-color copies).
+    if (src_image.info.props.is_depth) {
+        const VAddr htile_address = src_image.info.meta_info.htile_addr;
+        // HTILE metadata tracks up to 32 independently cleared slices.
+        const u32 num_slices = std::min(src_image.info.resources.layers, 32u);
+        for (u32 slice = 0; slice < num_slices; ++slice) {
+            if (!texture_cache.IsMetaCleared(htile_address, slice)) {
+                continue;
+            }
+            VideoCore::SubresourceRange range;
+            range.base.layer = slice;
+            range.extent.layers = 1;
+            runtime.ClearDepth(&src_image, range, Regs().depth_clear);
+            texture_cache.TouchMeta(htile_address, slice, false);
+        }
+    }
     // When the two forms cannot be copied between, let the game's own compute copy run.
     return runtime.CopyColorAndDepth(&src_image, &dst_image);
 }
