@@ -122,10 +122,11 @@ int g_hover_tab = -1;
 int g_hover_info = -1, g_info_open = -1;
 
 // The cards are split over tabs so a page holds what belongs together and needs no scrolling.
-enum { kTabGraphics, kTabGameplay, kTabDriving, kTabBench, kTabCount };
-const wchar_t* const kTabName[kTabCount] = {L"Graphics", L"Gameplay", L"Driving", L"Benchmark"};
+enum { kTabGraphics, kTabDetail, kTabGameplay, kTabDriving, kTabBench, kTabCount };
+const wchar_t* const kTabName[kTabCount] = {L"Graphics", L"Detail", L"Gameplay", L"Driving", L"Benchmark"};
 const wchar_t* const kTabHint[kTabCount] = {
     L"Frame rate, the sizes the game draws and shows, anti-aliasing and texture filtering.",
+    L"Model, scenery, reflection and shadow detail, and the game's own camera effects.",
     L"Your name and language, the mirrors, the window, the add-on content and the community patches.",
     L"Driving: the field of view and the game's driving assists, and the steering wheel (its setup and force feedback).",
     L"Drive one circuit on its own and get back the frame rate and the 1% and 0.1% lows."};
@@ -765,37 +766,31 @@ void BuildModel() {
                             L"Unlocks the DLC content: add-on cars, bikes, tours and livery decals. Cars you earn by playing still unlock through normal progression. Built from your own game files; the game folders are not modified.",
                             "@unlock", false);
   // Graphics detail the PS4 version keeps low and the game's camera effects, from the game's own quality file
-  // (graphics.cpp). Costs measured on an RTX 3070 Laptop, 1440p render / 4K output, 60 FPS cap, Canada day.
+  // (graphics.cpp).
   g_gfx[kGfxCar] = toggle(L"Your car: full detail",
-                          L"Draws your own car with its most detailed model during races; the PS4 version uses the next one down. "
-                          L"Cost: none measurable.",
+                          L"Draws your own car with its most detailed model during races; the PS4 version uses the next one down.",
                           "@gfx", false);
   g_gfx[kGfxOpp] = toggle(L"Other cars: full detail",
-                          L"The other cars also get their most detailed models up close, and every car keeps its detailed parts a little further away. "
-                          L"Cost: in a race with seven other cars, the 1% low went from 55 to 45 FPS.",
+                          L"The other cars also get their most detailed models up close, and every car keeps its detailed parts a little further away.",
                           "@gfx", false);
   g_gfx[kGfxScenery] = seg(L"Scenery detail (less pop-in)",
                            L"Trees, rocks and roadside objects switch to their detailed models further away and small objects stay visible longer, so less pops in while you drive. "
-                           L"High uses the developers' own pre-race camera values, Ultra photo mode's. "
-                           L"Cost: none measurable alone on track; Ultra in a race with seven other cars: 1% low 55 to 48 FPS.",
+                           L"High uses the developers' own pre-race camera values, Ultra photo mode's.",
                            {L"Game", L"High", L"Ultra"}, {"@gfx", "", ""}, 0);
   g_gfx[kGfxSsr] = toggle(L"High-quality reflections",
-                          L"Uses photo mode's finer reflections on the road and the cars in races; the difference is hard to see. "
-                          L"Cost: about -4 FPS.",
+                          L"Uses photo mode's finer reflections on the road and the cars in races; the difference is hard to see.",
                           "@gfx", false);
   g_gfx[kGfxShadows] = seg(L"Shadow edges",
                            L"The game smooths the edges of shadows near the car with 32 samples and of every shadow further than 4 m with 8. "
-                           L"High uses 16 samples, Ultra 32. Cost: none measurable at 60 FPS.",
+                           L"High uses 16 samples, Ultra 32.",
                            {L"Game", L"High", L"Ultra"}, {"@gfx", "", ""}, 0);
   g_gfx[kGfxParticles] = toggle(L"More particles",
-                                L"Keeps the distant spray, smoke and dust that races drop (replays keep them), and allows 1.5 times as many particles. "
-                                L"Cost: none measurable in the dry; not measured in rain.",
+                                L"Keeps the distant spray, smoke and dust that races drop (replays keep them), and allows 1.5 times as many particles.",
                                 "@gfx", false);
   g_gfx[kGfxDynres] = toggle(L"Dynamic resolution",
-                             L"On (as on PS4), the game draws at a lower resolution for a moment when a frame takes too long. "
-                             L"Off kept the same picture here and cost about -0.5 FPS and -4 FPS on the 1% low.",
+                             L"On (as on PS4), the game draws at a lower resolution for a moment when a frame takes too long.",
                              "@gfx", true);
-  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Off costs nothing.",
+  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive.",
                            "@gfx", true);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
@@ -890,8 +885,8 @@ void BuildModel() {
   g_cards.push_back({L"GRAPHICS DETAIL",
                      {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
                       g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
-                     0, kTabGraphics, L"Built from your own game files. Costs measured at 1440p on an RTX 3070 Laptop."});
-  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabGraphics,
+                     0, kTabDetail});
+  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
                      L"The game's own camera effects, each on as on PS4."});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
