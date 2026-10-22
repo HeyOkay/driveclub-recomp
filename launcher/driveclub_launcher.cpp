@@ -37,6 +37,7 @@
 #include "gpu_check.h"
 #include "prepare.h"
 #include "unlock.h"
+#include "carswitch.h"
 
 using namespace Gdiplus;
 
@@ -1951,6 +1952,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     LauncherLog(problem.empty() ? std::string("add-on content unlock: ok") : "add-on content unlock: " + Narrow(problem));
     if (problem.empty()) unlock_arg = L" --mods \"" + unlock_dir + L"\"";
     else MessageBoxW(nullptr, (L"The add-on content could not be unlocked (" + problem + L"). The game starts without it.").c_str(), L"DriveClub", MB_OK | MB_ICONWARNING);
+  }
+  // Car select: the three showroom menu files with shorter blur animations, also from the player's archive.
+  {
+    const std::wstring carswitch_dir = g_data + L"\\carswitch";
+    const std::wstring problem = BuildFastCarSwitch(g_folder[0].path, g_folder[1].path, carswitch_dir);
+    LauncherLog(problem.empty() ? std::string("faster car switching: ok") : "faster car switching: " + Narrow(problem));
+    if (problem.empty()) unlock_arg += L" --mods \"" + carswitch_dir + L"\"";
   }
   std::wstring cmd = L"\"" + exe + L"\" \"" + prep + L"\\boot-linked.bin\" --content-profile \"" + prep +
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
