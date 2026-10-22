@@ -593,38 +593,11 @@ static int64_t do_getdents(int fd,char *buffer,uint64_t size,int64_t *basep) {
     pthread_mutex_unlock(&lock);
     return result;
 }
-/* sceKernelGetdents (three arguments, no basep) writes the kernel's struct dirent: a 24-byte
-   header with d_ino, d_off, d_reclen, d_type and d_namlen, then the name. This is the only
-   directory listing call the game makes; sceKernelGetdirentries above is never called by it. */
+/* sceKernelGetdents (three arguments, no basep) uses the same 8-byte header layout as
+   getdirentries: d_fileno (u32), d_reclen (u16), d_type, d_namlen, then the name. The game walks
+   the buffer by d_reclen, so any other layout makes it loop forever on the first entry. */
 static int64_t do_getdents_orbis(int fd,char *buffer,uint64_t size) {
-    pthread_mutex_lock(&lock);
-    File *f=get(fd);
-    int64_t result=0;
-    if (!f) result=-EBADF;
-    else if (!f->dir) result=-EINVAL;
-    else if (!buffer) result=-EFAULT;
-    else if (size<512) result=-EINVAL;
-    else {
-        uint64_t written=0;
-        while (f->position<f->dir->count) {
-            const char *name=f->dir->names+f->dir->offsets[f->position];
-            size_t n=strlen(name); if (n>255) n=255;
-            uint16_t reclen=(uint16_t)((24+n+1+7)&~(size_t)7);
-            if (written+reclen>size) break;
-            char *p=buffer+written;
-            memset(p,0,reclen);
-            uint64_t ino=(uint64_t)f->position+1, off=ino+1;
-            memcpy(p,&ino,8); memcpy(p+8,&off,8);
-            memcpy(p+16,&reclen,2);
-            p[18]=(char)f->dir->types[f->position];
-            memcpy(p+20,&n,2);
-            memcpy(p+24,name,n);
-            written+=reclen; ++f->position;
-        }
-        result=(int64_t)written;
-    }
-    pthread_mutex_unlock(&lock);
-    return result;
+    return do_getdents(fd,buffer,size,NULL);
 }
 static int64_t path_op(const char *guest,int op,int mode) {
     if (game_path(guest)) return -EROFS;
