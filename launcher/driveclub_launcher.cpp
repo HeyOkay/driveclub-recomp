@@ -299,6 +299,7 @@ int g_inres = -1, g_wide = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_an
 enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
               kGfxHaze, kGfxFxaa, kGfxRows };
 int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int g_blur_patch = -1;  // the "Disable motion blur and depth of field" patch row
 int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 const char* const kGfxKey[kGfxRows] = {"gfx_car=", "gfx_opponents=", "gfx_scenery=", "gfx_reflections=", "gfx_shadows=",
                                        "gfx_particles=", "gfx_dynres=", "gfx_motion_blur=", "gfx_lens_dust=",
@@ -448,10 +449,14 @@ constexpr char kLayoutMarker[] = "# DriveClub racing layout";  // the game repla
 
 bool PhysicsChosen() { return g_ffb_model >= 0 && g_c[g_ffb_model].sel == 0; }
 bool UpscaleActive();
+// FSR and DLSS work from the game's own anti-aliasing, which shares its shader with the blur: any way of turning
+// the blur off turns them off too. While one is chosen the blur rows are hidden and ignored.
+bool BlurLocked() { return g_aa >= 0 && g_c[g_aa].sel > 0; }
 // Rows that do nothing with the other choices: the physics settings with Original Physics; Upscaling and
 // Sharpness without FSR or DLSS; Render resolution while Upscaling sets the render size.
 bool RowHidden(const Ctl& c) {
   if (c.physics_only && !PhysicsChosen()) return true;
+  if ((g_blur_patch >= 0 && &c == &g_c[g_blur_patch]) || (g_gfx[kGfxBlur] >= 0 && &c == &g_c[g_gfx[kGfxBlur]])) return BlurLocked();
   if ((g_up >= 0 && &c == &g_c[g_up]) || (g_sharp >= 0 && &c == &g_c[g_sharp])) return g_aa >= 0 && g_c[g_aa].sel == 0;
   if (g_inres >= 0 && &c == &g_c[g_inres]) return UpscaleActive();
   if (g_fps_cap >= 0 && &c == &g_c[g_fps_cap]) return g_fps >= 0 && g_c[g_fps].sel != 3;
@@ -685,8 +690,8 @@ void BuildModel() {
                        00));
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
-  const int blur = toggle(L"Disable motion blur and depth of field",
-                          L"They share one shader, so both are turned off together. Leave this off when you use FSR or DLAA anti-aliasing: they need the game's blur pass.",
+  const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
+                          L"They share one shader, so both are turned off together. Hidden while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
                           "Disable motion blur and depth of field", false);
   const int reset = toggle(L"No reset-to-track timer", L"Disables the reset to track timer.", "Reset Disable", false);
   const int barrier = toggle(L"Disable track barriers", L"Removes the invisible barriers at the track edges.",
@@ -705,7 +710,7 @@ void BuildModel() {
                  L"Static draws it once and keeps that picture: much faster and steady, but reflections and rain on the glass stop updating.",
                  {L"Live", L"Static (faster)"}, {"@mirror", ""}, 0);
   g_aa = seg(L"Anti-aliasing",
-             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. It does not work together with the patch \"Disable motion blur and depth of field\": the game keeps its own anti-aliasing then.",
+             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. The motion blur options are hidden while it is on, because they share a shader with it.",
              {L"Game", L"FSR 3.1", L"DLSS (RTX)"}, {"@aa", "", ""}, 0);
   g_up = seg(L"Upscaling",
              L"More FPS for nearly the same picture: the game is drawn at a lower resolution and DLSS (or FSR) rebuilds it at your screen's resolution. DLAA (Native with FSR) draws every pixel: the best picture, the lowest FPS. Quality is the best balance; Balanced, Performance and Ultra Perf. give more FPS each. Needs DLSS or FSR 3.1 above.",
@@ -790,7 +795,7 @@ void BuildModel() {
   g_gfx[kGfxDynres] = toggle(L"Dynamic resolution",
                              L"On (as on PS4), the game draws at a lower resolution for a moment when a frame takes too long.",
                              "@gfx", true);
-  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive.",
+  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Hidden while FSR or DLSS anti-aliasing is on: they need the same shader.",
                            "@gfx", true);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
@@ -1201,6 +1206,7 @@ void SaveSettings() {
   std::ofstream out(SelectionPath().c_str(), std::ios::binary | std::ios::trunc);
   for (const auto& c : g_c) {
     if (IsWheelRow(c) || c.kind == Kind::Slider || c.kind == Kind::Button) continue;  // no patches
+    if (g_blur_patch >= 0 && &c == &g_c[g_blur_patch] && BlurLocked()) continue;
     if (c.kind == Kind::Toggle) {
       if (c.sel && c.patches[0][0] != '@') out << c.patches[0] << "\n";
     } else if (c.sel > 0 && c.patches[c.sel] == "@unlocked") {
@@ -2057,7 +2063,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     gc.reflections = sel(kGfxSsr, 0);
     gc.shadows = sel(kGfxShadows, 0);
     gc.particles = sel(kGfxParticles, 0);
-    gc.motion_blur = sel(kGfxBlur, 1);
+    gc.motion_blur = BlurLocked() ? 1 : sel(kGfxBlur, 1);
     gc.lens_dust = sel(kGfxDust, 1);
     gc.heat_haze = sel(kGfxHaze, 1);
     gc.fxaa = sel(kGfxFxaa, 1);
