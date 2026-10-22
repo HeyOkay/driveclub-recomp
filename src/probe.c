@@ -36,6 +36,7 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
+#include "runtime_menu_repeat.inc"
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
 static uint64_t module_count;
@@ -1203,6 +1204,7 @@ int main(int argc, char **argv) {
         uint64_t left, rewritten=rewrite_sse4a(segments, ns, size, &left);
         printf("SSE4a: %" PRIu64 " guest EXTRQ rewritten, %" PRIu64 " left to the fault handler\n", rewritten, left);
     }
+    menu_repeat_install();
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
