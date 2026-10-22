@@ -707,6 +707,28 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
 }
 
+void Runtime::ClearDepth(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
+                         float depth) {
+    scheduler.EndRendering();
+    if (Transit(dst, vk::ImageLayout::eTransferDstOptimal,
+                vk::PipelineStageFlagBits2::eClear, vk::AccessFlagBits2::eTransferWrite, range)) {
+        FlushBarriers();
+    }
+    const vk::ImageSubresourceRange vk_range{
+        .aspectMask = vk::ImageAspectFlagBits::eDepth,
+        .baseMipLevel = range.base.level,
+        .levelCount = range.extent.levels,
+        .baseArrayLayer = range.base.layer,
+        .layerCount = range.extent.layers,
+    };
+    scheduler.Record([image = dst->GetImage(), depth, vk_range](vk::CommandBuffer cmd) {
+        cmd.clearDepthStencilImage(image, vk::ImageLayout::eTransferDstOptimal,
+                                   vk::ClearDepthStencilValue{depth, 0}, vk_range);
+    });
+    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
+    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+}
+
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
     scheduler.EndRendering();
