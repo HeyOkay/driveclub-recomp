@@ -162,6 +162,27 @@ bool Run(const std::wstring& command, DWORD wait_ms, DWORD& exit_code, bool deta
   return true;
 }
 
+// Where the download is unpacked, next to DriveClub.exe. Players often keep the v1.28 update dump in a folder named
+// "update" there, so the updater uses its own name and deletes a folder only when it holds nothing but the files
+// it writes itself; 0.3.0 and 0.3.1 unpacked into "update", their leftovers go by the same rule.
+constexpr wchar_t kStaging[] = L"\\update_download";
+constexpr wchar_t kOldStaging[] = L"\\update";
+
+// True when `dir` exists and holds only package.zip, the unpacked "new" folder and apply.cmd.
+bool OnlyOwnFiles(const std::wstring& dir) {
+  WIN32_FIND_DATAW data;
+  HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &data);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  bool own = true;
+  do {
+    const wchar_t* n = data.cFileName;
+    if (wcscmp(n, L".") == 0 || wcscmp(n, L"..") == 0) continue;
+    if (_wcsicmp(n, L"package.zip") != 0 && _wcsicmp(n, L"new") != 0 && _wcsicmp(n, L"apply.cmd") != 0) own = false;
+  } while (own && FindNextFileW(h, &data));
+  FindClose(h);
+  return own;
+}
+
 void RemoveTree(const std::wstring& dir) {
   std::wstring from = dir + L'\0';
   SHFILEOPSTRUCTW op{};
@@ -237,9 +258,12 @@ bool CheckNewer(const std::wstring& current, Release& out, std::string& why) {
 }
 
 bool Install(const Release& release, const std::wstring& home, const std::function<void(int)>& progress, std::wstring& error) {
-  const std::wstring dir = home + L"\\update";
-  RemoveTree(dir);
-  CreateDirectoryW(dir.c_str(), nullptr);
+  const std::wstring dir = home + kStaging;
+  if (OnlyOwnFiles(dir)) RemoveTree(dir);
+  if (!CreateDirectoryW(dir.c_str(), nullptr) && !OnlyOwnFiles(dir)) {
+    error = L"The folder update_download next to DriveClub.exe holds other files. Move them away and try again.";
+    return false;
+  }
   const std::wstring zip = dir + L"\\package.zip";
 
   std::string sums;
@@ -286,7 +310,7 @@ bool Install(const Release& release, const std::wstring& home, const std::functi
   const std::wstring script = dir + L"\\apply.cmd";
   const std::string text = "@echo off\r\n"
                            "robocopy \"" + std::string(root.begin(), root.end()) + "\" \"" + std::string(home.begin(), home.end()) +
-                           "\" /E /R:60 /W:1 /NFL /NDL /NJH /NJS /XD data logs mods update /XF launcher.ini >nul\r\n"
+                           "\" /E /R:60 /W:1 /NFL /NDL /NJH /NJS /XD data logs mods update update_download /XF launcher.ini >nul\r\n"
                            "if errorlevel 8 exit /b 1\r\n"
                            "start \"\" \"" + std::string(home.begin(), home.end()) + "\\DriveClub.exe\"\r\n";
   HANDLE f = CreateFileW(script.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -305,8 +329,10 @@ bool Install(const Release& release, const std::wstring& home, const std::functi
 }
 
 void CleanUp(const std::wstring& home) {
-  const std::wstring dir = home + L"\\update";
-  if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) RemoveTree(dir);
+  for (const wchar_t* name : {kStaging, kOldStaging}) {
+    const std::wstring dir = home + name;
+    if (OnlyOwnFiles(dir)) RemoveTree(dir);
+  }
 }
 
 }  // namespace Updater
