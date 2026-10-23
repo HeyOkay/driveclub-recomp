@@ -341,8 +341,14 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             return !instance.IsFragmentShaderBarycentricSupported() &&
                    instance.GetDriverID() == vk::DriverId::eNvidiaProprietary;
         }(),
-        .needs_lds_barriers = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary ||
-                              instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
+        // The game shares workgroup memory between the 64 lanes of a wave without barriers, which holds on
+        // the console because they run in lockstep. A host compiler is free to reorder those loads and stores
+        // (the AMD driver does: a lattice of white squares), so every host gets the barriers. BB_LDS_BARRIERS=0
+        // leaves them out again.
+        .needs_lds_barriers = [] {
+            const char* env = std::getenv("BB_LDS_BARRIERS");
+            return !(env && env[0] == '0');
+        }(),
         .needs_buffer_offsets = instance.StorageMinAlignment() > 4,
         .needs_unorm_fixup = instance.GetDriverID() == vk::DriverId::eMesaKosmickrisp,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,

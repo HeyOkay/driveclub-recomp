@@ -212,8 +212,10 @@ std::vector<std::string> ReadLines(const std::wstring& path) {
 // settings: launcher.ini (folders) and data\user\patches_enabled.txt (what the game applies)
 // ------------------------------------------------------------------------------------------
 std::wstring IniPath() { return g_home + L"\\launcher.ini"; }
-// The primary display adapter is an AMD one (the draw threads start off there).
+// The draw threads start off on AMD cards (they lost the device and ran slower there) and under Wine or Proton
+// (stage B ran flat out and cost about a third of the frame rate in a report).
 bool PrimaryGpuIsAmd() {
+  if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return true;
   DISPLAY_DEVICEW dd{};
   dd.cb = sizeof(dd);
   for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i, dd.cb = sizeof(dd)) {
@@ -767,7 +769,7 @@ void BuildModel() {
                               L"out. Turn this on if you want the in-game overlay while playing.", "@overlays", false);
   const int twothread = toggle(L"Two-thread rendering",
                                L"Records each frame's draw commands on a second thread, so the thread that runs the game's "
-                               L"graphics commands waits less. Faster on most PCs, but it lost the graphics device in races on AMD cards, so it starts off there. Turn it off if you see flicker, broken graphics or a crash.",
+                               L"graphics commands waits less. Faster on most PCs, but it lost the graphics device in races on AMD cards and ran slower there, so it starts off on AMD cards and under Wine or Proton. Turn it off if you see flicker, broken graphics or a crash.",
                                "@twothread", !PrimaryGpuIsAmd());
   g_hdr = toggle(L"HDR",
                  L"For HDR monitors and TVs: brighter highlights (the sun, lights, reflections) and deeper contrast. Turn on \"Use HDR\" in Windows' display settings first.",
