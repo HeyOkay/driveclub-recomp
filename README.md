@@ -11,6 +11,16 @@ The source code is in this repository and the build is on the [Releases](../../r
 - **DLSS Neural Rendering (Standard and Optimised model support)**
 - **Further performance and stability improvements**
 
+## New in 0.3.0
+- **DLSS and FSR upscaling.** Pick the Output size and a mode from Quality to Ultra Performance: the game renders smaller and DLSS (GeForce RTX) or FSR 3.1 (any card) brings the picture to the output, with a Sharpness slider. Shadows no longer flicker while upscaling, and it works in car selection and the pre-race flyovers.
+- **HDR10 output** on HDR displays, with a brightness control (Page Up / Page Down in the game).
+- **Steering wheels, rewritten.** Force feedback from a physics model of the front tyres or a software model, live tuning in the FFB Tuner, pedals on their own USB device, Fanatec style wheels that show up as two controllers, a handbrake on its own USB or on a button, a Driving tab with assists, and a field of view you can change while playing (F5 / F6).
+- **Faster.** A two-thread draw path is on by default, with far less processor work per draw. Cars load faster in car selection and menus no longer hitch on missing game files.
+- **Better picture.** Graphics detail and Effects options (view quality, car level of detail, motion blur, lens dust, heat haze), less pop-in, a TV gamma default that matches how the game was graded, fixed tunnel lighting and no more dark patches on terrain.
+- **Smoother on G-Sync and FreeSync.** Unlocked (VRR) with a Frame cap slider just below the refresh rate.
+- **Live scene info in the overlay.** F12 cycles hidden, compact and expanded, with 1% and 0.1% lows, a frame-time graph, the track, time of day and weather.
+- **Fixes** for the freeze after a race, the crash after pressing Continue, the endless Downloading on tracks and cars, crashes at boot and several AMD and Intel crashes and artifacts.
+
 ## New in 0.2.0: DLSS and FSR anti-aliasing
 The game's own anti-aliasing is replaced by a modern one, chosen in the launcher:
 - **NVIDIA DLAA** (GeForce RTX) for the sharpest, steadiest picture: thin lines, wires, fences and foliage stay clean.
