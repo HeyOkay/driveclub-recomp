@@ -1578,8 +1578,26 @@ bool BufferCache::SynchronizeMemoryFromImage(const Buffer* arena, VAddr device_a
             static constexpr u32 ZmaskUncompressed = 0xf;
             runtime.FillBuffer(arena, arena->Offset(device_addr), size, ZmaskUncompressed);
             return true;
-        } else {
-            LOG_WARNING(Render_Vulkan, "Unhandled metadata type {}", magic_enum::enum_name(*type));
+        }
+        // The game reads the compression mask of a color target. Color targets are never fast-cleared here, so
+        // every tile counts as expanded (all ones), instead of the stale guest memory the read used to get.
+        // BB_CMASK_FILL=0 goes back to the old behaviour.
+        static const bool cmask_fill = [] {
+            const char* env = std::getenv("BB_CMASK_FILL");
+            return !env || std::strcmp(env, "0") != 0;
+        }();
+        static std::atomic<int> logged{0};
+        if (*type == TextureCache::MetaType::CMask && cmask_fill) {
+            if (logged.fetch_add(1) == 0) {
+                std::printf("GPU: color mask read at %#llx, answered as uncompressed (BB_CMASK_FILL=0 turns this off)\n",
+                            static_cast<unsigned long long>(device_addr));
+            }
+            runtime.FillBuffer(arena, arena->Offset(device_addr), size, 0xffffffffu);
+            return true;
+        }
+        if (logged.fetch_add(1) < 4) {
+            LOG_WARNING(Render_Vulkan, "Unhandled metadata type {} (logged 4 times)",
+                        magic_enum::enum_name(*type));
         }
     }
     // bbport: most texel buffers alias no image; remember misses until images change.
