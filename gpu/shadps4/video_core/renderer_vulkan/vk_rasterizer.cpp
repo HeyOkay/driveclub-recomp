@@ -92,6 +92,14 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
+    if (instance.IsBufferMarkerSupported()) {
+        crumb_buffer = std::make_unique<VideoCore::Buffer>(instance, 0, 256, VideoCore::MemoryType::HostUncached,
+                                                          "Breadcrumbs");
+        if (crumb_buffer->mapped_data.data()) {
+            BbRecent::crumb = reinterpret_cast<volatile u32*>(crumb_buffer->mapped_data.data());
+            *BbRecent::crumb = 0;
+        }
+    }
     // Object motion first: it fixes the buffer addresses the motion shader variants embed.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
@@ -1430,12 +1438,18 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 num_instances = regs.num_instances.NumInstances();
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
+    // The number BbRecent::Draw below gives this draw; the GPU writes it when its command processor gets here.
+    const vk::Buffer crumb_handle = BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
+    const u32 crumb = BbRecent::next.load(std::memory_order_relaxed) + 1;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
         if (is_indexed) {
             cmdbuf.drawIndexed(num_indices, num_instances, 0, s32(first_vertex), first_instance);
         } else {
             cmdbuf.draw(num_indices, num_instances, first_vertex, first_instance);
+        }
+        if (crumb_handle) {
+            cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eTopOfPipe, crumb_handle, 0, crumb);
         }
     });
     {
@@ -1968,6 +1982,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
+    const vk::Buffer crumb_handle = BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
+    const u32 crumb = BbRecent::next.load(std::memory_order_relaxed) + 1;
     BbRecent::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
@@ -1975,6 +1991,9 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, handle);
         cmdbuf.dispatch(dim_x, dim_y, dim_z);
+        if (crumb_handle) {
+            cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eTopOfPipe, crumb_handle, 0, crumb);
+        }
     });
     DebugState.IncDispatch();
 
