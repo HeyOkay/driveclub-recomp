@@ -218,8 +218,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
             reqs.memoryTypeBits);
         if (guard_type) {
+            const vk::MemoryAllocateFlagsInfo addressable = {.flags = vk::MemoryAllocateFlagBits::eDeviceAddress};
             const auto alloc = instance.GetDevice().allocateMemory(
-                {.allocationSize = block_size, .memoryTypeIndex = *guard_type});
+                {.pNext = &addressable, .allocationSize = block_size, .memoryTypeIndex = *guard_type});
             if (alloc.result == vk::Result::eSuccess) {
                 guard_memory = alloc.value;
                 const auto map = instance.GetDevice().mapMemory(guard_memory, 0, block_size);
@@ -709,7 +710,7 @@ void BufferCache::RecordReadback(Readback& job) {
                 if (range_end <= range_begin) {
                     return;
                 }
-                job.spans.push_back({backing.base + backing.offset + (range_begin - (u64{backing.start} << block_shift)),
+                job.spans.push_back({backing.base + (backing.offset << block_shift) + (range_begin - (u64{backing.start} << block_shift)),
                                      range_begin, range_end - range_begin});
                 covered += range_end - range_begin;
             });
@@ -1333,7 +1334,7 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
             .resourceOffset = (start - base_block) << block_shift,
             .size = (end - start) << block_shift,
             .memory = backing.memory,
-            .memoryOffset = backing.offset + ((start - backing.start) << block_shift),
+            .memoryOffset = (backing.offset + (start - backing.start)) << block_shift,
         });
     });
 
@@ -1361,7 +1362,12 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     }
     BbStats::Timer timer{BbStats::t_resident};
 
+    // Shaders reach the arenas by raw device address, so the memory behind them has to be allocated with the
+    // device address flag. Without it a driver is free to keep that memory out of its address space, and AMD
+    // cards then fault on reads inside the arena.
+    const vk::MemoryAllocateFlagsInfo addressable = {.flags = vk::MemoryAllocateFlagBits::eDeviceAddress};
     const vk::MemoryAllocateInfo alloc_info = {
+        .pNext = &addressable,
         .allocationSize = resident_blocks << block_shift,
         .memoryTypeIndex = arena_memory_type_index,
     };
@@ -1373,7 +1379,8 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
                         "The frame rate drops instead of the game ending.\n");
             std::fflush(stdout);
         }
-        alloc = instance.GetDevice().allocateMemory({.allocationSize = alloc_info.allocationSize,
+        alloc = instance.GetDevice().allocateMemory({.pNext = &addressable,
+                                                    .allocationSize = alloc_info.allocationSize,
                                                     .memoryTypeIndex = spill_memory_type_index});
     }
     if (alloc.result != vk::Result::eSuccess) {
@@ -1410,7 +1417,7 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
         backing.start = range.start;
         backing.end = range.end;
         backing.memory = device_memory;
-        backing.offset = memory_offset;
+        backing.offset = memory_offset >> block_shift; // in blocks, like start and end (Backing::SubRange)
         backing.base = mapped_base;
         resident_ranges.Add(backing);
 

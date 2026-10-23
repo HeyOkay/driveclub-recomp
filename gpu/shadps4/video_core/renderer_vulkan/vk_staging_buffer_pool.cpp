@@ -107,6 +107,7 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
 }
 
 StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool deferred) {
+    std::scoped_lock lk{large_mutex};
     auto& cache = large_caches[u32(type)];
     // Held requests (readbacks) come in arbitrary sizes: a power-of-two bucket lets the buffers be
     // reused, where a 25% window mostly allocated (and later freed) a device buffer per request.
@@ -155,6 +156,7 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
 }
 
 void StagingBufferPool::FreeDeferred(const StagingBufferRef& ref) {
+    std::scoped_lock lk{large_mutex};
     auto& cache = large_caches[u32(ref.type)];
     const auto it = std::ranges::find_if(
         cache, [&](const LargeBuffer& entry) { return entry.buffer.get() == ref.buffer; });
@@ -169,8 +171,11 @@ void StagingBufferPool::TickFrame() {
     for (Ring& ring : rings) {
         TrimRing(ring);
     }
-    for (auto& cache : large_caches) {
-        TrimLarge(cache);
+    {
+        std::scoped_lock lk{large_mutex};
+        for (auto& cache : large_caches) {
+            TrimLarge(cache);
+        }
     }
     PublishStats();
 }
@@ -215,8 +220,11 @@ void StagingBufferPool::PublishStats() const {
         for (const Block& block : rings[i].blocks) {
             bytes += block.buffer->SizeBytes();
         }
-        for (const LargeBuffer& entry : large_caches[i]) {
-            bytes += entry.buffer->SizeBytes();
+        {
+            std::scoped_lock lk{large_mutex};
+            for (const LargeBuffer& entry : large_caches[i]) {
+                bytes += entry.buffer->SizeBytes();
+            }
         }
         if (bytes != 0) {
             group.rows.push_back({.name = names[i], .bytes = bytes});

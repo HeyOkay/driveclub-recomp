@@ -5,6 +5,7 @@
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #include "common/types.h"
@@ -77,6 +78,10 @@ private:
     void TrimLarge(std::vector<LargeBuffer>& cache);
 
     void PublishStats() const;
+
+    // FreeDeferred runs on the scheduler's pending-operations thread (downloads written back once the GPU is
+    // done) while the GPU thread requests and trims: guards large_caches.
+    mutable std::mutex large_mutex;
 
     const Instance& instance;
     Scheduler& scheduler;
