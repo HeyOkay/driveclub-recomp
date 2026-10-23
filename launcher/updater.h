@@ -21,13 +21,14 @@ bool ParseRelease(const std::string& json, Release& out);
 // offline, or when anything else goes wrong (`why` says what, for the log).
 bool CheckNewer(const std::wstring& current, Release& out, std::string& why);
 
-// Downloads the zip, checks it against the checksum file, unpacks it into <home>\update and starts the script
+// Downloads the zip, checks it against the checksum file, unpacks it into <home>\update_download and starts the script
 // that copies it over the program files once the launcher has closed. The player's data, saves, mods, logs and
 // launcher.ini are not touched. True: the caller must close the launcher now. `progress` gets 0..100.
 bool Install(const Release& release, const std::wstring& home, const std::function<void(int)>& progress,
              std::wstring& error);
 
-// Removes the leftovers of an earlier update (the folder is in use while the script still runs).
+// Removes the leftovers of an earlier update (the folder is in use while the script still runs). A folder that
+// holds anything the updater did not write there (a game dump named "update", say) is left alone.
 void CleanUp(const std::wstring& home);
 
 }  // namespace Updater
