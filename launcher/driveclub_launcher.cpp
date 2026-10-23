@@ -40,6 +40,7 @@
 #include "prepare.h"
 #include "unlock.h"
 #include "carswitch.h"
+#include "updater.h"
 
 using namespace Gdiplus;
 
@@ -148,11 +149,16 @@ std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while i
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool g_two_thread = true;       // "Two-thread rendering" (two_thread= in launcher.ini)
+bool g_check_updates = true;  // "Check for new versions" (check_updates= in launcher.ini)
+std::atomic<bool> g_update_ready{false};  // a newer release was found (g_update)
+Updater::Release g_update;
+RectF g_update_btn;  // the Update button, left of Reset to defaults (drawn while g_update_ready)
 bool g_auto_play = false;  // "Start the game without this window" (auto_play= in launcher.ini)
 bool GpuBlocked() { return !g_gpu_problem.empty() && !g_skip_gpu_check; }
 Color g_status_color = kMuted;
 bool g_status_sticky = false;  // a warning about the last click: shown over the hints until the next click
 RectF g_btn[3];  // reset, save, play
+float FooterButtonsLeft() { return g_update_ready ? g_update_btn.X : g_btn[0].X; }
 const wchar_t* kBtnText[3] = {L"Reset to defaults", L"Save", L"Play"};
 std::atomic<bool> g_busy{false};
 std::atomic<int> g_progress{0};
@@ -739,6 +745,10 @@ void BuildModel() {
   const int autoplay = toggle(L"Start the game without this window",
                               L"Double-clicking DriveClub.exe goes straight to the game. When it cannot start, "
                               L"this window opens anyway with the reason.", "@autoplay", false);
+  const int updatecheck = toggle(L"Check for new versions",
+                                 L"When the launcher starts it asks the Releases page once whether a newer version exists "
+                                 L"and offers to install it. Your saves, settings and game folders stay as they are.",
+                                 "@updatecheck", true);
   const int overlays = toggle(L"Let overlay programs into the game",
                               L"Steam, Epic, Discord, OBS and tuning tools add themselves to the game's graphics. "
                               L"A part of the crashes players report comes from those additions, so the launcher keeps them "
@@ -896,7 +906,7 @@ void BuildModel() {
                      0, kTabDetail});
   g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
                      L"The game's own camera effects, each on as on PS4."});
-  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay}, 0, kTabGameplay});
+  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
                      L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
   g_cards.back().sub = kSubAssists;
@@ -1010,6 +1020,7 @@ void LoadSettings() {
       if (v >= 0 && v < int(g_c[d.row].items.size())) g_c[d.row].sel = v;
     }
     if (line.rfind("auto_play=", 0) == 0) g_auto_play = line.substr(10) == "1";
+    if (line.rfind("check_updates=", 0) == 0) g_check_updates = line.substr(14) != "0";
     if (line.rfind("full=", 0) == 0) full_screen = line.substr(5) == "1";
     for (int k = 0; k < kGfxRows; ++k) {
       if (line.rfind(kGfxKey[k], 0) == 0) gfx_saved[k] = atoi(line.substr(strlen(kGfxKey[k])).c_str());
@@ -1051,6 +1062,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@autoplay") {
       c.sel = g_auto_play ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") {
+      c.sel = g_check_updates ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@skipgpu") {
@@ -1176,9 +1191,10 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@overlays") g_allow_overlays = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@twothread") g_two_thread = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@autoplay") g_auto_play = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") g_check_updates = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
@@ -1397,6 +1413,7 @@ void LayoutPass(float bottom_extra) {
     g_btn[i] = RectF(x, bar_y + 14.f, bw[i], 44.f);
     x -= 12.f;
   }
+  g_update_btn = RectF(x - 190.f, bar_y + 14.f, 190.f, 44.f);
 }
 
 // Lays the window out for its current size. Wider: the columns widen. Taller: the rows spread out a little and
@@ -1751,6 +1768,9 @@ void Paint(HDC hdc, int w, int h) {
   } else if (g_hover_tab >= 0) {
     msg = g_hover_tab < kTabCount ? kTabHint[g_hover_tab] : kSubHint[g_hover_tab - kTabCount];
     mc = kMuted;
+  } else if (g_hover_btn == 3) {
+    msg = L"Download version " + g_update.version + L", check it and install it over this one. Your saves and settings stay.";
+    mc = kMuted;
   } else if (g_hover_btn == 0) {
     msg = L"Put every patch back to its default.";
     mc = kMuted;
@@ -1759,7 +1779,7 @@ void Paint(HDC hdc, int w, int h) {
     mc = kMuted;
   }
   {
-    const RectF fr(g_ox + kMargin * S, fy + 8 * S, (g_btn[0].X - kMargin - 12) * S, (kFooterH - 16) * S);
+    const RectF fr(g_ox + kMargin * S, fy + 8 * S, (FooterButtonsLeft() - kMargin - 12) * S, (kFooterH - 16) * S);
     StringFormat mfmt;
     mfmt.SetTrimming(StringTrimmingNone);
     float px = 12.5f;
@@ -1773,7 +1793,7 @@ void Paint(HDC hdc, int w, int h) {
     Text(g, msg, fit, fr, mc, StringAlignmentNear, StringAlignmentCenter, true, false);
   }
   if (g_busy) {
-    const RectF bar = Scaled(RectF(kMargin, g_content_h + kFooterH - 18.f, g_btn[0].X - kMargin - 12, 6.f));
+    const RectF bar = Scaled(RectF(kMargin, g_content_h + kFooterH - 18.f, FooterButtonsLeft() - kMargin - 12, 6.f));
     FillRound(g, bar, 3 * S, kTrack);
     FillRound(g, RectF(bar.X, bar.Y, bar.Width * float(g_progress.load()) / 100.f, bar.Height), 3 * S, kAccent);
   }
@@ -1786,6 +1806,12 @@ void Paint(HDC hdc, int w, int h) {
                                   : (over ? kTrackHover : kTrack));
     FillRound(g, br, 10 * S, fill);
     Text(g, kBtnText[i], fBtn, br, disabled ? kMuted : kWhite, StringAlignmentCenter);
+  }
+  if (g_update_ready && !g_busy) {
+    const RectF ub = Scaled(g_update_btn);
+    const bool over = g_hover_btn == 3, down = g_press_btn == 3 && over;
+    FillRound(g, ub, 10 * S, down ? Color(255, 56, 62, 74) : over ? Color(255, 66, 73, 88) : Color(255, 50, 56, 68));
+    Text(g, L"Update to " + g_update.version, fBtn, ub, kOk, StringAlignmentCenter);
   }
   g_oy = ContentOy();
   // The benchmark result under the pointer: every setting the game ran with, in a panel over the page.
@@ -2231,6 +2257,53 @@ std::wstring StartGame(HANDLE* process = nullptr) {
   return L"";
 }
 
+void UpdateWorker() {
+  LauncherLog("update: installing " + Narrow(g_update.version));
+  std::wstring error;
+  const bool ok = Updater::Install(g_update, g_home, [](int p) { SetProgress(p, L"Downloading " + g_update.version + L"..."); }, error);
+  g_busy = false;
+  if (ok) {
+    LauncherLog("update: installed, restarting");
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 2, 0, 0);  // close; the script copies the files and starts the new launcher
+  } else {
+    LauncherLog("update: " + Narrow(error));
+    g_status = L"The update did not work: " + error;
+    g_status_color = kWarn;
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 1, 0, 0);
+  }
+}
+
+void StartUpdate() {
+  if (g_busy || !g_update_ready) return;
+  g_busy = true;
+  g_status.clear();
+  SetProgress(0, L"Downloading " + g_update.version + L"...");
+  std::thread(UpdateWorker).detach();
+}
+
+// Asks the Releases page once, in the background; the Update button shows when a newer version exists.
+void StartUpdateCheck() {
+  std::thread([] {
+    std::wstring current;
+    {
+      std::ifstream in((g_home + L"\\version.txt").c_str());
+      std::string line;
+      if (in && std::getline(in, line)) current = Widen(line);
+    }
+    while (!current.empty() && (current.back() == L'\r' || current.back() == L' ')) current.pop_back();
+    Updater::Release r;
+    std::string why;
+    if (!current.empty() && Updater::CheckNewer(current, r, why)) {
+      g_update = r;
+      g_update_ready = true;
+      LauncherLog("update check: " + Narrow(r.version) + " is available");
+      if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 1, 0, 0);
+    } else {
+      LauncherLog(why.empty() ? "update check: version.txt is missing" : why);
+    }
+  }).detach();
+}
+
 void PlayWorker() {
   SetProgress(0, L"Preparing the game...");
   LauncherLog("Play pressed");
@@ -2553,6 +2626,13 @@ int HitTab(float x, float y) {
 }
 
 int HitButton(float x, float y) {
+  if (g_update_ready && !g_busy) {
+    const float content_oy0 = g_oy;
+    g_oy = FooterOy();
+    const RectF u = Scaled(g_update_btn);
+    g_oy = content_oy0;
+    if (x >= u.X && x <= u.X + u.Width && y >= u.Y && y <= u.Y + u.Height) return 3;
+  }
   const float content_oy = g_oy;
   g_oy = FooterOy();
   struct Restore { float v; ~Restore() { g_oy = v; } } restore{content_oy};
@@ -2861,7 +2941,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       const int pressed = g_press_btn;
       g_press_btn = -1;
       if (!g_busy && b >= 0 && b == pressed) {
-        if (b == 0) ResetDefaults();
+        if (b == 3) StartUpdate();
+        else if (b == 0) ResetDefaults();
         else if (b == 1) {
           SaveSettings();
           g_status = L"Saved.";
@@ -2932,6 +3013,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
 
   const bool asked = wcsstr(GetCommandLineW(), L"--play") != nullptr;
   const bool play_now = asked || g_auto_play;  // the row that starts the game straight away
+  Updater::CleanUp(g_home);
+  if (g_check_updates && !play_now && !wcsstr(GetCommandLineW(), L"--snapshot")) StartUpdateCheck();
   if (play_now) {
     const std::wstring stop = [] {
       if (!FoldersOk()) return std::wstring(L"Open DriveClub.exe once and choose the game folders.");

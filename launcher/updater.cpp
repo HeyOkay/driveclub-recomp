@@ -1,0 +1,312 @@
+#include "updater.h"
+
+#include <windows.h>
+#include <bcrypt.h>
+#include <winhttp.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+namespace Updater {
+namespace {
+
+constexpr wchar_t kApiHost[] = L"api.github.com";
+constexpr wchar_t kApiPath[] = L"/repos/OverkillLabs3/driveclub-recomp/releases/latest";
+// Only files of this project's releases are downloaded, whatever the answer says.
+constexpr wchar_t kAssetPrefix[] = L"https://github.com/OverkillLabs3/driveclub-recomp/releases/download/";
+
+std::wstring Widen(const std::string& s) {
+  if (s.empty()) return {};
+  const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+  std::wstring w(size_t(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
+  return w;
+}
+
+std::vector<int> Parts(const std::wstring& v) {
+  std::vector<int> parts;
+  size_t i = 0;
+  while (i < v.size()) {
+    size_t e = v.find(L'.', i);
+    if (e == std::wstring::npos) e = v.size();
+    parts.push_back(_wtoi(v.substr(i, e - i).c_str()));
+    i = e + 1;
+  }
+  return parts;
+}
+
+// One HTTPS GET. With `file` set the body goes to that file (progress 0..100 when the size is known),
+// otherwise into `body`.
+bool Get(const std::wstring& url, std::string* body, const std::wstring* file, const std::function<void(int)>* progress,
+         std::wstring& error) {
+  URL_COMPONENTS uc{};
+  uc.dwStructSize = sizeof(uc);
+  wchar_t host[256], path[2048];
+  uc.lpszHostName = host;
+  uc.dwHostNameLength = 256;
+  uc.lpszUrlPath = path;
+  uc.dwUrlPathLength = 2048;
+  uc.dwExtraInfoLength = DWORD(-1);
+  if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc) || uc.nScheme != INTERNET_SCHEME_HTTPS) {
+    error = L"Not an https address.";
+    return false;
+  }
+  std::wstring target = std::wstring(uc.lpszUrlPath, uc.dwUrlPathLength) + std::wstring(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+  HINTERNET session = WinHttpOpen(L"DriveClub-Recomp-Launcher", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+  if (!session) {
+    error = L"No network access.";
+    return false;
+  }
+  WinHttpSetTimeouts(session, 8000, 8000, 15000, 30000);
+  HINTERNET conn = WinHttpConnect(session, std::wstring(uc.lpszHostName, uc.dwHostNameLength).c_str(), uc.nPort, 0);
+  HINTERNET req = conn ? WinHttpOpenRequest(conn, L"GET", target.c_str(), nullptr, WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)
+                       : nullptr;
+  bool ok = false;
+  HANDLE out = INVALID_HANDLE_VALUE;
+  if (req && WinHttpSendRequest(req, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(req, nullptr)) {
+    DWORD status = 0, size = sizeof(status);
+    WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &status, &size, nullptr);
+    DWORD64 total = 0;
+    wchar_t len[32];
+    size = sizeof(len);
+    if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_LENGTH, nullptr, len, &size, nullptr)) total = _wtoi64(len);
+    if (status != 200) {
+      error = L"The server answered " + std::to_wstring(status) + L".";
+    } else {
+      if (file) out = CreateFileW(file->c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (file && out == INVALID_HANDLE_VALUE) {
+        error = L"Cannot write the download.";
+      } else {
+        ok = true;
+        DWORD64 got = 0;
+        std::vector<char> buf(64 * 1024);
+        for (;;) {
+          DWORD n = 0;
+          if (!WinHttpReadData(req, buf.data(), DWORD(buf.size()), &n)) {
+            ok = false;
+            error = L"The download was interrupted.";
+            break;
+          }
+          if (n == 0) break;
+          if (body) body->append(buf.data(), n);
+          if (file) {
+            DWORD w = 0;
+            if (!WriteFile(out, buf.data(), n, &w, nullptr) || w != n) {
+              ok = false;
+              error = L"Cannot write the download.";
+              break;
+            }
+          }
+          got += n;
+          if (progress && total) (*progress)(int((std::min<DWORD64>)(100, got * 100 / total)));
+        }
+      }
+    }
+  } else if (error.empty()) {
+    error = L"Cannot reach the server.";
+  }
+  if (out != INVALID_HANDLE_VALUE) CloseHandle(out);
+  if (req) WinHttpCloseHandle(req);
+  if (conn) WinHttpCloseHandle(conn);
+  WinHttpCloseHandle(session);
+  return ok;
+}
+
+bool Sha256(const std::wstring& path, std::string& hex) {
+  HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (f == INVALID_HANDLE_VALUE) return false;
+  BCRYPT_ALG_HANDLE alg = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0 &&
+            BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0;
+  std::vector<UCHAR> buf(1 << 20);
+  while (ok) {
+    DWORD n = 0;
+    if (!ReadFile(f, buf.data(), DWORD(buf.size()), &n, nullptr)) ok = false;
+    else if (n == 0) break;
+    else ok = BCryptHashData(hash, buf.data(), n, 0) == 0;
+  }
+  UCHAR digest[32];
+  ok = ok && BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
+  if (hash) BCryptDestroyHash(hash);
+  if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+  CloseHandle(f);
+  if (!ok) return false;
+  hex.clear();
+  char two[3];
+  for (UCHAR b : digest) {
+    std::snprintf(two, sizeof(two), "%02x", b);
+    hex += two;
+  }
+  return true;
+}
+
+bool Run(const std::wstring& command, DWORD wait_ms, DWORD& exit_code, bool detached) {
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  std::wstring cmd = command;
+  const DWORD flags = CREATE_NO_WINDOW | (detached ? DETACHED_PROCESS : 0);
+  if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) return false;
+  if (wait_ms) {
+    WaitForSingleObject(pi.hProcess, wait_ms);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+  }
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  return true;
+}
+
+void RemoveTree(const std::wstring& dir) {
+  std::wstring from = dir + L'\0';
+  SHFILEOPSTRUCTW op{};
+  op.wFunc = FO_DELETE;
+  op.pFrom = from.c_str();
+  op.fFlags = FOF_NO_UI | FOF_NOCONFIRMATION | FOF_SILENT;
+  SHFileOperationW(&op);
+}
+
+std::string Between(const std::string& s, size_t from, const char* open, char close, size_t* next) {
+  const size_t b = s.find(open, from);
+  if (b == std::string::npos) return {};
+  const size_t start = b + std::string(open).size();
+  const size_t e = s.find(close, start);
+  if (e == std::string::npos) return {};
+  if (next) *next = e + 1;
+  return s.substr(start, e - start);
+}
+
+}  // namespace
+
+bool IsNewer(const std::wstring& candidate, const std::wstring& current) {
+  const auto a = Parts(candidate), b = Parts(current);
+  for (size_t i = 0; i < (std::max)(a.size(), b.size()); ++i) {
+    const int x = i < a.size() ? a[i] : 0, y = i < b.size() ? b[i] : 0;
+    if (x != y) return x > y;
+  }
+  return false;
+}
+
+bool ParseRelease(const std::string& json, Release& out) {
+  std::string tag = Between(json, 0, "\"tag_name\"", ',', nullptr);
+  tag.erase(std::remove_if(tag.begin(), tag.end(), [](char c) { return c == ' ' || c == ':' || c == '"' || c == 'v'; }), tag.end());
+  if (tag.empty()) return false;
+  out = Release{};
+  out.version = Widen(tag);
+  size_t pos = 0;
+  for (;;) {
+    size_t next = 0;
+    const std::string url = Between(json, pos, "\"browser_download_url\":\"", '"', &next);
+    if (url.empty()) break;
+    pos = next;
+    const std::wstring w = Widen(url);
+    if (w.rfind(kAssetPrefix, 0) != 0) continue;
+    const auto ends = [&](const wchar_t* suffix) {
+      const std::wstring s = suffix;
+      return w.size() >= s.size() && w.compare(w.size() - s.size(), s.size(), s) == 0;
+    };
+    if (ends(L"-win64.zip") && w.find(L"/driveclub-recomp-") != std::wstring::npos) out.zip_url = w;
+    if (ends(L"/SHA256SUMS.txt")) out.sums_url = w;
+  }
+  return !out.zip_url.empty() && !out.sums_url.empty();
+}
+
+bool CheckNewer(const std::wstring& current, Release& out, std::string& why) {
+  std::string body;
+  std::wstring error;
+  if (!Get(std::wstring(L"https://") + kApiHost + kApiPath, &body, nullptr, nullptr, error)) {
+    why = "update check: " + std::string(error.begin(), error.end());
+    return false;
+  }
+  Release r;
+  if (!ParseRelease(body, r)) {
+    why = "update check: no release with a zip and a checksum file";
+    return false;
+  }
+  if (!IsNewer(r.version, current)) {
+    why = "update check: " + std::string(r.version.begin(), r.version.end()) + " is the newest";
+    return false;
+  }
+  out = r;
+  return true;
+}
+
+bool Install(const Release& release, const std::wstring& home, const std::function<void(int)>& progress, std::wstring& error) {
+  const std::wstring dir = home + L"\\update";
+  RemoveTree(dir);
+  CreateDirectoryW(dir.c_str(), nullptr);
+  const std::wstring zip = dir + L"\\package.zip";
+
+  std::string sums;
+  if (!Get(release.sums_url, &sums, nullptr, nullptr, error)) return false;
+  // The line of the checksum file that names the zip: "<64 hex digits> *<name>".
+  const std::wstring zip_name = release.zip_url.substr(release.zip_url.rfind(L'/') + 1);
+  std::string expected;
+  size_t line = 0;
+  while (line < sums.size()) {
+    size_t e = sums.find('\n', line);
+    if (e == std::string::npos) e = sums.size();
+    const std::string l = sums.substr(line, e - line);
+    if (l.size() > 66 && Widen(l).find(zip_name) != std::wstring::npos) expected = l.substr(0, 64);
+    line = e + 1;
+  }
+  if (expected.size() != 64) {
+    error = L"The checksum file does not list the download.";
+    return false;
+  }
+
+  if (!Get(release.zip_url, nullptr, &zip, &progress, error)) return false;
+  std::string actual;
+  if (!Sha256(zip, actual) || _stricmp(actual.c_str(), expected.c_str()) != 0) {
+    error = L"The download does not match its checksum. Nothing was changed.";
+    DeleteFileW(zip.c_str());
+    return false;
+  }
+
+  const std::wstring unpacked = dir + L"\\new";
+  CreateDirectoryW(unpacked.c_str(), nullptr);
+  DWORD code = 1;
+  if (!Run(L"tar.exe -xf \"" + zip + L"\" -C \"" + unpacked + L"\"", 120000, code, false) || code != 0) {
+    error = L"Windows could not unpack the download (tar.exe). Get the zip from the Releases page instead.";
+    return false;
+  }
+  const std::wstring root = unpacked + L"\\" + zip_name.substr(0, zip_name.size() - 4);
+  if (GetFileAttributesW((root + L"\\DriveClub.exe").c_str()) == INVALID_FILE_ATTRIBUTES) {
+    error = L"The download does not hold DriveClub.exe. Nothing was changed.";
+    return false;
+  }
+
+  // The script waits (robocopy retries while the launcher still holds its files), copies everything except the
+  // player's own folders and settings, starts the new launcher and is cleaned up by it on its first start.
+  const std::wstring script = dir + L"\\apply.cmd";
+  const std::string text = "@echo off\r\n"
+                           "robocopy \"" + std::string(root.begin(), root.end()) + "\" \"" + std::string(home.begin(), home.end()) +
+                           "\" /E /R:60 /W:1 /NFL /NDL /NJH /NJS /XD data logs mods update /XF launcher.ini >nul\r\n"
+                           "if errorlevel 8 exit /b 1\r\n"
+                           "start \"\" \"" + std::string(home.begin(), home.end()) + "\\DriveClub.exe\"\r\n";
+  HANDLE f = CreateFileW(script.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (f == INVALID_HANDLE_VALUE) {
+    error = L"Cannot write the update script.";
+    return false;
+  }
+  DWORD w = 0;
+  WriteFile(f, text.data(), DWORD(text.size()), &w, nullptr);
+  CloseHandle(f);
+  if (!Run(L"cmd.exe /c \"\"" + script + L"\"\"", 0, code, true)) {
+    error = L"Cannot start the update script.";
+    return false;
+  }
+  return true;
+}
+
+void CleanUp(const std::wstring& home) {
+  const std::wstring dir = home + L"\\update";
+  if (GetFileAttributesW(dir.c_str()) != INVALID_FILE_ATTRIBUTES) RemoveTree(dir);
+}
+
+}  // namespace Updater
