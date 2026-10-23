@@ -30,17 +30,22 @@ cp packaging/release/README.txt packaging/release/THIRD_PARTY_NOTICES.txt LICENS
 echo "$VERSION" > "$OUT/version.txt"
 
 # Every non-system DLL the game program loads, so nothing has to be installed.
-ldd out/DriveClubGame.exe | awk '{print $3}' | grep -i '/msys64/' | sort -u | while read -r dll; do
+ldd out/DriveClubGame.exe | awk '{print $3}' | grep -i -E '/msys64/|^/(clang64|mingw64|ucrt64)/' | sort -u | while read -r dll; do
   cp "$dll" "$OUT/runtime/"
 done
 # And the DLLs those DLLs load (two more rounds reach everything MinGW libraries pull in).
 for round in 1 2; do
   for staged in "$OUT"/runtime/*.dll; do
-    ldd "$staged" 2>/dev/null | awk '{print $3}' | { grep -i '/msys64/' || true; } | sort -u | while read -r dll; do
+    ldd "$staged" 2>/dev/null | awk '{print $3}' | { grep -i -E '/msys64/|^/(clang64|mingw64|ucrt64)/' || true; } | sort -u | while read -r dll; do
       [ -f "$OUT/runtime/$(basename "$dll")" ] || cp "$dll" "$OUT/runtime/"
     done
   done
 done
+# A package without its libraries starts nothing: stop when the collection found none.
+if [ ! -f "$OUT/runtime/SDL3.dll" ] || [ "$(find "$OUT/runtime" -name '*.dll' | wc -l)" -lt 40 ]; then
+  echo "The program libraries were not collected (ldd found no MSYS2 paths); the package would not start." >&2
+  exit 1
+fi
 # DLSS frame generation: the bridge built from gpu/dlss_bridge and NVIDIA's DLSS libraries.
 cp packaging/dlss_bin/bbport_dlss.dll packaging/dlss_bin/nvngx_dlss.dll packaging/dlss_bin/nvngx_dlssg.dll "$OUT/runtime/"
 mkdir -p "$OUT/licenses"
