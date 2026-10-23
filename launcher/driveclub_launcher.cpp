@@ -450,13 +450,16 @@ constexpr char kLayoutMarker[] = "# DriveClub racing layout";  // the game repla
 bool PhysicsChosen() { return g_ffb_model >= 0 && g_c[g_ffb_model].sel == 0; }
 bool UpscaleActive();
 // FSR and DLSS work from the game's own anti-aliasing, which shares its shader with the blur: any way of turning
-// the blur off turns them off too. While one is chosen the blur rows are hidden and ignored.
+// the blur off turns them off too. While one is chosen the blur rows cannot be changed and are ignored.
 bool BlurLocked() { return g_aa >= 0 && g_c[g_aa].sel > 0; }
+// The two blur-off rows stay in view but cannot be changed while one is chosen.
+bool BlurRowLocked(const Ctl& c) {
+  return BlurLocked() && ((g_blur_patch >= 0 && &c == &g_c[g_blur_patch]) || (g_gfx[kGfxBlur] >= 0 && &c == &g_c[g_gfx[kGfxBlur]]));
+}
 // Rows that do nothing with the other choices: the physics settings with Original Physics; Upscaling and
 // Sharpness without FSR or DLSS; Render resolution while Upscaling sets the render size.
 bool RowHidden(const Ctl& c) {
   if (c.physics_only && !PhysicsChosen()) return true;
-  if ((g_blur_patch >= 0 && &c == &g_c[g_blur_patch]) || (g_gfx[kGfxBlur] >= 0 && &c == &g_c[g_gfx[kGfxBlur]])) return BlurLocked();
   if ((g_up >= 0 && &c == &g_c[g_up]) || (g_sharp >= 0 && &c == &g_c[g_sharp])) return g_aa >= 0 && g_c[g_aa].sel == 0;
   if (g_inres >= 0 && &c == &g_c[g_inres]) return UpscaleActive();
   if (g_fps_cap >= 0 && &c == &g_c[g_fps_cap]) return g_fps >= 0 && g_c[g_fps].sel != 3;
@@ -691,7 +694,7 @@ void BuildModel() {
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
-                          L"They share one shader, so both are turned off together. Hidden while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
+                          L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
                           "Disable motion blur and depth of field", false);
   const int reset = toggle(L"No reset-to-track timer", L"Disables the reset to track timer.", "Reset Disable", false);
   const int barrier = toggle(L"Disable track barriers", L"Removes the invisible barriers at the track edges.",
@@ -710,7 +713,7 @@ void BuildModel() {
                  L"Static draws it once and keeps that picture: much faster and steady, but reflections and rain on the glass stop updating.",
                  {L"Live", L"Static (faster)"}, {"@mirror", ""}, 0);
   g_aa = seg(L"Anti-aliasing",
-             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. The motion blur options are hidden while it is on, because they share a shader with it.",
+             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. The motion blur options cannot be changed while it is on, because they share a shader with it.",
              {L"Game", L"FSR 3.1", L"DLSS (RTX)"}, {"@aa", "", ""}, 0);
   g_up = seg(L"Upscaling",
              L"More FPS for nearly the same picture: the game is drawn at a lower resolution and DLSS (or FSR) rebuilds it at your screen's resolution. DLAA (Native with FSR) draws every pixel: the best picture, the lowest FPS. Quality is the best balance; Balanced, Performance and Ultra Perf. give more FPS each. Needs DLSS or FSR 3.1 above.",
@@ -795,7 +798,7 @@ void BuildModel() {
   g_gfx[kGfxDynres] = toggle(L"Dynamic resolution",
                              L"On (as on PS4), the game draws at a lower resolution for a moment when a frame takes too long.",
                              "@gfx", true);
-  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Hidden while FSR or DLSS anti-aliasing is on: they need the same shader.",
+  g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the same shader.",
                            "@gfx", true);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
@@ -1652,11 +1655,22 @@ void Paint(HDC hdc, int w, int h) {
         continue;
       }
       if (c.kind == Kind::Toggle) {
-        RowLabel(g, c, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width - 60 * S, 40 * S));
-        FillRound(g, ct, ct.Height / 2, c.sel ? (hot ? kAccentHover : kAccent) : (hot ? Color(255, 80, 87, 102) : kOff));
-        SolidBrush knob(kWhite);
+        const bool locked = BlurRowLocked(c);
+        // Locked: shown as the game has it (blur on, the patch off), dimmed, with what changing it would cost.
+        const bool on = locked ? &c == &g_c[g_gfx[kGfxBlur]] : c.sel != 0;
+        if (locked) {
+          const std::wstring name = std::wstring(c.label) + L" (Disables AA)";
+          Ctl shown = c;
+          shown.label = name.c_str();
+          RowLabel(g, shown, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width - 60 * S, 40 * S));
+          c.info = shown.info;
+        } else {
+          RowLabel(g, c, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width - 60 * S, 40 * S));
+        }
+        FillRound(g, ct, ct.Height / 2, locked ? (on ? Color(255, 120, 98, 40) : kOff) : on ? (hot ? kAccentHover : kAccent) : (hot ? Color(255, 80, 87, 102) : kOff));
+        SolidBrush knob(locked ? kMuted : kWhite);
         const float d = ct.Height - 6 * S;
-        g.FillEllipse(&knob, c.sel ? ct.X + ct.Width - d - 3 * S : ct.X + 3 * S, ct.Y + 3 * S, d, d);
+        g.FillEllipse(&knob, on ? ct.X + ct.Width - d - 3 * S : ct.X + 3 * S, ct.Y + 3 * S, d, d);
       } else if (c.kind == Kind::Picker) {
         // A box with the chosen name and a down arrow: a click opens the menu of choices.
         RowLabel(g, c, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width, 22 * S));
@@ -2798,6 +2812,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           InvalidateRect(h, nullptr, FALSE);
           return 0;
         }
+        if (BlurRowLocked(ctl)) return 0;  // FSR or DLSS is on: the blur stays as the game has it
         if (ctl.kind == Kind::Toggle) {
           ctl.sel = !ctl.sel;
           if (ctl.patches[0] == "@skipgpu") {
