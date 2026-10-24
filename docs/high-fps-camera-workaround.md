@@ -2,7 +2,7 @@
 
 This is an optional workaround requiring review, not a complete accuracy fix. Camera behavior remains incorrect in some situations and is not identical to the original 30 FPS behavior.
 
-Enable **Gameplay → Patches → High-FPS camera workaround (experimental)** in the Windows launcher. It is off by default, is saved in `launcher.ini` as `camera_patch=0/1`, and applies on the next game launch. Turning it off installs none of this bundle's runtime hooks. For direct runtime launches the equivalent opt-in is `BB_CAMERA_PATCH=1`; an unset value or `0` leaves it off.
+Enable **Gameplay → Patches → High-FPS camera workaround (experimental)** in the Windows launcher. It is enabled by default, is saved in `launcher.ini` as `camera_patch=0/1`, and applies on the next game launch. Turning it off installs none of this bundle's runtime hooks. For direct runtime launches the equivalent opt-in is `BB_CAMERA_PATCH=1`; an unset value or `0` leaves it off.
 
 ## Bundle
 

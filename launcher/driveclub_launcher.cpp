@@ -147,7 +147,7 @@ bool HasSubTabs() { return g_tab == kTabDriving; }
 bool OnPage(const Card& card) { return card.tab == g_tab && (card.sub < 0 || card.sub == g_subtab); }
 std::wstring g_status;
 std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while it is set, unless the check is skipped
-bool g_camera_patch = false;  // opt-in; persisted in launcher.ini
+bool g_camera_patch = true;  // enabled by default; persisted in launcher.ini
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
@@ -728,8 +728,8 @@ void BuildModel() {
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
   const int camera_patch = toggle(L"High-FPS camera workaround (experimental)",
-      L"Reduces camera, replay HUD and driver shake above 30 FPS. Behavior is still incorrect in some situations and does not match the 30 FPS reference. Off by default; restart the game after changing it.",
-      "@camera_patch", false);
+      L"Reduces camera, replay HUD and driver shake above 30 FPS. Behavior is still incorrect in some situations and does not match the 30 FPS reference. Enabled by default; restart the game after changing it.",
+      "@camera_patch", true);
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
                           L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
                           "Disable motion blur and depth of field", false);

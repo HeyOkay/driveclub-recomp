@@ -14,9 +14,9 @@ int main() {
   int row = -1;
   for (size_t i = 0; i < g_c.size(); ++i)
     if (g_c[i].patches[0] == "@camera_patch") row = int(i);
-  assert(row >= 0 && g_c[row].def == 0 && g_c[row].sel == 0);
+  assert(row >= 0 && g_c[row].def == 1 && g_c[row].sel == 1);
   LoadSettings();
-  assert(g_c[row].sel == 0);
+  assert(g_c[row].sel == 1);
   assert(g_motion_blur >= 0 && g_c[g_motion_blur].sel == 0);
   int threads = -1;
   for (size_t i = 0; i < g_c.size(); ++i)
@@ -46,5 +46,6 @@ int main() {
     assert(value[0] == (selected ? L'1' : L'0'));
   }
   for (const auto& line : ReadLines(SelectionPath())) assert(line != "@camera_patch");
-  puts("PASS: disabled by default, launcher choice survives save/reload, on-to-off environment is refreshed, Motion Blur and draw_threads preserved independently, no XML pseudo-patch emitted.");
+  ResetDefaults(); assert(g_c[row].sel == 1);
+  puts("PASS: enabled by default and after reset, launcher choice survives save/reload, on-to-off environment is refreshed, Motion Blur and draw_threads preserved independently, no XML pseudo-patch emitted.");
 }
