@@ -40,7 +40,7 @@ public partial class MainWindow : Window
     private int currentPage, revision;
     private int navigationSelection = -1;
     private bool suppress, busy, allowClose;
-    private string baseStatus = "Loading your settingsР В Р вЂ Р В РІР‚С™Р вЂ™Р’В¦";
+    private string baseStatus = "Loading your settings...";
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
     private readonly bool capture = Environment.GetCommandLineArgs().Contains("--capture");
     private readonly bool perf = Environment.GetCommandLineArgs().Contains("--perf");
@@ -99,6 +99,7 @@ public partial class MainWindow : Window
     {
         LoadFonts();
         InitializeComponent();
+        if (preview) Title = "DRIVECLUB Launcher - Preview";
         Status.MouseLeftButtonUp += (_, _) => { if (releaseUrl != null) Process.Start(new ProcessStartInfo(releaseUrl) { UseShellExecute = true }); };
         StateChanged += (_, _) => MaximizeGlyph.Glyph = WindowState == WindowState.Maximized ? "Restore" : "Maximize";
         TitleLogo.Source = Image("brand/logo-red.png");
@@ -714,7 +715,7 @@ public partial class MainWindow : Window
     {
         if (busy) return;
         busy = true; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = false;
-        BusyOverlay.Visibility = Visibility.Visible; Progress.Value = 0; PercentText.Text = "0%"; ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game filesР В Р вЂ Р В РІР‚С™Р вЂ™Р’В¦";
+        BusyOverlay.Visibility = Visibility.Visible; Progress.Value = 0; PercentText.Text = "0%"; ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game files...";
         StartLoadingAnimation();
         try
         {
@@ -775,7 +776,7 @@ public partial class MainWindow : Window
         stampAlpha.KeyFrames.Add(new LinearDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(1.1))));
         stampAlpha.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(1.2))));
         Add(Stamp, new PropertyPath(OpacityProperty), stampAlpha);
-        // Preserve the original plate travel (0.3Р В Р вЂ Р В РІР‚С™Р Р†Р вЂљРЎС™0.6 s); move the stamp landing to match it.
+        // Preserve the original plate travel (0.3 to 0.6 s); move the stamp landing to match it.
         intro.Begin(this, HandoffBehavior.SnapshotAndReplace, Environment.GetCommandLineArgs().Contains("--capture-loading-frames"));
         if (spinnerFrames.Count == 0) return intro;
         spinnerIndex = 0; Spinner.Source = spinnerFrames[0];

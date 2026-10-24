@@ -120,3 +120,19 @@ a temporary file and atomic replacement so a failed replacement retains the
 previous file. These guarantees are tested against copies, never by modifying
 the supplied existing installation. Native pending wheel-setting migration is
 retained and affects only recognized wheel keys.
+
+## Temporary workaround lifecycle
+
+Temporary patches are explicitly grouped under **Temporary workarounds**, named
+as workarounds, described as experimental where appropriate and individually
+toggleable. They must not be presented as permanent native fixes. The current
+camera workaround still follows the explicit FPS-mode defaults described above;
+a saved manual opt-out remains respected.
+
+When the underlying runtime/core issue is fixed, verify the affected scenarios
+with the workaround disabled. Once that native correction is established, retire
+the workaround's automatic enabling and UI entry instead of stacking both paths.
+Keep old config keys tolerated for compatibility. Update the source condition,
+capability handling, descriptions and tests together. A runtime version number
+alone does not prove the issue is fixed; this launcher does not automatically
+claim to detect an unverified native correction.

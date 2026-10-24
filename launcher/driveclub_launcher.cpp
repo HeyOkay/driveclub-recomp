@@ -740,8 +740,8 @@ void BuildModel() {
                        00));
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
-  const int camera_patch = g_camera_patch_row = toggle(L"Camera and replay stabilization",
-      L"Experimental workaround for high-FPS camera, replay HUD and driver shake. Requires a compatible runtime. Behavior is not yet identical to the PS4 reference. Enabled automatically when selecting 60 FPS delta time or Unlocked/VRR. Not needed at 30 FPS. Manual opt-out is retained until the next frame-rate change; restart the game after changing it.",
+  const int camera_patch = g_camera_patch_row = toggle(L"Camera/replay shake workaround",
+      L"Temporary, experimental high-FPS workaround. Auto-enabled for 60 FPS delta time/VRR; off for PS4/30 FPS. Manual opt-out persists until the FPS mode changes. Disable once native timing is fixed. Requires a compatible runtime.",
       "@camera_patch", true);
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
                           L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
@@ -962,8 +962,9 @@ void BuildModel() {
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game leaves the setting to the game's Options menu. Other choices are applied when the game starts."});
   g_cards.back().sub = kSubAssists;
-  g_cards.push_back({L"COMPATIBILITY", {camera_patch, fov}, 0, kTabPatches,
-                     L"Recommended workarounds. Camera stabilization needs a compatible game runtime."});
+  g_cards.push_back({L"TEMPORARY WORKAROUNDS", {camera_patch}, 0, kTabPatches,
+                     L"Optional workaround for high-FPS shake. Not needed at 30 FPS. Disable it if your runtime already corrects camera/replay timing."});
+  g_cards.push_back({L"DISPLAY COMPATIBILITY", {fov}, 0, kTabPatches});
   g_cards.push_back({L"GAMEPLAY PATCHES", {reset, barrier}, 0, kTabPatches});
   g_cards.push_back({L"PHOTO MODE", {pcol, pproc}, 0, kTabPatches});
   g_cards.push_back({L"EFFECT OVERRIDES", {blur}, 0, kTabPatches});
@@ -1034,6 +1035,9 @@ const int kPresetOut[6] = {0, 1, 0, 2, 4, 4};     // Default 720p 1440p 1800p 4K
 const int kPresetIn[6] = {0, 1, 1, 0, 2, 4};      // Default(1080p) 720p 1440p 1800p 4K 8K
 const int kPresetMirror[6] = {0, 1, 0, 0, 0, 0};  // Live, Static (Handheld takes the speed)
 
+// Temporary compatibility policy: verify the native correction without this
+// workaround, then retire its auto-enable and UI entry. Do not stack a known
+// corrected native path with the workaround or infer correctness from version.
 bool FrameModeNeedsCameraPatch() {
   return g_fps>=0 && (g_c[g_fps].sel==1 || g_c[g_fps].sel==3);
 }
