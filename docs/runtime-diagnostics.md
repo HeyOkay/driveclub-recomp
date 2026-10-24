@@ -2,6 +2,8 @@
 
 Normal builds exclude capture-trigger polling, shader/buffer dumps, GPU profiling, validation/markers, verbose trace/debug logging and diagnostic-only hot-path timing/counters. Setting their old environment flags does not enable them in a normal executable. Error reports and functional frame/display tracking, mirror feedback, rendering synchronization, the performance overlay and benchmark support remain available.
 
+The opt-in shader quarantine remains functional in ordinary builds: `BB_QUARANTINE=1` retains recent draw/dispatch history, so a device loss can save new suspect compute shaders and load them on the next run. This startup option is cached once rather than querying the environment per command. With quarantine off, only diagnostic builds collect that history.
+
 With MSYS2 CLANG64, build the ordinary runtime as usual:
 
 ```sh
@@ -33,6 +35,8 @@ Create the capture directory first. Creating the trigger file records the next c
 ## Regression checks
 
 Configure both variants with `-DBB_BUILD_DIAGNOSTIC_TESTS=ON`, build the `bb_diagnostics_gate_test` target, and run it from each build directory. The test poisons diagnostic environment flags, checks the actual capture implementation and verifies that frame counts, display-buffer registration beyond the fast-list capacity and mirror feedback still work. Assertions remain enabled for this test in release builds.
+
+The `bb_quarantine_test` target also checks both `off` and `on` modes in separate processes. Run `bb_quarantine_test off` and `bb_quarantine_test on` in each build directory. These tests use their own temporary file and exercise disabled recording, ring wraparound, preserving existing/manual entries, saving new dispatch hashes, deduplication, and loading the saved quarantine. They do not require a GPU crash.
 
 The launcher routing regression can be built in MSYS2 CLANG64:
 

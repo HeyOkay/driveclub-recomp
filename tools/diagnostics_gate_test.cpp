@@ -19,6 +19,7 @@ static void SetEnv(const char* name, const char* value) {
 }
 
 int main() {
+    SetEnv("BB_QUARANTINE", "0");
     const auto trigger = std::filesystem::temp_directory_path() /
         ("driveclub-diagnostics-gate-" + std::to_string(
              std::chrono::steady_clock::now().time_since_epoch().count()));
