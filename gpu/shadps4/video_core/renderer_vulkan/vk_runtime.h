@@ -86,7 +86,8 @@ public:
     void VerifyFormCopy(VideoCore::Image* src, VideoCore::Image* dst);
     void SelfTestFormCopy();
 
-    void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
+    /// bbport: `aspects` limits the copy to the planes the guest asked for (eDepth, eStencil or both).
+    void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst, vk::ImageAspectFlags aspects,
                           const VideoCore::SubresourceRange& sub_range);
 
     void ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,

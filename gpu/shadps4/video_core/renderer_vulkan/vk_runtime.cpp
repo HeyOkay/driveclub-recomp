@@ -927,7 +927,7 @@ bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     return false;
 }
 
-void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
+void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst, vk::ImageAspectFlags aspects,
                                const VideoCore::SubresourceRange& sub_range) {
     scheduler.EndRendering();
     const TransferMark mark{*this, "depth-stencil copy", *dst};
@@ -941,7 +941,10 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
         FlushBarriers();
     }
 
-    const auto aspect_mask = src->aspect_mask & dst->aspect_mask;
+    const auto aspect_mask = src->aspect_mask & dst->aspect_mask & aspects;
+    if (!aspect_mask) {
+        return;
+    }
 
     const vk::ImageCopy region = {
         .srcSubresource{

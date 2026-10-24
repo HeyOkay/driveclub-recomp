@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <optional>
 #include <set>
+#include <chrono>
+#include <mutex>
+#include <unordered_set>
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_settings.h"
@@ -3933,7 +3936,32 @@ void Rasterizer::DepthStencilCopy(bool is_depth, bool is_stencil) {
         regs.depth_buffer.StencilAddress(), regs.depth_buffer.DepthWriteAddress(),
         regs.depth_buffer.StencilWriteAddress()));
 
-    runtime.CopyDepthStencil(&read_image, &write_image, sub_range);
+    // bbport: BB_DEPTH_COPY_ASPECTS (default on, =0 off): only the planes the guest copies (force_z / force_stencil
+    // dirty+valid) instead of both planes of a D32S8 image. A correctness change: this path never ran in a race
+    //, so it is unmeasured; the ~1 ms once blamed on it was the depth->R32F form copy.
+    static const bool aspects_only = [] {
+        const char* env = std::getenv("BB_DEPTH_COPY_ASPECTS");
+        return !env || env[0] != '0';
+    }();
+    vk::ImageAspectFlags aspects = vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil;
+    if (aspects_only) {
+        aspects = (is_depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlags{}) |
+                  (is_stencil ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlags{});
+    }
+    if (BbStats::enabled) {
+        static std::mutex logged_mutex;
+        static std::unordered_set<VAddr> logged;
+        std::scoped_lock lk{logged_mutex};
+        if (logged.size() < 16 && logged.insert(regs.depth_buffer.DepthWriteAddress()).second) {
+            std::printf("Depth-stencil copy %#llx -> %#llx %ux%u %s, depth %d stencil %d, layers %u+%u\n",
+                        static_cast<unsigned long long>(regs.depth_buffer.DepthAddress()),
+                        static_cast<unsigned long long>(regs.depth_buffer.DepthWriteAddress()),
+                        write_image.info.size.width, write_image.info.size.height,
+                        vk::to_string(write_image.info.pixel_format).c_str(), int(is_depth), int(is_stencil),
+                        sub_range.base.layer, sub_range.extent.layers);
+        }
+    }
+    runtime.CopyDepthStencil(&read_image, &write_image, aspects, sub_range);
 
     ScopeMarkerEnd();
 }
