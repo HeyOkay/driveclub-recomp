@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <limits>
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -948,6 +949,42 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
             PatchBufferSharp(usage, info, descriptors, profile);
         } else if (IsImageInstruction(inst)) {
             PatchImageSharp(usage, info, descriptors, profile);
+        }
+    }
+
+    // Eligible GCN cube samples filter across faces in hardware. Mixed/raw
+    // operations and intentionally non-seamless samplers keep the array route.
+    const char* cube_fix = std::getenv("BB_CUBE_FILTER_FIX");
+    if (cube_fix && cube_fix[0] == '1' && cube_fix[1] == 0 && profile.supports_native_cube_array) {
+        for (auto& desc : info.images) {
+            const auto sharp = desc.GetSharp(info);
+            desc.native_cube = sharp.IsCube() && !desc.is_written && !desc.is_depth &&
+                !desc.needs_native && !AmdGpu::IsInteger(sharp.GetNumberFmt()) &&
+                sharp.width == sharp.height && sharp.NumSamples() == 1 &&
+                sharp.base_array % 6 == 0 && sharp.NumViewLayers(desc.is_array) % 6 == 0;
+        }
+        for (const auto& usage : resources) {
+            const auto& inst = *usage.user;
+            if (!IsImageInstruction(inst) || !inst.Arg(0).IsImmediate()) {
+                continue;
+            }
+            const u32 handle = inst.Arg(0).U32();
+            const u32 index = handle & 0xffff;
+            if (index >= info.images.size() || !info.images[index].native_cube) {
+                continue;
+            }
+            const auto flags = inst.Flags<IR::TextureInstInfo>();
+            const bool supported = inst.GetOpcode() == IR::Opcode::ImageSampleRaw &&
+                (flags.has_lod || flags.force_level0) && !flags.has_derivatives &&
+                !flags.has_offset && !flags.is_depth && !flags.is_gather && !flags.is_unnormalized;
+            if (!supported) {
+                info.images[index].native_cube = false;
+                continue;
+            }
+            const auto sampler = info.samplers[handle >> 16].GetSharp(info);
+            if (sampler.disable_cube_wrap || sampler.force_unnormalized) {
+                info.images[index].native_cube = false;
+            }
         }
     }
 

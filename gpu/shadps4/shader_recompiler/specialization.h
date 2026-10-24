@@ -67,6 +67,7 @@ struct FMaskSpecialization {
 struct SamplerSpecialization {
     u8 force_unnormalized : 1;
     u8 force_degamma : 1;
+    u8 disable_cube_wrap : 1;
 
     bool operator==(const SamplerSpecialization&) const = default;
 };
@@ -153,6 +154,7 @@ struct StageSpecialization {
                      [](auto& spec, const auto& desc, AmdGpu::Sampler sharp) {
                          spec.force_unnormalized = sharp.force_unnormalized;
                          spec.force_degamma = sharp.force_degamma;
+                         spec.disable_cube_wrap = sharp.disable_cube_wrap;
                      });
 
         // Initialize runtime_info fields that rely on analysis in tessellation passes
