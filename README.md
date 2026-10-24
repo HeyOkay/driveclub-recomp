@@ -40,3 +40,6 @@ all 23 transformed capture shaders were validated with spirv-val. Normal replay 
 99.4052% of the captured live frame's pixels exactly; remaining replay differences are
 small and recorded in full-frame/validation.json. These are controlled single-frame results,
 not a separate measurement of steady-state temporal convergence.
+
+[Full-frame road seam detail, before / after](full-frame/road-seam-zoom-before-after.png). Wide 640x420 crop above-left of the car at original pixel scale; exposure and colors are unchanged.
+

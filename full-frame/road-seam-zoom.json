@@ -1,0 +1,13 @@
+{
+  "source": "Full-frame before-2560x1440.png and after-2560x1440.png",
+  "crop_xyxy": [
+    560,
+    420,
+    1200,
+    840
+  ],
+  "zoom": 1,
+  "filter": "nearest-neighbor",
+  "brightness_or_contrast_adjustment": false,
+  "labels_outside_image_pixels": true
+}
