@@ -1,6 +1,6 @@
 # Cubemap filtering previews
 
-These six lossless PNGs accompany the seamless cubemap filtering PR. They are GPU
+The six diagnostic PNGs below accompany the seamless cubemap filtering PR. They are GPU
 reconstructions of the isolated global reflection contribution from one saved Driveclub
 frame, using the same material, directions, LODs and exposure for both sampling paths.
 They are not two live game screenshots or a reconstruction of the complete rendering chain.
@@ -24,3 +24,19 @@ contribution is shown: local probes, SSR composition and the complete post-proce
 are outside these comparisons. No raw game assets, GPU resource dumps or frame-capture
 binaries are included here. The JSON files record the comparison scope and sampling counts.
 
+
+## Complete game-frame comparison
+
+- [Before: original independent array-face filtering, complete final output](full-frame/before-2560x1440.png)
+- [After: native seamless cube filtering, complete final output](full-frame/after-2560x1440.png)
+
+These two unmodified 2560x1440 PNGs are actual final-present GPU outputs from full-frame
+Nsight replay with NGX/DLAA enabled, not isolated-lighting reconstructions. Both use the
+same captured scene, camera, weather, resources and prior-frame history. The before replay
+restores original face-local coordinates and 2D-array image types/views; the after replay
+uses captured native cube shaders unchanged. They are not two newly recorded live runs.
+The same restored array path is bit-identical to original array sampling in 540 GPU cases;
+all 23 transformed capture shaders were validated with spirv-val. Normal replay matches
+99.4052% of the captured live frame's pixels exactly; remaining replay differences are
+small and recorded in full-frame/validation.json. These are controlled single-frame results,
+not a separate measurement of steady-state temporal convergence.

@@ -1,0 +1,28 @@
+{
+  "resolution": [
+    2560,
+    1440
+  ],
+  "native_render_complete_frame": true,
+  "dlAA_enabled_in_both": true,
+  "after_vs_live_capture": {
+    "identical_pixels_pct": 99.40521918402779,
+    "mean_absolute_rgb_error_255": 0.0031297019675925928,
+    "max_channel_error": 83,
+    "pixels_error_gt_3_pct": 0.006049262152777778
+  },
+  "before_vs_after": {
+    "identical_pixels_pct": 92.23361545138889,
+    "mean_absolute_rgb_error_255": 0.06801179108796296,
+    "max_channel_error": 81,
+    "pixels_error_gt_3_pct": 0.19132486979166669
+  },
+  "method": "Full-frame replay of the same Nsight capture. Before restores original face-local coordinates and 2D-array image types/views for all native cube modules; after uses captured native cube code unchanged. Captured previous-frame resources and temporal history are the same inputs in both runs. These are actual GPU final-present outputs, not isolated-lighting reconstructions or newly captured live screenshots.",
+  "legacy_shaders_patched": 23,
+  "legacy_views_changed": 5,
+  "legacy_array_test_cases_bit_identical": 540,
+  "sha256": {
+    "after": "7f64e851737f3a271d67493e9c8d8b386956b15c8a1c46efcc23d151c9880b99",
+    "before": "e319888b82641a17bfbdb73fb44688b822fcd4f488a92c603ed97eb4798b065d"
+  }
+}
