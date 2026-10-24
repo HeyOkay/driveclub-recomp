@@ -10,7 +10,7 @@ namespace DriveClub.Launcher;
 
 public partial class MainWindow
 {
-    private const int ModsPage = 6;
+    private const int ModsPage = 7;
     private ModLibrary? modLibrary;
     private ModLibraryState modState = new();
     private string? selectedMod;

@@ -9,6 +9,22 @@ void WriteExternalProgress(int percent,const std::wstring& text) {
   if(g_external_progress.empty())return;
   try{WriteJsonFile(g_external_progress,{{"Percent",percent},{"Text",Narrow(text)}});}catch(...){}
 }
+// Capability check for the optional camera runtime; no game process is started.
+bool CameraPatchAvailable() {
+  static const bool available=[] {
+    std::ifstream file(GameExe().c_str(),std::ios::binary);
+    const std::string marker="CameraPatch: experimental high-FPS camera/replay workaround enabled";
+    std::string buffer(65536+marker.size(), '\0'); size_t keep=0;
+    while(file) {
+      file.read(buffer.data()+keep,65536); const size_t count=keep+size_t(file.gcount());
+      if(std::search(buffer.begin(),buffer.begin()+count,marker.begin(),marker.end())!=buffer.begin()+count) return true;
+      keep=(std::min)(count,marker.size()-1);
+      std::memmove(buffer.data(),buffer.data()+count-keep,keep);
+    }
+    return false;
+  }();
+  return available;
+}
 Json UiState(const std::wstring& error=L"") {
   Json controls=Json::array(),cards=Json::array();
   for(size_t i=0;i<g_c.size();++i){
@@ -18,11 +34,12 @@ Json UiState(const std::wstring& error=L"") {
     else if(int(i)==g_btrack){for(const auto& x:kBenchTracks)options.push_back(Narrow(std::wstring(x.name)+L" ("+x.group+L")"));selected=g_bench_track;}
     else if(int(i)==g_bcar){for(const auto& x:kBenchCars)options.push_back(Narrow(x.name));selected=g_bench_car;}
     else for(const auto& x:c.items)options.push_back(Narrow(x));
-    controls.push_back({{"Id",i},{"Label",Narrow(c.label)},{"Hint",Narrow(c.hint)},{"Kind",kind},{"Tag",c.patches[0]},
-      {"Minimum",c.min},{"Maximum",c.max},{"Unit",Narrow(c.unit)},{"Hidden",RowHidden(c)},{"Enabled",!BlurRowLocked(c)},
+    const bool listed=std::any_of(g_cards.begin(),g_cards.end(),[&](const Card& card){return std::find(card.ctls.begin(),card.ctls.end(),int(i))!=card.ctls.end();});
+    controls.push_back({{"Id",i},{"Label",Narrow(c.label)},{"Hint",Narrow(int(i)==g_camera_patch_row && !CameraPatchAvailable() ? L"Requires a newer game runtime with camera and replay stabilization. The current runtime does not include this workaround." : int(i)==g_motion_blur ? MotionBlurHint(c.sel) : c.hint)},{"Kind",kind},{"Tag",c.patches[0]},
+      {"Minimum",c.min},{"Maximum",c.max},{"Unit",Narrow(c.unit)},{"Hidden",!listed || RowHidden(c)},{"Enabled",!BlurRowLocked(c) && (int(i)!=g_camera_patch_row || CameraPatchAvailable())},
       {"Options",options},{"Selected",selected},{"Text",c.patches[0]=="@name"?Narrow(g_name):""}});
   }
-  // Preserve upstream category, card, control order and Driving subpages directly.
+  // The native model owns category/card membership, reset scopes and Driving subpages.
   for(const auto& c:g_cards) {
     cards.push_back({{"Title",Narrow(c.title)},{"Page",c.tab},{"Subpage",c.sub},
       {"Controls",c.ctls},{"Note",c.note?Narrow(c.note):""}});
@@ -31,7 +48,7 @@ Json UiState(const std::wstring& error=L"") {
   return {{"Version",2},{"Controls",controls},{"Cards",cards},{"UpdatePath",Narrow(g_folder[0].path)},{"BasePath",Narrow(g_folder[1].path)},
     {"FoldersOk",FoldersOk()},{"FolderProblem",Narrow(!FolderProblem(0).empty()?FolderProblem(0):FolderProblem(1))},
     {"HardwareProblem",Narrow(g_gpu_problem)},{"RuntimeAvailable",Exists(GameExe())},{"Error",Narrow(error)},
-    {"QuickControls",{g_outres,g_aa,g_preset,g_fps}},{"PresetId",g_preset},
+    {"QuickControls",{g_preset,g_fps,g_outres,g_aa}},{"PresetId",g_preset},
     {"BenchmarkFps",Narrow(g_bench_result.fps)},{"BenchmarkLows",Narrow(g_bench_result.lows)},{"BenchmarkAbout",Narrow(g_bench_result.about)}};
 }
 void ImportUiState(const Json& input) {
@@ -68,7 +85,7 @@ int RunWpfBridge(int argc,wchar_t** argv) {
         if(page < -1 || page >= kTabCount || (page==kTabDriving && (sub<0 || sub>=kSubCount)))
           throw std::runtime_error("Invalid reset page");
         std::vector<int> ids;
-        if(page==-1)ids={g_outres,g_aa,g_preset,g_fps};
+        if(page==-1)ids={g_preset,g_fps,g_outres,g_aa};
         else for(const auto& card:g_cards)if(card.tab==page && (page!=kTabDriving || card.sub==sub))
           ids.insert(ids.end(),card.ctls.begin(),card.ctls.end());
         for(int id:ids){

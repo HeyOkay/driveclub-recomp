@@ -26,11 +26,11 @@ public partial class MainWindow : Window
     private readonly Dictionary<int, FrameworkElement> pages = [];
     private readonly Dictionary<string, BitmapSource> images = [];
     private readonly List<Button> navButtons = [];
-    private readonly string[] names = ["Play", "Graphics", "Detail", "Gameplay", "Driving", "Benchmark", "Mods"];
-    private readonly string[] hints = ["Your game, ready to drive.", "Frame rate, resolution, anti-aliasing, texture filtering and HDR.", "Model, scenery, reflection and shadow detail, and camera effects.", "Player identity, mirrors, startup, add-on content and community patches.", "Driving assists, field of view and steering wheel forces.", "A repeatable event driven by the game's AI."];
+    private readonly string[] names = ["Play", "Display", "Graphics", "Gameplay", "Driving", "Patches", "Benchmark", "Mods"];
+    private readonly string[] hints = ["Your game, ready to drive.", "Frame rate, resolution, anti-aliasing and HDR.", "Scene detail, reflections and camera effects.", "Player profile, content, startup and overlays.", "Driving assists, field of view and steering wheel forces.", "Compatibility workarounds and optional community patches.", "A repeatable event driven by the game's AI.", "Manage local replacement files."];
     // Home is shell-only; the remaining pages follow the native 0.3.1 tabs.
-    private readonly int[] sourcePages = [-1, 0, 1, 2, 3, 4, -2];
-    private readonly string[] backgroundPaths = ["backgrounds/page-0.png", "backgrounds/page-2.png", "backgrounds/detail.png", "backgrounds/page-4.png", "backgrounds/driving.png", "backgrounds/page-5.png", "backgrounds/page-4.png"];
+    private readonly int[] sourcePages = [-1, 0, 1, 2, 3, 5, 4, -2];
+    private readonly string[] backgroundPaths = ["backgrounds/page-0.png", "backgrounds/page-2.png", "backgrounds/detail.png", "backgrounds/page-4.png", "backgrounds/driving.png", "backgrounds/patches.png", "backgrounds/page-5.png", "backgrounds/mods.png"];
     private int drivingSubpage;
     private bool foldersExpanded;
     private bool animateFoldersOpening;
@@ -40,7 +40,7 @@ public partial class MainWindow : Window
     private int currentPage, revision;
     private int navigationSelection = -1;
     private bool suppress, busy, allowClose;
-    private string baseStatus = "Loading your settings…";
+    private string baseStatus = "Loading your settingsРІР‚В¦";
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
     private readonly bool capture = Environment.GetCommandLineArgs().Contains("--capture");
     private readonly bool perf = Environment.GetCommandLineArgs().Contains("--perf");
@@ -533,6 +533,8 @@ public partial class MainWindow : Window
             Place(row, value, width - valueWidth, quick ? 0 : 6, valueWidth, 20);
             var slider = new Slider { Minimum = setting.Minimum, Maximum = setting.Maximum, TickFrequency = 1, IsSnapToTickEnabled = true, Value = setting.Selected, Style = (Style)FindResource("SettingSlider") };
             slider.ValueChanged += (_, _) => { suppress = true; setting.Selected = (int)Math.Round(slider.Value); suppress = false; value.Text = setting.Selected + setting.Unit; ++revision; SetStatus("Unsaved changes"); };
+            slider.LostMouseCapture += (_, _) => { if (!slider.IsMouseCaptureWithin && state.Controls.Contains(setting)) SettingChanged(setting, new(nameof(Setting.Selected))); };
+            slider.KeyUp += (_, _) => { if (state.Controls.Contains(setting)) SettingChanged(setting, new(nameof(Setting.Selected))); };
             field = slider; Place(row, field, 0, fieldTop, width, 38);
         }
         else
@@ -712,7 +714,7 @@ public partial class MainWindow : Window
     {
         if (busy) return;
         busy = true; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = false;
-        BusyOverlay.Visibility = Visibility.Visible; Progress.Value = 0; PercentText.Text = "0%"; ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game files…";
+        BusyOverlay.Visibility = Visibility.Visible; Progress.Value = 0; PercentText.Text = "0%"; ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game filesРІР‚В¦";
         StartLoadingAnimation();
         try
         {
@@ -773,7 +775,7 @@ public partial class MainWindow : Window
         stampAlpha.KeyFrames.Add(new LinearDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(1.1))));
         stampAlpha.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(1.2))));
         Add(Stamp, new PropertyPath(OpacityProperty), stampAlpha);
-        // Preserve the original plate travel (0.3–0.6 s); move the stamp landing to match it.
+        // Preserve the original plate travel (0.3РІР‚вЂњ0.6 s); move the stamp landing to match it.
         intro.Begin(this, HandoffBehavior.SnapshotAndReplace, Environment.GetCommandLineArgs().Contains("--capture-loading-frames"));
         if (spinnerFrames.Count == 0) return intro;
         spinnerIndex = 0; Spinner.Source = spinnerFrames[0];
@@ -888,6 +890,7 @@ public partial class MainWindow : Window
             var canvas = i == 0 ? ((Grid)((ScrollViewer)pages[i]).Content).Children.OfType<Canvas>().Single() : (Canvas)((ScrollViewer)pages[i]).Content;
             var quick = i == 0 ? (Canvas)((Grid)((ScrollViewer)pages[i]).Content).Children.OfType<Border>().Single().Child : null;
             panelWidths.Add(LayoutReport(names[i], canvas, quick));
+            if (i != 0) SaveVisual(Path.Combine(directory, names[i].ToLowerInvariant() + "-settings.png"), canvas);
         }
         await File.WriteAllTextAsync(Path.Combine(directory, "panel-widths.json"), JsonSerializer.Serialize(panelWidths, Backend.JsonOptions));
         ShowPage(Array.IndexOf(names, "Driving"), false); Root.UpdateLayout();

@@ -1,116 +1,103 @@
 # DRIVECLUB WPF launcher
 
-Every settings card and Game Files uses the measured Game Status width as its
-maximum, with responsive columns and an 18 DIP gap. Quick Settings retains its
-existing full-width layout and bottom docking.
+Windows .NET 8 WPF shell over the native launcher backend. `DriveClub.exe` is the
+shell; `DriveClub.Backend.exe` owns settings, patch selection, game preparation,
+launch and benchmarks. This change does not replace game or renderer logic.
 
-Reset this page sends the current unsaved state and native page/subpage ID to the
-backend. It restores only that scope; Play resets its four Quick Settings, Driving
-resets the active inner tab. Other unsaved settings and game paths stay unchanged.
-Player identity and language retain their previous reset exclusions. Saving remains
-explicit (Save settings or Play); reset itself does not write configuration files.
+## Settings
 
-Game folders retain their inline placement and responsive layout. Only their
-opacity fades over 120 ms, with no height tween, page translation or popup.
-Footer action columns size to content with equal 20 DIP horizontal padding.
-Selected and open controls use solid accent red (#ED2B38); no burgundy gradients.
-Setting captions have 6 DIP of top inset and fields remain aligned.
+- **Play:** game status and folders; Quick Settings in the order Performance
+  preset, Frame rate, Output resolution, Anti-aliasing.
+- **Display:** frame rate, resolution/window, anti-aliasing/filtering and HDR.
+- **Graphics:** scene detail, reflections and camera effects, including the
+  existing Slow/Fast motion-blur exposure control.
+- **Gameplay:** player profile, content, startup and overlays.
+- **Driving:** Assists and view / Wheel and force feedback subpages.
+- **Patches:** compatibility workarounds, gameplay changes, photo mode, effect
+  overrides and advanced runtime options. Each existing optional patch retains
+  its own control.
+- **Benchmark:** the native AI-driven repeatable event and results.
+- **Mods:** local loose-file replacements; not a downloadable mod catalogue.
 
-FilmGrainOverlay generates a single stationary noise field at the current viewport's
-device-pixel dimensions with uniform alpha. It sits outside the artwork crossfade;
-there are no repeating brushes, stretched grain textures or cached background tiles.
+The native card model is the single source of category membership and reset
+scopes. Controls omitted by the native release are not exposed by the shell.
+Resolution presets and the existing settings/patch formats are retained.
 
-The sidebar follows upstream 0.3.1: Play, Graphics, Detail, Gameplay, Driving,
-Benchmark, followed by the local Mod Manager. Cards and control order come directly from the native model. Graphics
-contains frame rate/resolution, anti-aliasing and HDR. A compact game folders
-block is on Play beside status in wide windows and below it in narrow windows.
-Its header toggles the paths; valid folders are collapsed initially and after
-selection, while invalid folders automatically expand. Collapsed paths reserve
-only the header height and do not push Quick Settings down. Gameplay
-contains the original gameplay and patch cards. Driving retains the native
-Assists and view / Wheel and force feedback subpages. Binary community patches
-remain under Gameplay. Existing styling and animations are preserved.
+### PS4 preset
+
+Quick Settings offers **PS4**: 30 FPS, native 1080p output/render, original game
+anti-aliasing and texture filtering, live mirrors, original model/scenery/shadow
+quality, dynamic resolution, motion blur with Slow exposure, lens dust, heat haze
+and FXAA. It restores 100% field of view and disables optional gameplay/photo
+mode/effect overrides. Player identity, language, game folders, driving assists,
+wheel settings, content and startup preferences are preserved.
+
+The camera/replay workaround stays enabled. Its launcher contract matches PR
+#187: `camera_patch=0/1` in launcher.ini and `BB_CAMERA_PATCH=0/1` for the game.
+The runtime implementation remains in that separate PR. The backend checks the
+selected executable for its capability marker; on unsupported runtimes the
+control is disabled with an explanation. Selecting a profile does not install
+or claim to add that runtime feature. The control remains individually
+switchable on compatible runtimes, and a saved opt-out is respected on restart.
+
+Reset this page affects only the current page or active Driving subpage. Play
+resets its four Quick Settings. Identity/language retain their exclusions.
+Reset and profile selection do not save; Save settings and Play persist changes.
+
+## Build and review
+
+Requires Windows, MSYS2 CLANG64, .NET SDK 8+ with Windows desktop targeting, and
+.NET 8 Windows Desktop runtime for the framework-dependent shell.
+
+```powershell
+./launcher/build-wpf.ps1 -OutputDirectory C:\path\to\separate\preview
+python launcher/tests/backend/verify.py C:\path\to\preview\DriveClub.Backend.exe C:\path\to\test-output
+dotnet run --project launcher/tests/mod-manager/ModManager.Tests.csproj -c Release
+```
+
+Build outputs go into a separate directory. To run normally, provide the release
+runtime, native helper applications/licenses, game folders and optional local
+assets beside the shell. This script does not replace an installed game.
+The normal upstream build path remains available; this is a separate Windows
+frontend build until packaging is explicitly adopted upstream.
+
+`DriveClub.exe --preview` prevents auto-play and previews the loading sequence
+when Play/Benchmark is pressed; no game is prepared or launched. Settings remain
+editable in this executable's own directory. `--preview --capture ABSOLUTE_PATH
+--exit` exports actual WPF pages, full settings canvases and layout diagnostics.
+`--compact` and `--maximized` exercise window bounds. `--perf --exit` reports WPF
+render callback intervals; they are not GPU presentation timestamps.
+
+## Visual design and assets
+
+Opaque WindowChrome window, 228-DIP neutral sidebar, accent #ED2B38, integrated
+caption/footer, original game logos and optional external fonts/artwork. Cards
+use the measured Game Status width, centered within safe margins, with an 18-DIP
+column gap. Minimum width accommodates two cards. Long captions wrap. Quick
+Settings stays at the bottom when space permits; the whole page scrolls when
+upper content needs more space. Valid game folders collapse; invalid ones expand.
+
+Page transitions use 280 ms vertical slide/fade; the sidebar selection moves over
+220 ms while labels stay still. Artwork only crossfades. The original startup
+animation and 29-frame spinner retain their independent timelines. Uniform,
+stationary grain is generated at device-pixel resolution with no tiling.
+
+See `launcher/ASSETS.md` for optional local asset paths. Original game artwork,
+fonts, captures, user settings and example mods must stay out of source commits.
+Only the separately approved app icon, `wpf/Assets/app.ico`, is embedded in the
+EXE/window; it does not replace the game logos displayed inside the interface.
 
 ## Local Mod Manager
 
-Mods imports ZIP archives or folders of loose replacement files. Paths must match
-the game's `/app0` paths: for example `data/example.rpk` replaces
-`/app0/data/example.rpk`. No installer scripts are executed. An optional `mod.json`
-at the package root accepts `name`, `version`, `author` and `description`; a `files/`
-payload directory is supported beside it. Plain `mods/` or `app0/` containers are
-also accepted. Archives and folders containing arbitrary game-relative directories
-retain those directories. Unsupported formats such as RAR/7z must be extracted first.
+Imports folders or ZIP archives of loose files, with optional mod.json metadata.
+Containers files/, mods/ and app0/ are accepted; arbitrary game-relative paths
+are preserved. Imports start disabled. The highest enabled entry wins conflicts.
+Enable/disable/reorder apply immediately to the launcher's own mods/ directory.
+Save/reset do not apply to this page.
 
-Imports start disabled. Enable/disable and Move up/down immediately update the
-launcher's own `mods/` overlay for the next launch. The first enabled mod in the list
-wins shared paths; the details panel identifies the winner. Original game directories
-are never modified. This manages loose-file replacements, not binary patch XML or
-DLL/plugin injection. Reset this page / Save settings do not apply to the Mods page.
-
-The library and deployment journal live in `data/mod-manager/`. Existing unmanaged
-files in `mods/` are preserved; a collision blocks activation until the manual file
-is moved out. Externally edited managed files are also protected. File changes are
-staged with backups, rolled back on failure and recovered on the next manager open
-after interruption. Do not edit the overlay while applying mods or while playing.
-Removing a mod disables its files and removes its entry; the imported package copy
-is retained under `data/mod-manager/packages/` for recovery. The source ZIP/folder
-is never altered. `DriveClub.exe --preview --mod-manager` opens this page directly.
-
-Filesystem checks run without launching the game:
-`dotnet run --project launcher/tests/mod-manager/ModManager.Tests.csproj -c Release`.
-
-Build with `launcher/build-wpf.ps1`. Requires .NET 8 Windows Desktop runtime,
-.NET SDK 8 or newer and MSYS2 CLANG64 for the native backend. Output is a separate
-directory; the script does not install anything or modify an existing game build.
-
-`DriveClub.exe` is the WPF shell; `DriveClub.Backend.exe` retains the native
-settings, patch, preparation, launch and benchmark implementation. Requests and
-responses use unique JSON files under the launcher's own `data/ui` folder. Long
-operations run in a child process with asynchronous progress updates. Game archives
-remain at the folders selected by the user; prepared files and settings belong to
-this launcher's directory.
-
-The visual layout is ported from the first launcher: 228-DIP sidebar, 36-DIP
-page margins, independent card heights, original red markers, separators and
-option-state textures. The logo and PC LAUNCHER sit on one line in the integrated
-caption; the old PC EDITION tagline is removed.
-
-Animations use opacity with the original smoothstep curve at twice the speed (325 ms), hardware
-composition and cached artwork. Page elements use the first version's original motion: entering Y=+32 to 0,
-leaving Y=0 to -12, with complementary opacity. Backgrounds only crossfade. There is no full-window GDI repaint timer. The desired animation rate is
-the detected monitor refresh rate (240 Hz fallback). The original 29-frame loading
-spinner advances at its own approximately 30 fps cadence. Frame callbacks can still
-miss deadlines; `--perf --exit` records measured callback intervals, not hardware
-presentation timestamps, in `wpf-performance.json`.
-
-The opaque window uses custom WindowChrome with integrated caption buttons and
-square corners. ComboBox and its popup share fonts, 38-DIP rows, colors and custom
-templates. All settings remain standard WPF controls with accessibility names.
-
-Original game assets are optional external local files under `assets/`. They must
-never be committed or added to a public patch. Required local paths:
-
-- `brand/logo-red.png`, `brand/emblem-white.png`
-- `fonts/001futura-webfont.ttf`, `fonts/004russian-webfont.ttf`
-- `backgrounds/page-0.png` through `page-6.png`: seven distinct original artworks
-- `transitions/swipe.png`, `transitions/stamp.png`, `spinner/00.png` through `28.png`
-
-Backgrounds convert to grayscale once when loaded, then receive a dark gradient;
-source files remain unchanged. Three selected backgrounds are lossless stills from
-the original 1920x1072 attract video; the other four are original UI artworks. The local build's `backgrounds.json` identifies each
-source. No assets are embedded in either executable or referenced by the project.
-
-`--preview` disables actual game preparation/launch and previews the loading UI.
-`--capture ABSOLUTE_DIRECTORY --exit` exports all seven pages from WPF visuals.
-These inspection modes do not persist settings unless Save settings is clicked.
-
-Current chrome: 60-DIP integrated caption with separator, navigation begins 16 DIP
-below it. WM_GETMINMAXINFO uses the nearest monitor work area to keep the footer
-above the taskbar when maximized. Page entry and dropdown opening fade in.
-Dropdowns use the same dark option texture as collapsed fields. Card accents span
-the complete 44-DIP header row. Artwork includes a frozen procedural film-grain
-brush; no animation/repaint timer or changes to original image files are needed.
-
-Quick Settings uses an Auto-sized bottom row with a 24-DIP footer gap when
-space permits. The upper dashboard reserves a 572-DIP minimum row height. In a
-short window it pushes Quick Settings down; the entire page then scrolls together.
+Original game archives and import sources are not modified. The library and
+journal live in data/mod-manager/; packages are retained for recovery after
+removal. Traversal, symlink/reparse, Windows device-name and case-collision
+checks protect imports. Deployment protects unmanaged/externally edited files,
+uses staging/rollback and recovers an interrupted journal on restart. No actual
+in-game mods were verified by the launcher filesystem tests.
