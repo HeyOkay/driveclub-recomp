@@ -2640,6 +2640,9 @@ bool Rasterizer::IsComputeMetaClear(const Pipeline* pipeline) {
             if (!desc.IsSpecial() && desc.is_written && texture_cache.ClearMeta(address)) {
                 // Assume all slices were updates
                 LOG_TRACE(Render_Vulkan, "Metadata update skipped");
+                // bbport: the next draw takes the full path, which turns the pending clear into one (the memo only
+                // looks at register clears). Same recording thread as BeginRendering.
+                begin_memo.valid = false;
                 return true;
             }
         }
@@ -4029,18 +4032,39 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         // Stencil writes can be enabled while depth writes are off.
         const bool stencil_write =
             has_stencil && regs.depth_control.stencil_enable && !desc.view_info.is_storage;
-        const auto new_layout = desc.view_info.is_storage
+        auto new_layout = desc.view_info.is_storage
                                     ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
                                                   : vk::ImageLayout::eDepthAttachmentOptimal
                                 : stencil_write
                                     ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
-                                : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
-                                              : vk::ImageLayout::eDepthReadOnlyOptimal;
+                                // BB_FEWER_BARRIERS: the layout textures sample depth in, also without stencil,
+                                // so a read-only depth target that is also sampled stops flipping between two
+                                // read-only layouts (a barrier each time).
+                                : has_stencil || VideoCore::FewerBarriers()
+                                    ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
+                                    : vk::ImageLayout::eDepthReadOnlyOptimal;
+        // BB_FEWER_BARRIERS: a pass that clears depth or stencil writes them whatever the draw's write enables
+        //: it gets a writable layout and write access.
+        const bool clears = (is_depth_clear && regs.depth_buffer.DepthValid()) ||
+                            (is_stencil_clear && regs.depth_buffer.StencilValid());
+        if (VideoCore::FewerBarriers() && clears &&
+            (new_layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
+             new_layout == vk::ImageLayout::eDepthReadOnlyOptimal ||
+             new_layout == vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal)) {
+            new_layout = has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
+                                     : vk::ImageLayout::eDepthAttachmentOptimal;
+        }
+        // BB_FEWER_BARRIERS: a read-only depth target only reads (its store op is NONE, vk_scheduler.cpp
+        // BeginRendering), so sampling it next needs no barrier.
+        const bool depth_read_only = VideoCore::FewerBarriers() &&
+                                     (new_layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
+                                      new_layout == vk::ImageLayout::eDepthReadOnlyOptimal);
         if (!reduced) needs_barrier |= runtime.Transit(&image, new_layout,
                                          vk::PipelineStageFlagBits2::eEarlyFragmentTests |
                                              vk::PipelineStageFlagBits2::eLateFragmentTests,
-                                         vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
-                                             vk::AccessFlagBits2::eDepthStencilAttachmentRead,
+                                         depth_read_only ? vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                                                         : vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+                                                               vk::AccessFlagBits2::eDepthStencilAttachmentRead,
                                          desc.view_info.range);
 
         state.width = std::min<u32>(state.width, image.info.size.width);
@@ -4243,7 +4267,9 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
     ASSERT_MSG(address % 4 == 0 && num_bytes % 4 == 0,
                "FillBuffer address and size must be a multiple of 4 bytes");
     if (!is_gds) {
-        texture_cache.ClearMeta(address);
+        if (texture_cache.ClearMeta(address)) {
+            begin_memo.valid = false; // as in IsComputeMetaClear (the draw pipe is drained above)
+        }
         if (!buffer_cache.IsRegionGpuModified(address, num_bytes)) {
             u32* buffer = std::bit_cast<u32*>(address);
             std::fill(buffer, buffer + (num_bytes / sizeof(u32)), value);

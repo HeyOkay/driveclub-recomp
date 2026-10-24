@@ -82,6 +82,10 @@ public:
     vk::DeviceSize size_bytes{};
 };
 
+/// bbport: BB_FEWER_BARRIERS, on unless =0 (image.cpp GetBarriers, vk_rasterizer.cpp depth target setup,
+/// vk_scheduler.cpp BeginRendering).
+bool FewerBarriers();
+
 struct Image {
     explicit Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime,
                    Common::SlotVector<ImageView>& slot_image_views, const ImageInfo& info);
