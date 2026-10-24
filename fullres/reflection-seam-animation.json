@@ -1,0 +1,15 @@
+{
+  "crop_xyxy": [
+    720,
+    440,
+    1320,
+    840
+  ],
+  "frame_duration_ms": 1500,
+  "frames": 2,
+  "lossless": true,
+  "source_pixels_bit_identical_after_decoding": true,
+  "loop": "infinite",
+  "brightness_adjustment": false,
+  "interpolation": "none"
+}

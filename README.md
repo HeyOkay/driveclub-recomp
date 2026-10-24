@@ -45,3 +45,5 @@ not a separate measurement of steady-state temporal convergence.
 
 
 [Animated full-frame road detail, before / after](full-frame/road-seam-before-after.webp). Lossless WebP; 1.5 seconds per state, no blending, unchanged source pixels.
+
+[Animated isolated reflection detail, before / after](fullres/reflection-seam-before-after.webp). Original 600x400 crop, lossless, 1.5 seconds per state, unchanged source pixels.
