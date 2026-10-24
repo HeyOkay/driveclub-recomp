@@ -37,6 +37,7 @@ static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
 #include "runtime_scene_debug.inc"
+#include "runtime_motion_blur.inc"
 #include "runtime_menu_repeat.inc"
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
