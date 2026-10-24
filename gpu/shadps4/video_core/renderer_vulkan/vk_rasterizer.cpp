@@ -45,6 +45,7 @@ namespace Vulkan {
 
 namespace {
 DriveMotion* g_drive_motion = nullptr;
+bool g_taa_noted = false; ///< BindBuffers noted the anti-aliasing camera last time (its threads, one at a time)
 // The game's anti-aliasing pass carries its camera matrices: frame generation takes its motion
 // vectors from them.
 void NoteTaaBuffer(u64 hash, u32 slot, const void* data, u32 size) {
@@ -2777,6 +2778,22 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                              Shader::Backend::Bindings& binding,
                              Shader::PushData& push_data, u32& write_index) {
     const u64 alignment = instance.StorageMinAlignment();
+    // bbport: the anti-aliasing pass's camera (NoteTaaBuffer) only feeds frame generation and DriveAA. Recognising
+    // it reads every 416/512-byte constant buffer of slots 0 and 1, and from 1080p render the constant ring is in VRAM:
+    // uncached reads over PCIe, ~14% of the draw recording thread at 1440p.
+    // Skipped while neither runs (checked per call: both can be switched on in game); BB_TAA_SNIFF=1 always.
+    static const bool sniff_always = [] {
+        const char* env = std::getenv("BB_TAA_SNIFF");
+        return env && env[0] == '1';
+    }();
+    const bool note_taa = sniff_always || BbSettings::Get().frame_gen != BbSettings::FrameGenOff ||
+                          drive_aa->Active();
+    // While neither consumer runs the camera is not refreshed: its readiness is dropped when they go off, so one
+    // switched back on waits for both constant buffers again instead of an old camera.
+    if (g_taa_noted && !note_taa && g_drive_motion) {
+        g_drive_motion->Consume();
+    }
+    g_taa_noted = note_taa;
     for (u32 buffer_index = 0; buffer_index < stage.buffers.size(); ++buffer_index) {
         const auto& desc = stage.buffers[buffer_index];
         const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, buffer_index) : nullptr;
@@ -2788,7 +2805,9 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 if (ring->size == 864 && gbuffer_draw) {
                     camera_motion->OnConstants(reinterpret_cast<const float*>(ring_data));
                 }
-                NoteTaaBuffer(stage.pgm_hash, buffer_index, ring_data, ring->size);
+                if (note_taa) {
+                    NoteTaaBuffer(stage.pgm_hash, buffer_index, ring_data, ring->size);
+                }
                 push_data.AddOffset(binding.buffer, 0);
             }
             buffer_infos.emplace_back(constant_ring->Handle(), ring->offset, ring->size);
@@ -2842,7 +2861,10 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
         } else {
             const auto vsharp =
                 prepared ? prepared->buffer_sharps[buffer_index] : desc.GetSharp(stage);
-            if (vsharp.base_address != 0 && memory->IsValidGpuMapping(vsharp.base_address, 0)) NoteTaaBuffer(stage.pgm_hash, buffer_index, reinterpret_cast<const void*>(vsharp.base_address), vsharp.GetSize());
+            if (note_taa && vsharp.base_address != 0 && memory->IsValidGpuMapping(vsharp.base_address, 0)) {
+                NoteTaaBuffer(stage.pgm_hash, buffer_index, reinterpret_cast<const void*>(vsharp.base_address),
+                              vsharp.GetSize());
+            }
             if (vsharp.GetSize() == 864 && gbuffer_draw &&
                 memory->IsValidGpuMapping(vsharp.base_address, 0)) {
                 camera_motion->OnConstants(reinterpret_cast<const float*>(vsharp.base_address));
