@@ -43,3 +43,5 @@ not a separate measurement of steady-state temporal convergence.
 
 [Full-frame road seam detail, before / after](full-frame/road-seam-zoom-before-after.png). Wide 640x420 crop above-left of the car at original pixel scale; exposure and colors are unchanged.
 
+
+[Animated full-frame road detail, before / after](full-frame/road-seam-before-after.webp). Lossless WebP; 1.5 seconds per state, no blending, unchanged source pixels.
