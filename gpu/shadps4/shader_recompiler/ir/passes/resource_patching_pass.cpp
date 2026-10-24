@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cstdlib>
 #include <limits>
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/ir/basic_block.h"
@@ -954,8 +953,7 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
 
     // Eligible GCN cube samples filter across faces in hardware. Mixed/raw
     // operations and intentionally non-seamless samplers keep the array route.
-    const char* cube_fix = std::getenv("BB_CUBE_FILTER_FIX");
-    if (cube_fix && cube_fix[0] == '1' && cube_fix[1] == 0 && profile.supports_native_cube_array) {
+    if (profile.supports_native_cube_array) {
         for (auto& desc : info.images) {
             const auto sharp = desc.GetSharp(info);
             desc.native_cube = sharp.IsCube() && !desc.is_written && !desc.is_depth &&

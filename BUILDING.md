@@ -47,18 +47,18 @@ A frame that misses its slot shows in the frame log as a long interval. Its line
 the time went to read faults (the readback log then names the instruction and the writer), shader compiles,
 evictions or the GPU.
 
-## Seamless cubemap filtering (opt-in)
+## Seamless cubemap filtering
 
-`BB_CUBE_FILTER_FIX=1` enables native Vulkan cube-array sampling for eligible read-only,
+Native Vulkan cube-array sampling is enabled automatically for eligible read-only,
 floating-point cubemap resources. This corrects reflection seams caused by filtering each
-cube face independently as a 2D-array layer. Set it in the environment of
-`DriveClub.exe --play` before starting the game; leave it unset to use the existing path.
+cube face independently as a 2D-array layer. No environment variable or launch option is
+required.
 
 The initial implementation handles normalized explicit-LOD samples (including level 0).
 Storage, depth, integer, offset, gather, derivative and mixed/raw uses retain the array path,
 as do samplers that disable cube wrapping. The GPU must support `imageCubeArray`; eligible
-views must contain complete aligned cube faces. The shader/pipeline cache versions include
-this option, so cached shaders from the two paths are not interchangeable.
+views must contain complete aligned cube faces. The shader/pipeline cache versions invalidate
+older translated shaders and resource layouts, including the earlier opt-in variants.
 
 ### Regression checks (MSYS2 CLANG64, from the repository root)
 
