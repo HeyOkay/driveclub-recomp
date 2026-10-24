@@ -3,7 +3,8 @@
 The WPF shell uses optional external files beside DriveClub.exe in assets/.
 Original game images and fonts are not part of the source patch or public PR.
 The separately approved app icon at launcher/wpf/Assets/app.ico is embedded as
-an EXE/window resource; original DRIVECLUB logos inside the UI stay unchanged.
+an EXE/window resource. Windows game packaging uses that same icon so the game
+window and WPF launcher match; original logos inside the UI stay unchanged.
 
 Required paths for the locally themed preview:
 
