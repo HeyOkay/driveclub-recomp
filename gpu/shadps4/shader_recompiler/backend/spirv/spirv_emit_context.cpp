@@ -987,6 +987,10 @@ spv::ImageFormat GetFormat(const AmdGpu::Image& image) {
 Id ImageType(EmitContext& ctx, const ImageResource& desc, Id sampled_type) {
     const auto image = desc.GetSharp(ctx.info);
     const auto format = desc.is_atomic ? GetFormat(image) : spv::ImageFormat::Unknown;
+    if (desc.native_cube) {
+        ctx.AddCapability(spv::Capability::SampledCubeArray);
+        return ctx.TypeImage(sampled_type, spv::Dim::Cube, false, true, false, 1, format);
+    }
     const auto type = image.GetViewType(desc.is_array);
     const u32 sampled = desc.is_written ? 2 : 1;
     switch (type) {
@@ -1039,6 +1043,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .native_cube = image_desc.native_cube,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);
