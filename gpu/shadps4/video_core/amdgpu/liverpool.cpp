@@ -454,6 +454,8 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     });
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
+        // The CPU reads the GDS mapping after the wait: the submission must end with the device -> host barrier.
+        rasterizer.RequestHostReadBarrier();
         rasterizer.Finish();
         const u32 value = rasterizer.ReadDataFromGds(event_eos.gds_index);
         *event_eos.Address() = value;
