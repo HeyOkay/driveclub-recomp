@@ -30,6 +30,8 @@ extern "C" int runtime_motion_blur_clock(float*, uint64_t*);
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "bbport_recent.h"
 #include "video_core/renderer_vulkan/vk_drive_motion.h"
+#include "video_core/renderer_vulkan/vk_cube_lod_check.h"
+#include "video_core/texture_cache/sampler.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -3051,6 +3053,72 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
 }
 
 
+// BB_RANGE_BARRIERS: see BindTextures.
+static bool RangeBarriers() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_RANGE_BARRIERS");
+        return !env || env[0] != '0';
+    }();
+    return on;
+}
+
+static bool Overlap(const VideoCore::SubresourceRange& a, const VideoCore::SubresourceRange& b) {
+    return a.base.level < b.base.level + b.extent.levels && b.base.level < a.base.level + a.extent.levels &&
+           a.base.layer < b.base.layer + b.extent.layers && b.base.layer < a.base.layer + a.extent.layers;
+}
+
+/// Whether a compute dispatch using `image` in GENERAL can go without a barrier after the dispatches since the
+/// image's last barrier; if so its ranges join theirs.
+template <typename Ranges>
+static bool ContinueGeneralRun(VideoCore::Image& image, const Ranges& read, const Ranges& written) {
+    auto& run = image.backing->general_ranges;
+    const auto& state = image.backing->state;
+    static std::atomic<u64> skipped{0}, barriers{0}, logged{0};
+    const bool same_state = run.valid && run.epoch == image.backing->access_epoch &&
+                            image.backing->subresource_states.empty() && state.layout == vk::ImageLayout::eGeneral &&
+                            state.access_mask == (vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite) &&
+                            run.read.size() + read.size() <= 64 && run.written.size() + written.size() <= 64;
+    const auto hits = [](const auto& ranges, const auto& others) {
+        for (const auto& r : ranges) {
+            for (const auto& o : others) {
+                if (Overlap(r, o)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    const bool skip =
+        same_state && !hits(read, run.written) && !hits(written, run.written) && !hits(written, run.read);
+    if (logged.fetch_add(1, std::memory_order_relaxed) < 24) {
+        std::string text;
+        for (const auto* ranges : {&read, &written}) {
+            text += ranges == &read ? " reads" : " writes";
+            for (const auto& r : *ranges) {
+                text += fmt::format(" [mip {}+{} layer {}+{}]", r.base.level, r.extent.levels, r.base.layer,
+                                    r.extent.layers);
+            }
+        }
+        std::printf("BB_RANGE_BARRIERS: image %llx %ux%u%s: %s\n",
+                    static_cast<unsigned long long>(image.info.guest_address),
+                    image.info.size.width, image.info.size.height, text.c_str(),
+                    skip ? "no barrier" : same_state ? "barrier (overlap)" : "barrier (new run)");
+    }
+    if (!skip) {
+        barriers.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    run.read.insert(run.read.end(), read.begin(), read.end());
+    run.written.insert(run.written.end(), written.begin(), written.end());
+    if ((skipped.fetch_add(1, std::memory_order_relaxed) & 4095) == 0) {
+        std::printf("BB_RANGE_BARRIERS: %llu compute barriers skipped, %llu kept (image %llx %ux%u, %u mips, %u layers)\n",
+                    static_cast<unsigned long long>(skipped.load()), static_cast<unsigned long long>(barriers.load()),
+                    static_cast<unsigned long long>(image.info.guest_address), image.info.size.width,
+                    image.info.size.height, image.info.resources.levels, image.info.resources.layers);
+    }
+    return true;
+}
+
 void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
                               Shader::Backend::Bindings& binding, u32& write_index,
                               bool& barrier, bool on_helper) {
@@ -3236,6 +3304,156 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         image_descriptor_array_sizes.push_back(num_bindings);
     }
 
+    // bbport: BB_RANGE_BARRIERS (default on, =0 off). A compute dispatch that samples an image and stores into it
+    // binds the whole image in GENERAL, and every such dispatch emitted a full barrier: DriveClub's cube prefilter
+    // (cs c56053b9, 54 dispatches a frame, one mip of one face each) ran one dispatch at a time, ~10 us each even for
+    // 1x1 mips. Such a dispatch needs no barrier when what it reads does not
+    // overlap what the dispatches since the last barrier wrote, and what it writes overlaps nothing they read or
+    // wrote; any other access to the image (GetBarriers bumps access_epoch) ends that run.
+    struct GeneralUse {
+        VideoCore::ImageId id;
+        boost::container::small_vector<VideoCore::SubresourceRange, 4> read, written;
+        bool handled;
+        bool narrowed;
+    };
+    boost::container::small_vector<GeneralUse, 4> general_uses;
+    // bbport: BB_CUBE_LOD_RANGE (=2 default, =1, =0 off). The cube prefilter (cs c56053b9) samples the cube with one
+    // explicit LOD, CB dword 22 converted from an integer, and stores one face of one mip. Its read range is the levels
+    // that LOD selects (Vulkan level selection with the sampler's clamps and mip mode) instead of the whole view, so
+    // the faces of one mip need no barrier between them. Gated on: sampler bias 0 (it applies to an explicit LOD), no
+    // view minimum LOD, the ring copy of the CB (the bytes the GPU reads), one sampled image and one sampler.
+    // =1 narrows only for an isotropic sampler (BB_ANISO forces anisotropy on this one), and a
+    // linear mip mode keeps the next level as read (fetched with weight 0). =2 narrows at an integer LOD and samples
+    // that dispatch with point mips and no anisotropy (the same texels and weights: one level, zero derivatives), after
+    // CubeLodSelfTest showed on this GPU that the two samplers return identical bits (once per S# and format; a
+    // failure keeps the whole view; BB_CUBE_LOD_RANGE_SELFTEST=0 skips it). Any doubt: the whole view.
+    struct CubeLod {
+        float lambda;
+        bool linear;
+        AmdGpu::Sampler sharp;
+    };
+    std::optional<CubeLod> cube_lod;
+    u32 cube_sampler = 0; // BindSamplers: 1 isotropic, 2 point mips
+    static const int cube_mode = [] {
+        // Default =2; =0 off.
+        const char* env = std::getenv("BB_CUBE_LOD_RANGE");
+        return !env ? 2 : env[0] == '0' ? 0 : env[0] == '1' ? 1 : 2;
+    }();
+    if (cube_mode && RangeBarriers() && stage.sw_stage == Shader::SwStage::Compute &&
+        stage.pgm_hash == 0xc56053b9 && stage.samplers.size() == 1 && !stage.buffers.empty() &&
+        !stage.buffers[0].IsSpecial() && !stage.samplers[0].is_depth &&
+        std::ranges::count_if(image_bindings, [](const auto& b) {
+            return b.second->type != VideoCore::TextureCache::BindingType::Storage;
+        }) == 1) {
+        const RingBinding* ring = num_ring_stages ? FindRingBinding(stage, 0) : nullptr;
+        const auto ssharp = prepared ? prepared->sampler_sharps[0] : stage.samplers[0].GetSharp(stage);
+        const bool anisotropic = VideoCore::UsesAnisotropy(instance, ssharp, false);
+        u32 lod = ~0u;
+        if (ring && ring->size >= 23 * sizeof(u32) && ssharp.LodBias() == 0.0f &&
+            ssharp.MinLod() <= ssharp.MaxLod() && (cube_mode == 2 || !anisotropic)) {
+            std::memcpy(&lod, constant_ring->Data(ring->offset) + 22 * sizeof(u32), sizeof(lod));
+            cube_lod = CubeLod{std::min(std::max(float(lod), ssharp.MinLod()), ssharp.MaxLod()),
+                               ssharp.mip_filter == AmdGpu::MipFilter::Linear, ssharp};
+        }
+        static std::atomic<u32> logged{0};
+        if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+            std::printf("BB_CUBE_LOD_RANGE: ring %s lod %u bias %.3f min %.3f max %.3f mip filter %u%s -> %s\n",
+                        ring ? "yes" : "no", lod, ssharp.LodBias(), ssharp.MinLod(), ssharp.MaxLod(),
+                        u32(ssharp.mip_filter.Value()), anisotropic ? " anisotropic" : "",
+                        cube_lod ? "narrow" : "whole view");
+        }
+    }
+    // BB_CUBE_LOD_RANGE=2: whether the swapped sampler samples like the game's on this GPU (CubeLodSelfTest).
+    const auto cube_sampler_verified = [&](const AmdGpu::Sampler& game, const AmdGpu::Sampler& swapped,
+                                           const VideoCore::ImageViewInfo& view) {
+        static const bool skip = [] {
+            const char* env = std::getenv("BB_CUBE_LOD_RANGE_SELFTEST");
+            return env && env[0] == '0';
+        }();
+        if (skip) {
+            return true;
+        }
+        static std::mutex mutex;
+        static std::unordered_map<u64, bool> verified;
+        // The test image is shaped like the sampled view: its format, swizzle, level count, and a cube view when the
+        // shader samples the cube natively (seamless filtering across faces).
+        const bool cube = view.type == AmdGpu::ImageType::Cube;
+        const std::array<u32, 7> shape{u32(view.format),      view.range.extent.levels, u32(view.mapping.r),
+                                       u32(view.mapping.g), u32(view.mapping.b),       u32(view.mapping.a),
+                                       u32(cube)};
+        const u64 hash = XXH3_64bits(&game, sizeof(game)) ^ (XXH3_64bits(shape.data(), sizeof(shape)) * 31);
+        std::scoped_lock lk{mutex};
+        if (const auto it = verified.find(hash); it != verified.end()) {
+            return it->second;
+        }
+        const auto reference = texture_cache.GetSampler(game, Regs().ta_bc_base, false, 0.0f);
+        const auto candidate = texture_cache.GetSampler(swapped, Regs().ta_bc_base, false, 0.0f, true);
+        const bool ok = CubeLodSelfTest(instance, reference, candidate, view.format, view.range.extent.levels,
+                                        view.mapping,
+                                        VideoCore::UsesAnisotropy(instance, game, false)
+                                            ? "game sampler (anisotropic) vs point mips, isotropic"
+                                            : "game sampler vs point mips, isotropic",
+                                        cube);
+        verified.emplace(hash, ok);
+        return ok;
+    };
+    if (RangeBarriers() && stage.sw_stage == Shader::SwStage::Compute) {
+        for (const auto& [id, desc_ptr] : image_bindings) {
+            if (!id) {
+                continue;
+            }
+            const auto& image = texture_cache.GetImage(id);
+            if (!image.binding.force_general || image.binding.is_target || image.info.props.is_depth ||
+                image.scene_proxy) {
+                continue;
+            }
+            const auto it = std::ranges::find(general_uses, id, &GeneralUse::id);
+            GeneralUse& use =
+                it != general_uses.end() ? *it : general_uses.emplace_back(GeneralUse{id, {}, {}, false, false});
+            const bool stored = desc_ptr->type == VideoCore::TextureCache::BindingType::Storage;
+            auto range = desc_ptr->view_info.range;
+            if (!stored && cube_lod && range.extent.levels > 0 && desc_ptr->view_info.min_lod == 0) {
+                // Vulkan: d' = clamp(lambda, 0, q); nearest: ceil(d' + 0.5) - 1 or floor(d' + 0.5) (both
+                // allowed); linear: floor(d') and min(floor(d') + 1, q).
+                const u32 q = range.extent.levels - 1;
+                const float d = std::min(std::max(cube_lod->lambda, 0.0f), float(q));
+                const bool integer = float(u32(d)) == d;
+                bool narrow = true;
+                u32 lo, hi;
+                if (cube_mode == 2) {
+                    // One level, sampled with point mips and no anisotropy.
+                    auto swapped = cube_lod->sharp;
+                    swapped.mip_filter.Assign(AmdGpu::MipFilter::Point);
+                    narrow = integer && cube_sampler_verified(cube_lod->sharp, swapped, desc_ptr->view_info);
+                    lo = hi = u32(d);
+                } else if (cube_lod->linear) {
+                    lo = u32(std::floor(d));
+                    hi = std::min(lo + 1, q);
+                } else {
+                    lo = u32(std::ceil(d + 0.5f)) - 1;
+                    hi = std::min(u32(std::floor(d + 0.5f)), q);
+                }
+                if (narrow) {
+                    const auto view = range;
+                    range.base.level += lo;
+                    range.extent.levels = hi - lo + 1;
+                    use.narrowed = true;
+                    cube_sampler = cube_mode == 2 ? 3 : 0;
+                    static std::atomic<u32> logged{0};
+                    if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+                        std::printf("BB_CUBE_LOD_RANGE: image %llx lambda %.3f %s view [mip %u+%u] -> reads [mip "
+                                    "%u+%u layer %u+%u]%s\n",
+                                    static_cast<unsigned long long>(image.info.guest_address), cube_lod->lambda,
+                                    cube_lod->linear ? "linear" : "nearest", view.base.level, view.extent.levels,
+                                    range.base.level, range.extent.levels, range.base.layer, range.extent.layers,
+                                    cube_sampler ? " (point mips, isotropic)" : "");
+                    }
+                }
+            }
+            (stored ? use.written : use.read).push_back(range);
+        }
+    }
+
     // Second pass to re-bind images that were updated after binding
     for (u32 binding_index = 0; binding_index < image_bindings.size(); ++binding_index) {
         auto& [image_id, desc_ptr] = image_bindings[binding_index];
@@ -3311,10 +3529,36 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             // target in feedback loop. Depth images are excluded because they can't be bound as
             // storage and feedback loop doesn't make sense for them
             if ((binding.force_general || binding.is_target) && !image.info.props.is_depth) {
+                const auto use = std::ranges::find(general_uses, image_id, &GeneralUse::id);
                 if (instance.IsAttachmentFeedbackLoopLayoutSupported() && image.binding.is_target) {
                     barrier |= runtime.Transit(
                         &image, vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT,
                         vk::PipelineStageFlagBits2::eAllGraphics, vk::AccessFlagBits2::eShaderRead);
+                } else if (use != general_uses.end()) {
+                    // BB_RANGE_BARRIERS: once per image and dispatch.
+                    if (!use->handled) {
+                        use->handled = true;
+                        const bool joined = ContinueGeneralRun(image, use->read, use->written);
+                        if (use->narrowed) {
+                            static std::atomic<u64> cube_skips{0}, cube_total{0};
+                            cube_skips.fetch_add(joined, std::memory_order_relaxed);
+                            if ((cube_total.fetch_add(1, std::memory_order_relaxed) & 2047) == 0) {
+                                std::printf("BB_CUBE_LOD_RANGE: %llu of %llu dispatches without a barrier\n",
+                                            static_cast<unsigned long long>(cube_skips.load()),
+                                            static_cast<unsigned long long>(cube_total.load()));
+                            }
+                        }
+                        if (!joined) {
+                            barrier |= runtime.Transit(
+                                &image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eAllCommands,
+                                vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eShaderWrite);
+                            auto& run = image.backing->general_ranges;
+                            run.read.assign(use->read.begin(), use->read.end());
+                            run.written.assign(use->written.begin(), use->written.end());
+                            run.epoch = image.backing->access_epoch;
+                            run.valid = true;
+                        }
+                    }
                 } else {
                     barrier |= runtime.Transit(
                         &image, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eAllCommands,
@@ -3389,17 +3633,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         binding.unified += array_size;
     }
 
-    BindSamplers(stage, prepared, binding, write_index);
+    BindSamplers(stage, prepared, binding, write_index, cube_sampler);
 }
 
 void Rasterizer::BindSamplers(const Shader::Info& stage, const PreparedStage* prepared,
-                              Shader::Backend::Bindings& binding, u32& write_index) {
+                              Shader::Backend::Bindings& binding, u32& write_index, u32 sampler0) {
     for (u32 sampler_index = 0; sampler_index < stage.samplers.size(); ++sampler_index) {
         const auto& sampler = stage.samplers[sampler_index];
         auto ssharp =
             prepared ? prepared->sampler_sharps[sampler_index] : sampler.GetSharp(stage);
+        // BB_CUBE_LOD_RANGE=2 (BindTextures): sampler 0 with point mips (2) and without anisotropy (1).
+        const bool isotropic = sampler_index == 0 && (sampler0 & 1);
+        if (sampler_index == 0 && (sampler0 & 2)) {
+            ssharp.mip_filter.Assign(AmdGpu::MipFilter::Point);
+        }
         const auto vk_sampler = texture_cache.GetSampler(
-            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias);
+            ssharp, Regs().ta_bc_base, sampler.is_depth, sampler.is_depth ? 0.0f : sampler_lod_bias, isotropic);
         image_infos.emplace_back(vk_sampler, VK_NULL_HANDLE, vk::ImageLayout::eGeneral);
         auto& set_write = set_writes[write_index++];
         set_write.dstSet = VK_NULL_HANDLE;

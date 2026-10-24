@@ -383,6 +383,7 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
     auto& dirty = backing->dirty_subresources;
+    ++backing->access_epoch;
     Common::Perf::Add(Common::Perf::BarrierCalls);
     const size_t barriers_before = barriers.size();
     SCOPE_EXIT {
