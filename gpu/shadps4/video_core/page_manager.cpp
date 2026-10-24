@@ -556,6 +556,157 @@ bool EmulateNonGpuArith(CONTEXT* ctx, const ZydisDecodedInstruction& inst, const
     return true;
 }
 
+// bbport: BB_FAULT_EMULATE_LANES (default on, =0 off). Lane selects and bitwise ops reading memory: blendps/pd,
+// pblendw, vpblendd, shufps, insertps and and/andn/or/xor (ps, pd, integer), legacy SSE and VEX.128. None raises an FP
+// exception. At 4K, eboot FUN_00611de0 (per-view setup; 0x61203d: vblendps keeps the w of a vec4 it rewrites) reads
+// CPU bytes of a page whose other 768 bytes cs c6edad8b writes; not emulated, each read waited for the end of the
+// GPU frame (~12 ms, ~21/s: the 4K alternation).
+enum class LaneOp { Blend16, Blend32, Blend64, Shuf32, Insert32, And, AndN, Or, Xor };
+struct LaneForm {
+    LaneOp op;
+    u8 bytes; // memory operand size
+    bool imm;
+    bool vex;
+};
+
+bool ClassifyLane(ZydisMnemonic m, LaneForm& f) {
+    struct Entry {
+        ZydisMnemonic legacy, vex;
+        LaneOp op;
+        u8 bytes;
+        bool imm;
+    };
+    static constexpr Entry table[] = {
+        {ZYDIS_MNEMONIC_BLENDPS, ZYDIS_MNEMONIC_VBLENDPS, LaneOp::Blend32, 16, true},
+        {ZYDIS_MNEMONIC_BLENDPD, ZYDIS_MNEMONIC_VBLENDPD, LaneOp::Blend64, 16, true},
+        {ZYDIS_MNEMONIC_PBLENDW, ZYDIS_MNEMONIC_VPBLENDW, LaneOp::Blend16, 16, true},
+        {ZYDIS_MNEMONIC_INVALID, ZYDIS_MNEMONIC_VPBLENDD, LaneOp::Blend32, 16, true},
+        {ZYDIS_MNEMONIC_SHUFPS, ZYDIS_MNEMONIC_VSHUFPS, LaneOp::Shuf32, 16, true},
+        {ZYDIS_MNEMONIC_INSERTPS, ZYDIS_MNEMONIC_VINSERTPS, LaneOp::Insert32, 4, true},
+        {ZYDIS_MNEMONIC_ANDPS, ZYDIS_MNEMONIC_VANDPS, LaneOp::And, 16, false},
+        {ZYDIS_MNEMONIC_ANDPD, ZYDIS_MNEMONIC_VANDPD, LaneOp::And, 16, false},
+        {ZYDIS_MNEMONIC_PAND, ZYDIS_MNEMONIC_VPAND, LaneOp::And, 16, false},
+        {ZYDIS_MNEMONIC_ANDNPS, ZYDIS_MNEMONIC_VANDNPS, LaneOp::AndN, 16, false},
+        {ZYDIS_MNEMONIC_ANDNPD, ZYDIS_MNEMONIC_VANDNPD, LaneOp::AndN, 16, false},
+        {ZYDIS_MNEMONIC_PANDN, ZYDIS_MNEMONIC_VPANDN, LaneOp::AndN, 16, false},
+        {ZYDIS_MNEMONIC_ORPS, ZYDIS_MNEMONIC_VORPS, LaneOp::Or, 16, false},
+        {ZYDIS_MNEMONIC_ORPD, ZYDIS_MNEMONIC_VORPD, LaneOp::Or, 16, false},
+        {ZYDIS_MNEMONIC_POR, ZYDIS_MNEMONIC_VPOR, LaneOp::Or, 16, false},
+        {ZYDIS_MNEMONIC_XORPS, ZYDIS_MNEMONIC_VXORPS, LaneOp::Xor, 16, false},
+        {ZYDIS_MNEMONIC_XORPD, ZYDIS_MNEMONIC_VXORPD, LaneOp::Xor, 16, false},
+        {ZYDIS_MNEMONIC_PXOR, ZYDIS_MNEMONIC_VPXOR, LaneOp::Xor, 16, false},
+    };
+    for (const auto& e : table) {
+        if ((e.legacy != ZYDIS_MNEMONIC_INVALID && m == e.legacy) || m == e.vex) {
+            f = {e.op, e.bytes, e.imm, m == e.vex};
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LaneEmulation() {
+    static const bool on = [] {
+        const char* env = std::getenv("BB_FAULT_EMULATE_LANES");
+        return !(env && env[0] == '0');
+    }();
+    return on;
+}
+
+bool EmulateNonGpuLane(CONTEXT* ctx, const ZydisDecodedInstruction& inst, const ZydisDecodedOperand* ops,
+                       VAddr fault, Vulkan::Rasterizer* rasterizer) {
+    LaneForm f;
+    if (!LaneEmulation() || !ClassifyLane(inst.mnemonic, f) || !Encodable(inst) ||
+        (inst.attributes & (ZYDIS_ATTRIB_HAS_LOCK | ZYDIS_ATTRIB_HAS_REP | ZYDIS_ATTRIB_HAS_REPE |
+                            ZYDIS_ATTRIB_HAS_REPNE))) {
+        return false;
+    }
+    const u32 regs_visible = f.vex ? 3 : 2; // dst, (VEX: src1), memory
+    if (inst.operand_count_visible != regs_visible + (f.imm ? 1 : 0)) {
+        return false;
+    }
+    const ZydisDecodedOperand& dst = ops[0];
+    const ZydisDecodedOperand& src1 = f.vex ? ops[1] : ops[0];
+    const ZydisDecodedOperand& mem = ops[regs_visible - 1];
+    const auto is_xmm = [](const ZydisDecodedOperand& o) {
+        return o.type == ZYDIS_OPERAND_TYPE_REGISTER && o.reg.value >= ZYDIS_REGISTER_XMM0 &&
+               o.reg.value <= ZYDIS_REGISTER_XMM15;
+    };
+    if (!is_xmm(dst) || !is_xmm(src1) || mem.type != ZYDIS_OPERAND_TYPE_MEMORY ||
+        mem.mem.segment == ZYDIS_REGISTER_FS || mem.mem.segment == ZYDIS_REGISTER_GS || mem.size / 8 != f.bytes ||
+        (f.imm && ops[regs_visible].type != ZYDIS_OPERAND_TYPE_IMMEDIATE)) {
+        return false;
+    }
+    M128A* const ymm_upper = f.vex ? YmmUpper(ctx) : nullptr;
+    if (f.vex && !ymm_upper) {
+        return false;
+    }
+    ZydisRegisterContext regs{};
+    for (const ZydisRegister r : kGprs) {
+        regs.values[r] = *Gpr(ctx, r);
+    }
+    ZyanU64 ea = 0;
+    if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddressEx(&inst, &mem, ctx->Rip, &regs, &ea))) {
+        return false;
+    }
+    if (fault < ea || fault >= ea + f.bytes) {
+        return false;
+    }
+    alignas(16) u8 b[16]{};
+    if (!ReadOperand(rasterizer, ea, b, f.bytes)) {
+        return false;
+    }
+    alignas(16) u8 a[16];
+    std::memcpy(a, &ctx->Xmm0 + (src1.reg.value - ZYDIS_REGISTER_XMM0), 16);
+    const u32 imm = f.imm ? u32(ops[regs_visible].imm.value.u & 0xff) : 0;
+    alignas(16) u8 out[16];
+    std::memcpy(out, a, 16);
+    const auto lanes = [&](u32 width, u32 count) {
+        for (u32 i = 0; i < count; ++i) {
+            if (imm & (1u << i)) {
+                std::memcpy(out + i * width, b + i * width, width);
+            }
+        }
+    };
+    switch (f.op) {
+    case LaneOp::Blend16: lanes(2, 8); break;
+    case LaneOp::Blend32: lanes(4, 4); break;
+    case LaneOp::Blend64: lanes(8, 2); break;
+    case LaneOp::Shuf32:
+        std::memcpy(out + 0, a + 4 * (imm & 3), 4);
+        std::memcpy(out + 4, a + 4 * ((imm >> 2) & 3), 4);
+        std::memcpy(out + 8, b + 4 * ((imm >> 4) & 3), 4);
+        std::memcpy(out + 12, b + 4 * ((imm >> 6) & 3), 4);
+        break;
+    case LaneOp::Insert32: // memory form: the 32-bit operand goes to lane imm[5:4], then imm[3:0] zeroes lanes
+        std::memcpy(out + 4 * ((imm >> 4) & 3), b, 4);
+        for (u32 i = 0; i < 4; ++i) {
+            if (imm & (1u << i)) {
+                std::memset(out + 4 * i, 0, 4);
+            }
+        }
+        break;
+    case LaneOp::And:
+    case LaneOp::AndN:
+    case LaneOp::Or:
+    case LaneOp::Xor:
+        for (u32 i = 0; i < 16; ++i) {
+            out[i] = f.op == LaneOp::And    ? u8(a[i] & b[i])
+                     : f.op == LaneOp::AndN ? u8(~a[i] & b[i])
+                     : f.op == LaneOp::Or   ? u8(a[i] | b[i])
+                                            : u8(a[i] ^ b[i]);
+        }
+        break;
+    }
+    const u32 index = dst.reg.value - ZYDIS_REGISTER_XMM0;
+    std::memcpy(&ctx->Xmm0 + index, out, 16);
+    if (f.vex) {
+        std::memset(ymm_upper + index, 0, sizeof(M128A)); // VEX.128 zeroes bits 255:128
+    }
+    ctx->Rip += inst.length;
+    return true;
+}
+
 bool EmulateNonGpuLoad(void* context, VAddr fault, Vulkan::Rasterizer* rasterizer) {
     CONTEXT* ctx = static_cast<EXCEPTION_POINTERS*>(context)->ContextRecord;
     ZydisDecodedInstruction inst;
@@ -568,7 +719,8 @@ bool EmulateNonGpuLoad(void* context, VAddr fault, Vulkan::Rasterizer* rasterize
     if (kind == Load::None) {
         return EmulateNonGpuCompare(ctx, inst, ops, fault, rasterizer) ||
                EmulateNonGpuArith(ctx, inst, ops, fault, rasterizer) ||
-               EmulateNonGpuIntAlu(ctx, inst, ops, fault, rasterizer);
+               EmulateNonGpuIntAlu(ctx, inst, ops, fault, rasterizer) ||
+               EmulateNonGpuLane(ctx, inst, ops, fault, rasterizer);
     }
     if (kind == Load::XmmLane || !Encodable(inst) || inst.operand_count_visible != 2 ||
         (inst.attributes & (ZYDIS_ATTRIB_HAS_LOCK | ZYDIS_ATTRIB_HAS_REP | ZYDIS_ATTRIB_HAS_REPE |
