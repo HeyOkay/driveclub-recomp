@@ -361,6 +361,13 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         profile.lds_barriers_multi_wave = true;
         profile.wave_memory_barriers = true;
     }
+    // Workgroup memory bounds checks (the AMD white squares): on everywhere. Off they leave out-of-range accesses
+    // undefined for no measured gain (1440p 78.8 vs 78.4-79.9 FPS). BB_LDS_BOUNDS=0 off.
+    if (const char* env = std::getenv("BB_LDS_BOUNDS")) {
+        profile.lds_bounds_checks = env[0] != '0';
+    } else {
+        profile.lds_bounds_checks = true;
+    }
     WarmUp();
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});

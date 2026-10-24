@@ -51,6 +51,8 @@ struct Profile {
     /// bbport: NVIDIA without fragment shader barycentrics (Pascal and older).
     bool needs_integer_interpolation_fix{};
     bool needs_lds_barriers{};
+    /// bbport: out-of-range workgroup memory reads give zero and writes do nothing (emit_spirv_shared_memory.cpp).
+    bool lds_bounds_checks{true};
     /// Also synchronize LDS accesses of compute workgroups larger than a GCN wave (see
     /// SharedMemoryBarrierPass), for code relying on the 64 invocations of a wave in lockstep.
     bool lds_barriers_multi_wave{};
