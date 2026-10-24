@@ -39,6 +39,7 @@
     let replayCount = 0;
     let started = false;
     let pending = false;
+    let playing = false;
     let assetPromise;
     let playbackURL;
     let startupObserver;
@@ -48,7 +49,7 @@
         && bounds.bottom <= window.innerHeight && bounds.right <= window.innerWidth;
     }
     async function playStartup() {
-      if (pending || !fullyVisible()) return;
+      if (pending || playing || !fullyVisible()) return;
       pending = true;
       startupButton.setAttribute('aria-busy', 'true');
       try {
@@ -72,12 +73,15 @@
         window.removeEventListener('resize', tryStartup);
         const previousURL = playbackURL;
         playbackURL = nextURL;
+        playing = true;
         startupImage.src = nextURL;
         startupImage.dataset.playCount = String(++replayCount);
         await startupImage.decode();
+        window.setTimeout(() => { playing = false; }, 2508);
         if (previousURL?.startsWith('blob:')) URL.revokeObjectURL(previousURL);
         startupButton.title = 'Click to replay';
       } catch (error) {
+        playing = false;
         startupButton.title = 'Unable to load animation. Click to retry.';
       } finally {
         pending = false;
