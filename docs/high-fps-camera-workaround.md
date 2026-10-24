@@ -23,7 +23,7 @@ All code hooks check their expected DriveClub 1.28 instruction signatures before
 
 ## Validation
 
-The Windows runtime and launcher were compiled. Local build-only standard-header compatibility flags for existing upstream code were excluded from the changes. Standalone native gateway tests cover procedural cadence, point/interval observation, the spring blend, replay/head/HUD/GForce bridges, native-30/stale-cache fallbacks and unchanged physics buffers in the observation paths. The optional installer test uses a locally flattened, unpatched 1.28 image and never executes its guest code. No game image is included.
+The Windows runtime and launcher were compiled. Local build-only standard-header compatibility flags for existing upstream code were excluded from the changes. Standalone native gateway tests cover procedural cadence, point/interval observation, the spring blend, replay/head/HUD/GForce bridges, native-30/stale-cache fallbacks and unchanged physics buffers in the observation paths. The optional installer test uses a locally flattened, unpatched 1.28 image and never executes its guest code. No game image is included. The launcher regression also checks that the camera switch, Motion Blur Slow/Fast choice and current `draw_threads` setting survive save/reload independently.
 
 From the repository root in MSYS2 CLANG64:
 
@@ -36,6 +36,6 @@ done
 clang -O2 tools/camera_patch_install_test.c -o out/camera_patch_install_test.exe -lm
 ./out/camera_patch_install_test.exe /path/to/guest-flat.bin
 # Actual launcher setting persistence/environment test, with temporary settings only.
-clang++ -O1 -std=c++20 -include cstdlib -static -o out/camera_patch_launcher_test.exe tools/camera_patch_launcher_test.cpp launcher/prepare.cpp launcher/gpu_check.cpp launcher/datx.cpp launcher/unlock.cpp launcher/graphics.cpp launcher/carswitch.cpp launcher/updater.cpp -lgdiplus -lgdi32 -luser32 -lshell32 -lole32 -ldwmapi -lwinhttp -lbcrypt
+clang++ -O1 -std=c++20 -include cstdlib -static -o out/camera_patch_launcher_test.exe tools/camera_patch_launcher_test.cpp launcher/prepare.cpp launcher/gpu_check.cpp launcher/datx.cpp launcher/unlock.cpp launcher/graphics.cpp launcher/carswitch.cpp launcher/updater.cpp -lgdiplus -lgdi32 -luser32 -lshell32 -lole32 -ldwmapi -lwinhttp -lbcrypt -lcomctl32
 ./out/camera_patch_launcher_test.exe
 ```

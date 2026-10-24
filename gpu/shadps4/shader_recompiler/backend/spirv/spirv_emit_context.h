@@ -320,6 +320,7 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        bool native_cube = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
 

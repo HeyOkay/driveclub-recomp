@@ -17,10 +17,12 @@ static const u32 ShaderBinaryVersion = [] {
     // The switches that change the translated shaders are part of the version, so cached shaders never mix.
     const char* nan = std::getenv("BB_NAN_MINMAX");
     const char* undef = std::getenv("BB_UNDEF_ZERO");
-    return 30u + (nan && std::atoi(nan) != 0 ? 1u : 0u) + (undef && std::atoi(undef) != 0 ? 2u : 0u);
+    // Native seamless cube sampling is always enabled for eligible resources.
+    // Invalidate both variants of the earlier opt-in cache.
+    return 64u + (nan && std::atoi(nan) != 0 ? 1u : 0u) + (undef && std::atoi(undef) != 0 ? 2u : 0u);
 }();
-static constexpr u32 ShaderMetaVersion = 7u; // bbport: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // bbport: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderMetaVersion = 8u; // bbport: ImageResource::native_cube
+static constexpr u32 PipelineKeyVersion = 6u; // bbport: native cube images and sampler cube-wrap specialization
 } // namespace Serialization
 
 namespace Vulkan {

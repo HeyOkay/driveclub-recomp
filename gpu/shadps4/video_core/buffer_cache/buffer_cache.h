@@ -237,7 +237,7 @@ private:
 
     struct Backing : public Interval {
         vk::DeviceMemory memory;
-        u64 offset;
+        u64 offset; ///< into `memory`, in blocks like start and end
         /// Host mapping of the whole allocation (host visible arena memory), or null.
         u8* base{};
         constexpr bool CanMergeWith(const Backing& other) const noexcept {

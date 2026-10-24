@@ -262,6 +262,10 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     mip_hashes.resize(info.resources.levels);
     vk::ImageCreateFlags flags{vk::ImageCreateFlagBits::eMutableFormat |
                                vk::ImageCreateFlagBits::eExtendedUsage};
+    if (!info.props.is_volume && info.size.width == info.size.height &&
+        info.resources.layers >= 6 && info.num_samples == 1) {
+        flags |= vk::ImageCreateFlagBits::eCubeCompatible;
+    }
     if (info.props.is_volume) {
         flags |= vk::ImageCreateFlagBits::e2DArrayCompatible;
         if (instance.Is2dViewOf3dSupported()) {

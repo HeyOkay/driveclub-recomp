@@ -13,6 +13,7 @@
 
 #include <windows.h>
 #include <windowsx.h>
+#include <commctrl.h>
 #include <objbase.h>
 #include <shlobj.h>
 #include <shellapi.h>
@@ -149,7 +150,7 @@ std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while i
 bool g_camera_patch = false;  // opt-in; persisted in launcher.ini
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
-bool g_two_thread = true;       // "Two-thread rendering" (two_thread= in launcher.ini)
+bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
 bool g_check_updates = true;  // "Check for new versions" (check_updates= in launcher.ini)
 std::atomic<bool> g_update_ready{false};  // a newer release was found (g_update)
 Updater::Release g_update;
@@ -213,6 +214,20 @@ std::vector<std::string> ReadLines(const std::wstring& path) {
 // settings: launcher.ini (folders) and data\user\patches_enabled.txt (what the game applies)
 // ------------------------------------------------------------------------------------------
 std::wstring IniPath() { return g_home + L"\\launcher.ini"; }
+// The draw threads start off on AMD cards (they lost the device and ran slower there) and under Wine or Proton
+// (stage B ran flat out and cost about a third of the frame rate in a report).
+bool PrimaryGpuIsAmd() {
+  if (GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")) return true;
+  DISPLAY_DEVICEW dd{};
+  dd.cb = sizeof(dd);
+  for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i, dd.cb = sizeof(dd)) {
+    if (!(dd.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE)) continue;
+    std::wstring name = dd.DeviceString;
+    for (auto& c : name) c = wchar_t(towlower(c));
+    return name.find(L"amd") != std::wstring::npos || name.find(L"radeon") != std::wstring::npos;
+  }
+  return false;
+}
 std::wstring SelectionPath() { return g_data + L"\\user\\patches_enabled.txt"; }
 
 // True when the first 64 KiB of the file contain the text.
@@ -306,6 +321,18 @@ int g_inres = -1, g_wide = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_an
 enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
               kGfxHaze, kGfxFxaa, kGfxRows };
 int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int g_motion_blur = -1;
+int motion_blur_saved = 0;  // Slow by default; Fast uses the native 60 FPS exposure.
+const wchar_t* MotionBlurHint(int choice) {
+  return choice == 1
+      ? L"Fast: shorter motion blur, matching the game's 60 FPS exposure."
+      : L"Slow: longer motion blur, matching the original game's 30 FPS exposure. Best for a cinematic look.";
+}
+const wchar_t* MotionBlurReference() {
+  return g_motion_blur >= 0 && g_c[g_motion_blur].sel == 1 ? L"short" : L"long";
+}
+HWND g_motion_blur_tooltip = nullptr;
+
 int g_blur_patch = -1;  // the "Disable motion blur and depth of field" patch row
 int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 const char* const kGfxKey[kGfxRows] = {"gfx_car=", "gfx_opponents=", "gfx_scenery=", "gfx_reflections=", "gfx_shadows=",
@@ -723,7 +750,7 @@ void BuildModel() {
                  L"Static draws it once and keeps that picture: much faster and steady, but reflections and rain on the glass stop updating.",
                  {L"Live", L"Static (faster)"}, {"@mirror", ""}, 0);
   g_aa = seg(L"Anti-aliasing",
-             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. The motion blur options cannot be changed while it is on, because they share a shader with it.",
+             L"Replaces the game's own anti-aliasing with NVIDIA DLSS (GeForce RTX cards) or AMD FSR 3.1 (any graphics card) for a sharper, steadier picture, and makes the Upscaling choice below possible. The game's own is the default. Motion blur must stay enabled with FSR or DLSS; its exposure preset can still be changed.",
              {L"Game", L"FSR 3.1", L"DLSS (RTX)"}, {"@aa", "", ""}, 0);
   g_up = seg(L"Upscaling",
              L"More FPS for nearly the same picture: the game is drawn at a lower resolution and DLSS (or FSR) rebuilds it at your screen's resolution. DLAA (Native with FSR) draws every pixel: the best picture, the lowest FPS. Quality is the best balance; Balanced, Performance and Ultra Perf. give more FPS each. Needs DLSS or FSR 3.1 above.",
@@ -759,8 +786,8 @@ void BuildModel() {
                               L"out. Turn this on if you want the in-game overlay while playing.", "@overlays", false);
   const int twothread = toggle(L"Two-thread rendering",
                                L"Records each frame's draw commands on a second thread, so the thread that runs the game's "
-                               L"graphics commands waits less. Faster on most PCs. Turn it off if you see flicker or broken graphics.",
-                               "@twothread", true);
+                               L"graphics commands waits less. Faster on most PCs, but it lost the graphics device in races on AMD cards and ran slower there, so it starts off on AMD cards and under Wine or Proton. Turn it off if you see flicker, broken graphics or a crash.",
+                               "@twothread", !PrimaryGpuIsAmd());
   g_hdr = toggle(L"HDR",
                  L"For HDR monitors and TVs: brighter highlights (the sun, lights, reflections) and deeper contrast. Turn on \"Use HDR\" in Windows' display settings first.",
                  "@hdr", false);
@@ -814,6 +841,9 @@ void BuildModel() {
                              "@gfx", true);
   g_gfx[kGfxBlur] = toggle(L"Motion blur", L"The game's motion blur on the road and the scenery while you drive. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the same shader.",
                            "@gfx", true);
+  g_motion_blur = seg(L"Motion blur exposure",
+      L"Slow: original 30 FPS exposure, best for a cinematic look. Fast: shorter 60 FPS exposure.",
+      {L"Slow", L"Fast"}, {"@motion_blur", ""}, 0);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
   g_gfx[kGfxFxaa] = toggle(L"FXAA pass",
@@ -908,7 +938,7 @@ void BuildModel() {
                      {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
                       g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
                      0, kTabDetail});
-  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
+  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
                      L"The game's own camera effects, each on as on PS4."});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
@@ -996,6 +1026,7 @@ void DerivePreset() {
 }
 
 void LoadSettings() {
+  g_two_thread = !PrimaryGpuIsAmd();  // the saved choice (draw_threads=) replaces it below
   for (const auto& line : ReadLines(IniPath())) {
     if (line.rfind("update=", 0) == 0) g_folder[0].path = Widen(line.substr(7));
     if (line.rfind("base=", 0) == 0) g_folder[1].path = Widen(line.substr(5));
@@ -1014,7 +1045,7 @@ void LoadSettings() {
     if (line.rfind("camera_patch=", 0) == 0) g_camera_patch = line.substr(13) == "1";
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
     if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
-    if (line.rfind("two_thread=", 0) == 0) g_two_thread = line.substr(11) == "1";
+    if (line.rfind("draw_threads=", 0) == 0) g_two_thread = line.substr(13) == "1";
     if (line.rfind("hdr=", 0) == 0) hdr_saved = atoi(line.substr(4).c_str());
     if (line.rfind("hdr_paper=", 0) == 0) hdr_paper_saved = atoi(line.substr(10).c_str());
     if (line.rfind("hdr_peak=", 0) == 0) hdr_peak_saved = atoi(line.substr(9).c_str());
@@ -1030,6 +1061,7 @@ void LoadSettings() {
     for (int k = 0; k < kGfxRows; ++k) {
       if (line.rfind(kGfxKey[k], 0) == 0) gfx_saved[k] = atoi(line.substr(strlen(kGfxKey[k])).c_str());
     }
+    if (line.rfind("motion_blur=", 0) == 0) motion_blur_saved = line.substr(12) == "fast" ? 1 : 0;
     if (line.rfind("dlc_unlock=", 0) == 0) unlock_dlc = line.substr(11) == "1";  // the "unlock=" of earlier versions is not read: off for everyone
     if (line.rfind("bench_track=", 0) == 0) g_bench_track = FindBench(kBenchTracks, kBenchTrackCount, line.substr(12), 0);
     if (line.rfind("bench_car=", 0) == 0) g_bench_car = FindBench(kBenchCars, kBenchCarCount, line.substr(10), kBenchDefaultCar);
@@ -1128,6 +1160,7 @@ void LoadSettings() {
     const int choices = c.kind == Kind::Toggle ? 2 : int(c.items.size());
     c.sel = gfx_saved[k] >= 0 && gfx_saved[k] < choices ? gfx_saved[k] : c.def;
   }
+  if (g_motion_blur >= 0) g_c[g_motion_blur].sel = motion_blur_saved;
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
   NameNativeUpscale();
   DerivePreset();
@@ -1204,10 +1237,12 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") g_check_updates = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\ncamera_patch=" << (g_camera_patch ? 1 : 0) << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ntwo_thread=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
+    ini << "camera_patch=" << (g_camera_patch ? 1 : 0) << "\r\n";
+    ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
         << "\r\nbench_rain=" << g_c[g_brain].sel << "\r\nbench_length=" << g_c[g_blen].sel << "\r\n";
@@ -1770,7 +1805,7 @@ void Paint(HDC hdc, int w, int h) {
   } else if (g_status_sticky) {
     // the warning stays in front of the hints
   } else if (g_hover_ctl >= 0) {
-    msg = g_c[g_hover_ctl].hint;
+    msg = g_hover_ctl == g_motion_blur ? MotionBlurHint(g_hover_seg >= 0 ? g_hover_seg : g_c[g_motion_blur].sel) : g_c[g_hover_ctl].hint;
     mc = kMuted;
   } else if (g_hover_browse >= 0) {
     msg = g_folder[g_hover_browse].hint;
@@ -2148,6 +2183,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
                      unlock_arg + graphics_arg + L" --stub-unresolved";
+  SetEnvironmentVariableW(L"BB_MOTION_BLUR_REFERENCE", MotionBlurReference());
   SetCameraPatchEnvironment();
   SetEnvironmentVariableW(L"BB_GPU_USER_DIR", user.c_str());
   SetEnvironmentVariableW(L"BB_PREFLIGHT_NOTE", g_preflight_note.empty() ? nullptr : std::wstring(g_preflight_note.begin(), g_preflight_note.end()).c_str());
@@ -2695,6 +2731,19 @@ void Relayout(HWND h) {
   InvalidateRect(h, nullptr, FALSE);
 }
 
+void UpdateMotionBlurTooltip(HWND window) {
+  if (!g_motion_blur_tooltip || g_motion_blur < 0) return;
+  const RectF box = Scaled(g_c[g_motion_blur].ctl);
+  for (int choice = 0; choice < 2; ++choice) {
+    TOOLINFOW tool{}; tool.cbSize = sizeof(tool); tool.hwnd = window; tool.uId = choice + 1;
+    if (g_tab == kTabDetail && !g_busy) {
+      const float left = box.X + choice * box.Width / 2;
+      tool.rect = {LONG(left), LONG(box.Y), LONG(left + box.Width / 2), LONG(box.Y + box.Height)};
+    }
+    SendMessageW(g_motion_blur_tooltip, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tool));
+  }
+}
+
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch (m) {
     case WM_KEYDOWN: {
@@ -2824,6 +2873,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_hover_tab = tab;
         InvalidateRect(h, nullptr, FALSE);
       }
+      UpdateMotionBlurTooltip(h);
       TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
       TrackMouseEvent(&t);
       return 0;
@@ -3157,6 +3207,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   const int win_y = (std::max)(int(area.top), int(area.top) + (int(area.bottom - area.top) - int(rc.bottom - rc.top)) / 2);
   g_hwnd = CreateWindowExW(0, wc.lpszClassName, L"DriveClub - PC", style, win_x, win_y, rc.right - rc.left,
                            rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
+  INITCOMMONCONTROLSEX common{sizeof(common), ICC_WIN95_CLASSES};
+  InitCommonControlsEx(&common);
+  g_motion_blur_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+      WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT,
+      CW_USEDEFAULT, CW_USEDEFAULT, g_hwnd, nullptr, inst, nullptr);
+  if (g_motion_blur_tooltip) {
+    SendMessageW(g_motion_blur_tooltip, TTM_SETMAXTIPWIDTH, 0, 430);
+    SendMessageW(g_motion_blur_tooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 350);
+    for (int choice = 0; choice < 2; ++choice) {
+      TOOLINFOW tool{}; tool.cbSize = sizeof(tool); tool.uFlags = TTF_SUBCLASS;
+      tool.hwnd = g_hwnd; tool.uId = choice + 1;
+      tool.lpszText = const_cast<wchar_t*>(MotionBlurHint(choice));
+      SendMessageW(g_motion_blur_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+    }
+  }
   ShowWindow(g_hwnd, show);
   MSG msg;
   while (GetMessageW(&msg, nullptr, 0, 0)) {

@@ -113,6 +113,11 @@ public:
         return features.depthBounds;
     }
 
+    /// Returns true if arrays of cube images can be sampled.
+    bool IsCubeArraySupported() const {
+        return features.imageCubeArray;
+    }
+
     /// Returns true if 16-bit floats are supported in shaders
     bool IsShaderFloat16Supported() const {
         return vk12_features.shaderFloat16;
@@ -262,6 +267,10 @@ public:
     /// compute but not vertex (requiredSubgroupSizeStages 0xf0), the Windows AMD driver only
     /// compute (0x20). NVIDIA and Intel report at most 32 lanes and use the lowered path.
     /// BB_SUBGROUP=32 forces the lowered 32-wide path, 64 the native one.
+    bool IsBufferMarkerSupported() const {
+        return buffer_marker;
+    }
+
     bool IsSubgroupSize64Supported() const {
         static const int forced = [] {
             const char* env = std::getenv("BB_SUBGROUP");
@@ -589,6 +598,7 @@ private:
     bool depth_clip_control{};
     bool depth_clip_enable{};
     bool device_fault{};
+    bool buffer_marker{};
     bool device_fault_vendor_binary{};
     bool dynamic_state_3{};
     bool depth_range_unrestricted{};

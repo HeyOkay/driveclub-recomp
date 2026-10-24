@@ -342,6 +342,10 @@ bool Instance::CreateDevice() {
         device_fault = fault_query.deviceFault;
         device_fault_vendor_binary = fault_query.deviceFaultVendorBinary;
     }
+    // bbport: AMD cards can write a number into a buffer as the command processor reaches it, which names the
+    // draw that was running when the device is lost. BB_BREADCRUMBS=0 leaves it out.
+    const char* breadcrumbs = std::getenv("BB_BREADCRUMBS");
+    buffer_marker = !(breadcrumbs && breadcrumbs[0] == '0') && add_extension("VK_AMD_buffer_marker");
     std::printf("GPU: driver fault report after a lost device: %s%s\n", device_fault ? "available" : "not available",
                 device_fault_vendor_binary ? " (with driver crash data)" : "");
     // bbport: Intel's drivers draw characters as black silhouettes with this extension (seen in
