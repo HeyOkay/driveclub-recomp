@@ -10,7 +10,7 @@ Required paths for the locally themed preview:
 - brand/logo-red.png, brand/emblem-white.png
 - fonts/001futura-webfont.ttf, fonts/004russian-webfont.ttf
 - backgrounds/page-0.png (Play), page-2.png (Display), detail.png (Graphics),
-  page-4.png (Gameplay), driving.png, patches.png, page-5.png (Benchmark), mods.png
+  page-4.png (General), driving.png, patches.png, page-5.png (Benchmark), mods.png
 - controls/option-active.png, option-inactive.png, option-current.png, panel.png
 - transitions/swipe.png, transitions/stamp.png
 - spinner/00.png through 28.png

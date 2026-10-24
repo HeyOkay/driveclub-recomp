@@ -35,7 +35,7 @@ check(len(ids)==len(set(ids)) and sorted(ids)==list(range(len(ids))),'stable uni
 check(all(0<=i<len(ids) for i in assigned) and len(assigned)==len(set(assigned)),'every card has valid controls without duplicates')
 check(all(c['Id'] in assigned for c in s['Controls'] if not c['Hidden']),'every visible setting belongs to exactly one card')
 check([s['Controls'][i]['Label'] for i in s['QuickControls']]==['Performance preset','Frame rate','Output resolution','Anti-aliasing'],'Quick Settings order is preset, frame rate, output, AA')
-check({card['Page'] for card in s['Cards']}==set(range(6)),'Display Graphics Gameplay Driving Benchmark Patches all populated')
+check({card['Page'] for card in s['Cards']}==set(range(6)),'Display Graphics General Driving Benchmark Patches all populated')
 cam=tag(s,'@camera_patch');check(cam['Selected']==1 and not cam['Enabled'] and 'runtime' in cam['Hint'],'missing camera runtime is explicitly unavailable, configured on by default')
 rt=root/'runtime';rt.mkdir();marker=b'CameraPatch: experimental high-FPS camera/replay workaround enabled';(rt/'DriveClubGame.exe').write_bytes(b'x'*65520+marker+b'x')
 s=call('state');check(tag(s,'@camera_patch')['Enabled'],'camera runtime capability recognized across a read-block boundary')
@@ -53,14 +53,18 @@ expected={'Your car: full detail':0,'Other cars: full detail':0,'Scenery detail 
 check(all(label(s,k)['Selected']==v for k,v in expected.items()),'PS4 restores original quality, dynamic resolution and camera effects')
 check(label(s,'Motion blur exposure')['Selected']==0 and tag(s,'@drive_fov')['Selected']==100,'PS4 selects Slow exposure and original field of view')
 check(all(label(s,k)['Selected']==0 for k in ['No reset-to-track timer','Disable track barriers','Photo mode: free camera through cars','Photo mode: skip processing','Disable motion blur and depth of field']),'PS4 removes optional gameplay and effect overrides')
-check(tag(s,'@camera_patch')['Selected']==1,'PS4 keeps camera compatibility workaround enabled')
+check(tag(s,'@camera_patch')['Selected']==0,'PS4 disables the unnecessary 30-FPS camera workaround')
 check(tag(s,'@name')['Text']=='PendingName' and tag(s,'@lang')['Selected']==7 and tag(s,'@drive_gearbox')['Selected']==2 and s['UpdatePath'].endswith('update-not-used'),'PS4 preserves pending player, language, controls and folders')
 # These IPC mutations are transient until Save; the original INI must remain unchanged.
 check('name=LauncherTest' in (root/'launcher.ini').read_text() and 'camera_patch=' not in (root/'launcher.ini').read_text(),'preset and validate do not persist unsaved settings')
 s=call('apply',s);loaded=call('state');check(loaded['Controls'][loaded['PresetId']]['Selected']==6 and tag(loaded,'@name')['Text']=='PendingName','PS4 and user settings survive save/restart')
-select(s,'@camera_patch',0);s=validate(s);check(s['Controls'][s['PresetId']]['Selected']!=6,'disabling an essential patch leaves the PS4 profile')
+select(s,'@camera_patch',1);s=validate(s);check(s['Controls'][s['PresetId']]['Selected']!=6,'manual camera override leaves the PS4 profile')
+select(s,'@camera_patch',0)
 s=call('apply',s);check(tag(call('state'),'@camera_patch')['Selected']==0 and 'camera_patch=0' in (root/'launcher.ini').read_text(),'individual camera opt-out persists')
-s=preset(s);s=call('apply',s);check(tag(call('state'),'@camera_patch')['Selected']==1,'reapplying PS4 restores the compatibility default')
+s=preset(s);s=call('apply',s);check(tag(call('state'),'@camera_patch')['Selected']==0,'reapplying PS4 disables the camera workaround')
+for mode in [1,3,0,2]:
+ label(s,'Frame rate')['Selected']=mode;s=validate(s,label(s,'Frame rate')['Id']);check(tag(s,'@camera_patch')['Selected']==int(mode in [1,3]),f'frame mode {mode} applies the appropriate camera default')
+label(s,'Frame rate')['Selected']=3;s=validate(s,label(s,'Frame rate')['Id']);select(s,'@camera_patch',0);s=call('apply',s);check(tag(call('state'),'@camera_patch')['Selected']==0,'manual opt-out in VRR survives Save/restart')
 # Scoped resets: mutate unrelated pages and verify their pending state is not discarded.
 select(s,'@drive_fov',120);select(s,'@camera_patch',0);label(s,'Your car: full detail')['Selected']=1;label(s,'Frame rate')['Selected']=3
 s['ResetPage']=1;s['ResetSubpage']=-1;s=call('reset-page',s)
@@ -68,11 +72,19 @@ check(label(s,'Your car: full detail')['Selected']==0 and label(s,'Frame rate')[
 s['ResetPage']=5;s=call('reset-page',s);check(tag(s,'@camera_patch')['Selected']==1 and label(s,'Frame rate')['Selected']==3 and tag(s,'@drive_fov')['Selected']==120,'Patches reset affects only its controls')
 wheel=next(c for c in s['Controls'] if c['Tag'].startswith('@ffb:') and c['Kind']=='Slider');wheel['Selected']=wheel['Minimum'];wid=wheel['Id'];wv=wheel['Selected']
 s['ResetPage']=3;s['ResetSubpage']=0;s=call('reset-page',s);check(tag(s,'@drive_fov')['Selected']==100 and s['Controls'][wid]['Selected']==wv,'Driving reset respects the selected subpage')
-s['ResetPage']=2;s=call('reset-page',s);check(tag(s,'@name')['Text']=='PendingName' and tag(s,'@lang')['Selected']==7,'Gameplay reset preserves identity and language')
+s['ResetPage']=2;s=call('reset-page',s);check(tag(s,'@name')['Text']=='PendingName' and tag(s,'@lang')['Selected']==7,'General reset preserves identity and language')
 before=(root/'launcher.ini').read_bytes();bad=copy.deepcopy(s);bad['ResetPage']=99;call('reset-page',bad,error=True)
 bad=copy.deepcopy(s);tag(bad,'@aa')['Selected']=999;call('validate',bad,error=True)
 check((root/'launcher.ini').read_bytes()==before,'invalid reset scope and invalid setting rejected without saving')
 # Existing resolution presets still work, without changing the new compatibility choice.
 s['Controls'][s['PresetId']]['Selected']=1;s=call('preset',s)
 check(label(s,'Output resolution')['Selected']==1 and label(s,'Render resolution')['Selected']==1 and tag(s,'@camera_patch')['Selected']==1,'legacy Handheld preset preserved')
+# Upgrades without a camera preference derive a default from the saved FPS mode.
+for mode,patch,unlocked,explicit,expected in [(0,'',0,None,0),(3,'60 FPS with deltatime',1,None,1),(2,'60 FPS with fixed tickrate',0,None,0),(0,'',0,1,1)]:
+ text=f'skip_gpu_check=1\nname=Legacy\nunlocked={unlocked}\n'
+ if explicit is not None:text+=f'camera_patch={explicit}\n'
+ (root/'launcher.ini').write_text(text)
+ (root/'data/user/patches_enabled.txt').write_text(patch+'\n' if patch else '')
+ legacy=call('state')
+ check(label(legacy,'Frame rate')['Selected']==mode and tag(legacy,'@camera_patch')['Selected']==expected,f'legacy frame mode {mode}, camera preference {explicit}: correct default without replacing explicit choice')
 result={'passed':len(passed),'checks':passed,'fixtures':str(root),'game_launched':False};(root/'result.json').write_text(json.dumps(result,indent=2));print(json.dumps(result))

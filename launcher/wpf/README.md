@@ -11,10 +11,10 @@ launch and benchmarks. This change does not replace game or renderer logic.
 - **Display:** frame rate, resolution/window, anti-aliasing/filtering and HDR.
 - **Graphics:** scene detail, reflections and camera effects, including the
   existing Slow/Fast motion-blur exposure control.
-- **Gameplay:** player profile, content, startup and overlays.
+- **General:** player profile, content, startup/overlays and advanced launcher options.
 - **Driving:** Assists and view / Wheel and force feedback subpages.
 - **Patches:** compatibility workarounds, gameplay changes, photo mode, effect
-  overrides and advanced runtime options. Each existing optional patch retains
+  overrides. Each existing optional patch retains
   its own control.
 - **Benchmark:** the native AI-driven repeatable event and results.
 - **Mods:** local loose-file replacements; not a downloadable mod catalogue.
@@ -32,13 +32,18 @@ and FXAA. It restores 100% field of view and disables optional gameplay/photo
 mode/effect overrides. Player identity, language, game folders, driving assists,
 wheel settings, content and startup preferences are preserved.
 
-The camera/replay workaround stays enabled. Its launcher contract matches PR
-#187: `camera_patch=0/1` in launcher.ini and `BB_CAMERA_PATCH=0/1` for the game.
-The runtime implementation remains in that separate PR. The backend checks the
-selected executable for its capability marker; on unsupported runtimes the
-control is disabled with an explanation. Selecting a profile does not install
-or claim to add that runtime feature. The control remains individually
-switchable on compatible runtimes, and a saved opt-out is respected on restart.
+The PS4 preset disables the camera/replay workaround: it is unnecessary at
+30 FPS. Explicitly selecting 60 FPS delta time or Unlocked/VRR enables it;
+selecting 30 FPS or fixed tick selects its off default. It remains individually
+switchable in Patches. A manual opt-out survives save/restart and other setting
+changes, until the next explicit FPS-mode change. Old configurations without a
+camera preference derive it from their saved frame mode; existing preferences
+are retained.
+
+The runtime contract matches PR #187: camera_patch=0/1 in launcher.ini and
+BB_CAMERA_PATCH=0/1 for the game. The implementation remains in that separate
+PR. Unsupported runtimes show an unavailable control with an explanation.
+Selecting a profile does not install a runtime patch.
 
 Reset this page affects only the current page or active Driving subpage. Play
 resets its four Quick Settings. Identity/language retain their exclusions.
@@ -52,6 +57,7 @@ Requires Windows, MSYS2 CLANG64, .NET SDK 8+ with Windows desktop targeting, and
 ```powershell
 ./launcher/build-wpf.ps1 -OutputDirectory C:\path\to\separate\preview
 python launcher/tests/backend/verify.py C:\path\to\preview\DriveClub.Backend.exe C:\path\to\test-output
+python launcher/tests/backend/preservation.py C:\path\to\preview\DriveClub.Backend.exe C:\path\to\existing-install C:\path\to\private-test-output
 dotnet run --project launcher/tests/mod-manager/ModManager.Tests.csproj -c Release
 ```
 
@@ -101,3 +107,16 @@ removal. Traversal, symlink/reparse, Windows device-name and case-collision
 checks protect imports. Deployment protects unmanaged/externally edited files,
 uses staging/rollback and recovers an interrupted journal on restart. No actual
 in-game mods were verified by the launcher filesystem tests.
+
+## Existing user configurations
+
+The shell and backend use the existing launcher.ini, patch selection and user
+sidecars beside the launcher. Opening the shell does not select the PS4 preset.
+Saving retains unknown launcher/FFB keys, camera/HDR/overlay sidecar keys and
+unlisted custom patch selections. The two-thread control owns only bit 37 of
+an existing optimization mask and preserves all unrelated bits. Invalid saved
+masks reject Save instead of replacing the file with defaults. Text updates use
+a temporary file and atomic replacement so a failed replacement retains the
+previous file. These guarantees are tested against copies, never by modifying
+the supplied existing installation. Native pending wheel-setting migration is
+retained and affects only recognized wheel keys.

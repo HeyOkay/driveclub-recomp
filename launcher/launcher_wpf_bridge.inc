@@ -91,18 +91,19 @@ int RunWpfBridge(int argc,wchar_t** argv) {
         for(int id:ids){
           auto& c=g_c[id];
           if(c.kind==Kind::Action || c.kind==Kind::Button || c.patches[0]=="@name" || id==g_lang)continue;
-          c.sel=c.def;
+          c.sel=id==g_camera_patch_row ? (FrameModeNeedsCameraPatch()?1:0) : c.def;
           if(id==g_btrack)g_bench_track=0;
           if(id==g_bcar)g_bench_car=kBenchDefaultCar;
           if(c.patches[0]=="@skipgpu")g_skip_gpu_check=c.sel!=0;
         }
-        if(page==-1 || page==kTabGraphics)DerivePreset();
+        DerivePreset();
         if(page==kTabDriving && sub==kSubAssists)DeriveDrivePreset();
         if(page==kTabDriving && sub==kSubWheel)DeriveWheelPreset();
         NameNativeUpscale();ShowBenchChoices();
       }
       else if(command==L"--ui-validate"){
         const int changed=request.value("ChangedId",-1);
+        if(changed==g_fps)ApplyFrameModeCameraDefault();
         if(changed==g_wide && g_c[g_wide].sel>0)g_c[g_outres].sel=g_c[g_inres].sel=0;
         DerivePreset();DeriveDrivePreset();DeriveWheelPreset();
       }
@@ -111,7 +112,8 @@ int RunWpfBridge(int argc,wchar_t** argv) {
       else if(command==L"--ui-wheel-preset"){if(g_c[g_ffb_preset].sel>=0)ApplyWheelPreset(g_c[g_ffb_preset].sel);}
       else if(command==L"--ui-wheelsetup"){OpenWheelSetup();}
       else if(command==L"--ui-apply"||command==L"--ui-run"||command==L"--ui-benchmark"){
-        DerivePreset();DeriveDrivePreset();DeriveWheelPreset();SaveSettings();
+        DerivePreset();DeriveDrivePreset();DeriveWheelPreset();
+        if(!SaveSettings()) throw std::runtime_error(Narrow(g_settings_error));
         if(command!=L"--ui-apply"){
           if(!FoldersOk()){WriteJsonFile(output,UiState(L"Choose valid game folders on Play."));return 1;}
           if(!g_skip_gpu_check){g_gpu_problem=CheckCpu();if(g_gpu_problem.empty())g_gpu_problem=CheckGpu();}
