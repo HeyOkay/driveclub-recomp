@@ -629,15 +629,28 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
             return;
         }
         u8* dst = constant_ring->Data(*offset);
+        const bool motion_blur = MotionBlurConstants(stage, index, size);
+        // bbport: the bindings the CPU reads again (the anti-aliasing camera check's 416/512-byte slots 0 and 1, the
+        // 864-byte camera motion constants, the cube prefilter's LOD, the motion-blur correction) are written to the
+        // ring's cached copy first when the ring is VRAM: reading write-combined memory back over PCIe cost ~1.5 ms a
+        // frame on the draw recording thread with DLAA/DLSS/FSR or frame generation on (the camera check runs then).
+        const bool host_read =
+            constant_ring->HasHostCopy() &&
+            (motion_blur || size == 864 || (index <= 1 && (size == 416 || size == 512)) ||
+             (index == 0 && stage.pgm_hash == 0xc56053b9 && stage.sw_stage == Shader::SwStage::Compute));
+        u8* write = host_read ? constant_ring->HostCopy(*offset) : dst;
         if (source) {
-            std::memcpy(dst, source, size);
+            std::memcpy(write, source, size);
         } else {
-            memory->CopySparseMemory(address, dst, size);
+            memory->CopySparseMemory(address, write, size);
         }
         // Patch only this draw's shadow, before publishing it to the recording thread.
-        if (MotionBlurConstants(stage, index, size)) CorrectMotionBlur(stage, dst, size);
+        if (motion_blur) CorrectMotionBlur(stage, write, size);
+        if (host_read) {
+            std::memcpy(dst, write, size);
+        }
         constant_ring->Flush(*offset, size);
-        out.push_back({index, static_cast<u32>(size), *offset, address});
+        out.push_back({index, static_cast<u32>(size), *offset, address, host_read});
     };
     for (u32 index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
@@ -2806,7 +2819,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
             // Copied by the GPU command thread into the constant ring (read-only).
             if (!desc.IsSpecial()) {
                 // The copy the draw binds, made at decode: the guest memory may hold a later draw's values.
-                const u8* ring_data = constant_ring->Data(ring->offset);
+                const u8* ring_data = ring->host_copy ? constant_ring->HostCopy(ring->offset)
+                                                      : constant_ring->Data(ring->offset);
                 if (ring->size == 864 && gbuffer_draw) {
                     camera_motion->OnConstants(reinterpret_cast<const float*>(ring_data));
                 }
@@ -3354,7 +3368,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         u32 lod = ~0u;
         if (ring && ring->size >= 23 * sizeof(u32) && ssharp.LodBias() == 0.0f &&
             ssharp.MinLod() <= ssharp.MaxLod() && (cube_mode == 2 || !anisotropic)) {
-            std::memcpy(&lod, constant_ring->Data(ring->offset) + 22 * sizeof(u32), sizeof(lod));
+            const u8* ring_data = ring->host_copy ? constant_ring->HostCopy(ring->offset)
+                                                  : constant_ring->Data(ring->offset);
+            std::memcpy(&lod, ring_data + 22 * sizeof(u32), sizeof(lod));
             cube_lod = CubeLod{std::min(std::max(float(lod), ssharp.MinLod()), ssharp.MaxLod()),
                                ssharp.mip_filter == AmdGpu::MipFilter::Linear, ssharp};
         }

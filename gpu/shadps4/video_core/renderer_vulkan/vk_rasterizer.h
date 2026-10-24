@@ -585,6 +585,7 @@ private:
         u32 size;
         u64 offset; ///< in the ring
         VAddr address;
+        bool host_copy{}; ///< also in the ring's cached copy: read it there (ConstantRing::HostCopy)
     };
     struct PendingWrite {
         VAddr begin;

@@ -272,6 +272,7 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
             mapped_data = std::span<u8>{std::bit_cast<u8*>(alloc_info.pMappedData), size_bytes};
         }
         is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        is_host_cached = property_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         ASSERT_MSG(mem_type != MemoryType::Gds || (!mapped_data.empty() && is_coherent),
                    "GDS requires a coherent CPU mapping");
     }

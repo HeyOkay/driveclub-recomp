@@ -139,6 +139,7 @@ struct Buffer {
     size_t size_bytes = 0;
     std::span<u8> mapped_data{};
     bool is_coherent{};
+    bool is_host_cached{}; ///< bbport: CPU reads of the mapping are cached (not write-combined VRAM or BAR)
     MemoryType mem_type{MemoryType::DeviceLocal};
     UniqueBuffer buffer;
 };
