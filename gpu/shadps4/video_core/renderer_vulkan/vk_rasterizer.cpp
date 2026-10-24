@@ -10,6 +10,8 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_settings.h"
+#include "bbport_motion_blur.h"
+extern "C" int runtime_motion_blur_clock(float*, uint64_t*);
 #include "bbport_toggles.h"
 #include "bbport_frametrace.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -65,6 +67,32 @@ void NoteTaaBuffer(u64 hash, u32 slot, const void* data, u32 size) {
         return;
     }
     g_drive_motion->OnTaaConstants(slot, f.data(), size / 4);
+}
+// Validate the motion-blur pass independently of resolution / shader permutation.
+// It consumes camera constants, post-process constants, and 64 object motion matrices.
+bool MotionBlurConstants(const Shader::Info& stage, u32 index, u64 size) {
+    if (BbSettings::Get().motion_blur_reference.load() == 0 ||
+        stage.sw_stage != Shader::SwStage::Fragment || index != 1 ||
+        size != DriveMotionBlur::Bytes || stage.buffers.size() < 3) return false;
+    return !stage.buffers[0].IsSpecial() && !stage.buffers[2].IsSpecial() &&
+           stage.buffers[0].GetSharp(stage).GetSize() == 512 &&
+           stage.buffers[2].GetSharp(stage).GetSize() == 12288;
+}
+bool CorrectMotionBlur(const Shader::Info& stage, void* data, u64 size) {
+    const int reference = BbSettings::Get().motion_blur_reference.load();
+    float raw_dt=0; uint64_t stamp=0;
+    runtime_motion_blur_clock(&raw_dt,&stamp);
+    static thread_local DriveMotionBlur::IntervalHistory history;
+    const float dt = history.Observe(stamp,raw_dt);
+    if (!DriveMotionBlur::Correct(data, size, dt, reference)) return false;
+    static std::atomic<int> logged_reference{};
+    if (logged_reference.exchange(reference) != reference) {
+        std::printf("MotionBlur: %s shader=%08x simulated_dt=%.6f coefficient=%.6f\n",
+                    reference == 30 ? "Slow" : "Fast", u32(stage.pgm_hash), dt,
+                    reinterpret_cast<const float*>(data)[DriveMotionBlur::ExposureWord]);
+        std::fflush(stdout);
+    }
+    return true;
 }
 } // namespace
 
@@ -600,6 +628,8 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         } else {
             memory->CopySparseMemory(address, dst, size);
         }
+        // Patch only this draw's shadow, before publishing it to the recording thread.
+        if (MotionBlurConstants(stage, index, size)) CorrectMotionBlur(stage, dst, size);
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
     };
@@ -2853,6 +2883,18 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
+                // The non-ring path needs its own immutable copy as well. Never modify
+                // shared guest constants or a GPU-written buffer in place.
+                if (!desc.is_written && MotionBlurConstants(stage, buffer_index, size) &&
+                    !buffer_cache.IsRegionGpuModified(vsharp.base_address, size)) {
+                    std::array<float, DriveMotionBlur::Bytes / sizeof(float)> shadow;
+                    memory->CopySparseMemory(vsharp.base_address, reinterpret_cast<u8*>(shadow.data()), size);
+                    if (CorrectMotionBlur(stage, shadow.data(), size)) {
+                        auto& stream = buffer_cache.GetStreamBuffer();
+                        offset = stream.Copy(shadow.data(), size, alignment);
+                        buffer = &stream;
+                    }
+                }
                 // DriveClub reads hardware HTILE for local-light/probe culling. Vulkan depth
                 // writes do not update that guest metadata; captured tiles stay at 0x0000000f.
                 // In this shader bits 18..31 are Zmin and bits 12..17 encode the Z span through
