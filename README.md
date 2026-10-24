@@ -6,11 +6,13 @@ frame, using the same material, directions, LODs and exposure for both sampling 
 They are not two live game screenshots or a reconstruction of the complete rendering chain.
 
 - [Before / after, 2560x1440 source](fullres/reflection-comparison.png)
-- [Road crop, 100% scale](fullres/reflection-crop-100-percent.png)
+- [Seam above-left of car, 100% scale](fullres/reflection-crop-100-percent.png)
 - [Before, original 2560x1440](fullres/reflection-before-2560x1440.png)
 - [After, original 2560x1440](fullres/reflection-after-2560x1440.png)
 - [Face IDs, original 2560x1440](fullres/face-ids-2560x1440.png)
 - [Earlier diagnostic contribution comparison, shared x8 display gain](reflection-filtering-before-after.png)
+
+The 1:1 crop covers the visible seam above-left of the car (x=720..1320, y=440..840 in the 2560x1440 source). Its pixels match the original PNGs exactly.
 
 The full-resolution results use 3,686,400 samples. Primary face selection is unchanged;
 the correction changes how the filter footprint crosses face boundaries. The comparison
