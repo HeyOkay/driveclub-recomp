@@ -162,6 +162,19 @@ public:
     bool SnapshotGpuRange(VAddr addr, u64 size, void* out) {
         return buffer_cache.SnapshotGpuRange(addr, size, out);
     }
+    /// bbport: BufferCache::RecordTaggedSnapshot / ReadTaggedSnapshot (BB_EXPOSURE_EXACT).
+    bool RecordTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id) {
+        return buffer_cache.RecordTaggedSnapshot(addr, size, tag, id);
+    }
+    /// bbport: BB_EXACT_EOP_FLUSH: ends the submission after an EOP's snapshot copies (on the thread that runs the
+    /// EOP, which owns the scheduler as for the draw-batch flush).
+    void FlushAtExactEop() {
+        scheduler.Flush();
+    }
+    bool ReadTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id, void* out, bool* pending, u64* ticks,
+                            u64 wait_ns = 0) {
+        return buffer_cache.ReadTaggedSnapshot(addr, size, tag, id, out, pending, ticks, wait_ns);
+    }
     /// bbport: BB_FAULT_EMULATE: queues a guest store that touches no GPU-written byte (BufferCache::
     /// QueueUntrackedStore); false when the usual write fault path must run.
     bool StoreUntracked(VAddr addr, const void* data, u32 size);

@@ -91,6 +91,24 @@ public:
     /// to guest memory (the range stays GPU modified), so it never retries or falls back to a synchronous download.
     /// False when the range is not GPU modified (guest memory holds it). Any thread but the GPU threads.
     bool SnapshotGpuRange(VAddr addr, u64 size, void* out);
+    /// bbport: BB_EXPOSURE_EXACT: records a copy of [addr, addr + size) now, after the work recorded before it,
+    /// tagged with the generation the label written next carries and the registration's lifetime id (cache owner
+    /// thread: at the EOP).
+    bool RecordTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id);
+    /// Any thread: copies the snapshot of addr with that tag and id into out once the GPU has done it. False when
+    /// there is none (*pending false) or the GPU has not done it yet (*pending true). ticks (optional) gets the
+    /// snapshot's tick and the GPU tick known when it was checked. wait_ns: when the GPU has not done it but its
+    /// submission has gone (tick below the current one), wait up to that long for it (ticks[2] gets the ns waited).
+    bool ReadTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id, void* out, bool* pending, u64* ticks,
+                            u64 wait_ns = 0);
+    /// The entry `match` finds and, in *done, whether the GPU has done its copy (is_done(entry.tick)); null when
+    /// none. ReadTaggedSnapshot's lookup (before and after its wait), separate for the exact-readback self-test.
+    template <typename Entries, typename Match, typename IsDone>
+    static auto LookupSnapshot(Entries& entries, Match&& match, IsDone&& is_done, bool* done) {
+        auto it = std::ranges::find_if(entries, match);
+        *done = it != entries.end() && is_done(it->tick);
+        return it == entries.end() ? nullptr : &*it;
+    }
 
     /// bbport: BB_FAULT_EMULATE, any thread: a guest store to bytes no GPU write holds, on a page protected for
     /// other bytes. Written to guest memory now; the arena copy is updated by the cache owner before it records
@@ -303,6 +321,17 @@ private:
     std::vector<VAddr> unrecorded_windows;
     bool early_binding_guard = true;
     std::vector<EarlyReadback> early_readbacks;
+    /// bbport: RecordTaggedSnapshot. Written by the cache owner, read by the guest's threads: under tagged_mutex.
+    struct TaggedSnapshot {
+        VAddr addr{};
+        u32 size{};
+        u32 tag{};
+        u64 id{};
+        Vulkan::StagingBufferRef staging{};
+        u64 tick{};
+    };
+    std::mutex tagged_mutex;
+    std::vector<TaggedSnapshot> tagged_snapshots;
     void DropEarlyReadback(VAddr window);
 
     bool readback_offload{true};

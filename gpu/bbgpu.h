@@ -49,8 +49,13 @@ uintptr_t bbgpu_shared_alloc_hook(uintptr_t real_alloc, uintptr_t image_base);
  * (SysV memcpy signature). 0: not enabled. */
 uintptr_t bbgpu_exposure_hook(void);
 uintptr_t bbgpu_exposure_value_hook(uintptr_t real_getter);
+/* BB_EXPOSURE_EXACT=1: the hook of the exposure's getter call `site` (0, 1 histograms at 0x702ab9 / 0x702ae3, 2 the
+ * value at 0x702b0d). 0: not enabled. */
+uintptr_t bbgpu_exposure_exact_hook(uintptr_t real_getter, int site);
 /* BB_CLOUD_STALE=1: the hook of the cloud sample's getter call (eboot 0x60265e). 0: not enabled. */
 uintptr_t bbgpu_cloud_hook(uintptr_t image_base);
+uintptr_t bbgpu_query_hook(uintptr_t image_base);
+uintptr_t bbgpu_crowd_hook(uintptr_t image_base);
 #ifdef __cplusplus
 }
 #endif

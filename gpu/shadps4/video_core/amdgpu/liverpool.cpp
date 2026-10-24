@@ -27,6 +27,7 @@
 #include "video_core/amdgpu/liverpool.h"
 #include "bbport_write_log.h"
 #include "video_core/amdgpu/pm4_cmds.h"
+#include "video_core/page_manager.h"
 #include "video_core/renderdoc.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
@@ -326,6 +327,8 @@ void SignalEop(const PM4CmdEventWriteEop& eop) {
 void RunEventWriteEop(Vulkan::Rasterizer& rasterizer, const u8* data) {
     const auto eop = *reinterpret_cast<const PM4CmdEventWriteEop*>(data);
     rasterizer.ProcessDownloadImages();
+    VideoCore::ExposureExactAtEop(rasterizer, reinterpret_cast<VAddr>(eop.Address<u32>()), eop.DataDWord(),
+                                  eop.data_sel == DataSelect::Data32Low || eop.data_sel == DataSelect::Data64);
     // Guest memory copies on the copy threads precede the fence the guest sees.
     // BB_ASYNC_FENCES=1 writes it once they are done instead of waiting for them; measured
     // slower (79 vs 83 FPS): the guest waits on these fences, and later fences stall it more

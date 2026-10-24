@@ -775,6 +775,97 @@ void BufferCache::RecordReadback(Readback& job) {
     pending_readbacks.push_back(job.window);
 }
 
+bool BufferCache::RecordTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id) {
+    // Bytes not GPU modified are in guest memory: the guest's read does not wait, nothing to keep. One arena page
+    // (GetArena then neither creates a two-page arena nor migrates one): several blocks, for the query results'
+    // up to 256 KB (BB_QUERY_EXACT).
+    const u64 first = addr >> block_shift, last = (addr + size - 1) >> block_shift;
+    if (size == 0 || (first >> blocks_per_arena_page_shift) != (last >> blocks_per_arena_page_shift) ||
+        !memory_tracker->IsRegionGpuModified(addr, size)) {
+        return false;
+    }
+    ApplyQueuedStores();
+    const auto* arena = GetArena(first, last);
+    auto staging = staging_pool.Request(size, VideoCore::MemoryType::HostCached, 0, true);
+    const vk::BufferCopy copy{.srcOffset = addr - arena->cpu_addr, .dstOffset = staging.offset, .size = size};
+    runtime.CopyBuffer(arena, staging.buffer, std::span{&copy, 1});
+    scheduler.RequestHostReadBarrier();
+    const u64 tick = scheduler.CurrentTick();
+    std::scoped_lock lk{tagged_mutex};
+    // Up to four generations per address (the game asks for one 2-3 frames old), none older than 256 ticks.
+    u32 same = 0;
+    for (auto it = tagged_snapshots.rbegin(); it != tagged_snapshots.rend(); ++it) {
+        if (it->addr == addr && ++same >= 4) {
+            it->size = 0; // marked for removal below
+        }
+    }
+    std::erase_if(tagged_snapshots, [&](const TaggedSnapshot& t) {
+        if (t.size != 0 && tick - t.tick < 256 && !(t.addr == addr && t.tag == tag && t.id == id)) {
+            return false;
+        }
+        staging_pool.FreeDeferred(t.staging);
+        return true;
+    });
+    tagged_snapshots.push_back({addr, size, tag, id, staging, tick});
+    return true;
+}
+
+bool BufferCache::ReadTaggedSnapshot(VAddr addr, u32 size, u32 tag, u64 id, void* out, bool* pending,
+                                     u64* ticks, u64 wait_ns) {
+    *pending = false;
+    std::unique_lock lk{tagged_mutex};
+    bool done = false;
+    const auto find = [&] {
+        return LookupSnapshot(
+            tagged_snapshots,
+            [&](const TaggedSnapshot& t) { return t.addr == addr && t.size == size && t.tag == tag && t.id == id; },
+            [&](u64 t) { return scheduler.IsFree(t); }, &done);
+    };
+    auto* it = find();
+    // Old entries are only dropped when a new one is recorded: one from before a pause (loading, a restarted race)
+    // could carry the same generation number as a new object's.
+    if (!it || scheduler.CurrentTick() - it->tick >= 512) {
+        return false;
+    }
+    const u64 tick = it->tick;
+    if (ticks) {
+        ticks[0] = tick;
+        ticks[1] = scheduler.GetWorkSemaphore()->KnownGpuTick();
+    }
+    // Submitted already (a tick is taken when its command buffer is flushed): its own wait ends before the guest's
+    // read fault would (that one copies again in the current submission and waits for everything before it). The
+    // recorder thread submits a flushed buffer without the guest; bounded all the same. Without the lock: the cache
+    // owner records new snapshots meanwhile.
+    if (!done && wait_ns && tick < scheduler.CurrentTick()) {
+        lk.unlock();
+        const auto start = std::chrono::steady_clock::now();
+        (void)scheduler.GetWorkSemaphore()->WaitFor(tick, wait_ns);
+        if (ticks) {
+            ticks[2] = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                                start)
+                               .count());
+        }
+        lk.lock();
+        // The entry may have been replaced (same key, a newer copy) or dropped meanwhile: completion is checked
+        // again on the entry found now.
+        it = find();
+        if (!it) {
+            return false;
+        }
+        if (ticks) {
+            ticks[0] = it->tick;
+            ticks[1] = scheduler.GetWorkSemaphore()->KnownGpuTick();
+        }
+    }
+    if (!done) {
+        *pending = true;
+        return false;
+    }
+    it->staging.buffer->Invalidate(it->staging.offset, it->staging.size);
+    std::memcpy(out, it->staging.mapped, size);
+    return true;
+}
+
 bool BufferCache::SnapshotGpuRange(VAddr addr, u64 size, void* out) {
     Vulkan::StagingBufferRef staging{};
     u64 tick = 0;
