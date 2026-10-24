@@ -315,6 +315,7 @@ void Runtime::DownloadImage(VideoCore::Image* src, const VideoCore::Buffer* dst,
 }
 
 void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
+    const TransferMark mark{*this, "image copy", *dst};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
 
     // Format mismatch warning (safe but useful)
@@ -416,6 +417,7 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
                                   const VideoCore::Buffer* buffer, u64 offset) {
+    const TransferMark mark{*this, "image copy through buffer", *dst};
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
     ASSERT(src->info.resources.layers == dst->info.resources.layers && num_mips == 1);
@@ -803,6 +805,7 @@ void Runtime::VerifyFormCopy(VideoCore::Image* src, VideoCore::Image* dst) {
 }
 
 bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
+    const TransferMark mark{*this, "depth/color form copy", *dst};
     // bbport: two depth images of different formats (DriveClub reuses a D32 with stencil's memory for a
     // D32 when it leaves a race): a direct copy needs the exact same depth format
     // (VUID-vkCmdCopyImage-srcImage-01548), and NVIDIA wrote outside the destination (device lost,
@@ -927,6 +930,7 @@ bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
 void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                                const VideoCore::SubresourceRange& sub_range) {
     scheduler.EndRendering();
+    const TransferMark mark{*this, "depth-stencil copy", *dst};
 
     bool needs_flush =
         Transit(src, vk::ImageLayout::eTransferSrcOptimal, vk::PipelineStageFlagBits2::eCopy,
@@ -970,6 +974,7 @@ void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
 void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
                            const VideoCore::SubresourceRange& src_range,
                            const VideoCore::SubresourceRange& dst_range) {
+    const TransferMark mark{*this, "image resolve", *dst};
     SetBackingSamples(dst, 1, false);
     scheduler.EndRendering();
 
@@ -1040,6 +1045,7 @@ void Runtime::ResolveImage(VideoCore::Image* src, VideoCore::Image* dst,
 
 void Runtime::ClearDepth(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          float depth) {
+    const TransferMark mark{*this, "depth clear", *dst};
     scheduler.EndRendering();
     if (Transit(dst, vk::ImageLayout::eTransferDstOptimal,
                 vk::PipelineStageFlagBits2::eClear, vk::AccessFlagBits2::eTransferWrite, range)) {
@@ -1062,6 +1068,7 @@ void Runtime::ClearDepth(VideoCore::Image* dst, const VideoCore::SubresourceRang
 
 void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRange& range,
                          const vk::ClearValue& clear_value) {
+    const TransferMark mark{*this, "image clear", *dst};
     scheduler.EndRendering();
 
     const bool needs_flush =
@@ -1253,6 +1260,24 @@ void Runtime::FlushBarriers() {
     }
 
     scheduler.EndRendering();
+    // bbport: with the GPU profiler on, a barrier that changes the layout of a depth/stencil image gets its own
+    // label (a depth decompression on some GPUs), keyed by the layouts and size.
+    GpuProfiler* profiler = GpuProfiler::Get();
+    u64 resume = 0;
+    if (profiler && profiler->Records(&scheduler)) {
+        for (const auto& b : image_barriers) {
+            if ((b.subresourceRange.aspectMask & vk::ImageAspectFlagBits::eDepth) && b.oldLayout != b.newLayout) {
+                resume = profiler->Current();
+                const u64 key = 0xDE7B000000000000ull ^ (u64(b.oldLayout) << 32) ^ (u64(b.newLayout) << 16) ^
+                                u64(image_barriers.size());
+                profiler->Mark(key, [&] {
+                    return fmt::format("depth layout barrier {} -> {} ({} image barriers)", vk::to_string(b.oldLayout),
+                                       vk::to_string(b.newLayout), image_barriers.size());
+                });
+                break;
+            }
+        }
+    }
     scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
                       images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
                           image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {
@@ -1271,6 +1296,9 @@ void Runtime::FlushBarriers() {
     image_barriers.clear();
     barrier_tracker.Clear();
     ++access_epoch;
+    if (resume) {
+        profiler->Resume(resume);
+    }
 }
 
 // Capture aid: the contents of a texture sampled by a vertex shader (height and wind maps), copied out
