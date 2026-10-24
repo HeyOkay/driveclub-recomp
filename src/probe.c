@@ -841,6 +841,44 @@ static void apply_upscale_render_size(unsigned char *image, uint64_t size) {
     memcpy(image+0x12d0544,&render_w,4); memcpy(image+0x12d0554,&render_h,4);
     printf("Upscaling: the game renders at %ux%u for its %ux%u output (%s)\n",render_w,render_h,out_w,out_h,want);
 }
+/* The game's render height once the patches and upscaling are applied, read before they are (the GPU starts first):
+ * the last patch-file write over +0x12d0554 (or the output height at +0x754c21 over the upscale factor), else the
+ * eboot's own. The GPU places its per-draw buffers by it (gpu/shadps4/video_core/buffer_cache/buffer.cpp). */
+static uint32_t peek_patched_u32(const unsigned char *image, uint64_t size, const char *patch_file, uint64_t at) {
+    uint32_t value=0;
+    if (at+4<=size) memcpy(&value,image+at,4);
+    FILE *f=patch_file ? fopen(patch_file,"rb") : NULL;
+    char magic[8];
+    if (!f) return value;
+    if (fread(magic,1,8,f)==8 && !memcmp(magic,"BBPATCH2",8)) {
+        read64(f);
+        const uint64_t count=read64(f);
+        for (uint64_t i=0;i<count;++i) {
+            const uint64_t offset=read64(f), length=read64(f);
+            if (!length || length>4096) break;
+            if (offset<=at && at+4<=offset+length) {
+                if (fseek(f,(long)(at-offset),SEEK_CUR) || fread(&value,1,4,f)!=4) break;
+                if (fseek(f,(long)(offset+length-at-4),SEEK_CUR)) break;
+            } else if (fseek(f,(long)length,SEEK_CUR)) break;
+        }
+    }
+    fclose(f);
+    return value;
+}
+static int32_t planned_render_height(const unsigned char *image, uint64_t size, const char *patch_file) {
+    static const struct { const char *name; float scale; } scales[] = {
+        {"quality", 1.5f}, {"balanced", 1.7f}, {"performance", 2.0f}, {"ultra_performance", 3.0f}};
+    const char *aa=getenv("BB_AA"), *want=getenv("BB_AA_SCALE");
+    if (aa && (!strcmp(aa,"dlss") || !strcmp(aa,"fsr3")) && want) {
+        for (size_t i=0;i<sizeof scales/sizeof *scales;++i) {
+            if (strcmp(want,scales[i].name)) continue;
+            const uint32_t out_h=peek_patched_u32(image,size,patch_file,0x754c21);
+            if (out_h>=360 && out_h<=8640) return (int32_t)((uint32_t)((float)out_h/scales[i].scale+4.0f)/8*8);
+        }
+    }
+    const uint32_t h=peek_patched_u32(image,size,patch_file,0x12d0554);
+    return h>=360 && h<=8640 ? (int32_t)h : 0;
+}
 /* Pop-in: the game leaves out every object smaller than a share of the screen given per kind of object in
  * viewportquality.xml (static_objects 0.02 in a race), so barriers and trees appeared from nothing as the car came
  * closer. eboot 1.28 +0x60ff90 copies a view's quality tag into its cull parameters: +0x60ffcb the shadow view's
@@ -1305,7 +1343,8 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"ATTRIBUTE",NULL,0,&attributes);
         uint64_t sdk=0;
         if (procparam) memcpy(&sdk,image+procparam+16,8); /* procparam: size, magic, count, sdk_version */
-        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080};
+        BbGpuConfig gpu={title,serial,user_dir ? user_dir : "user",(uint32_t)sdk,attributes,1920,1080,
+                         planned_render_height(image,size,patch_file)};
         gpu_enabled=1; /* page tracking starts while the rasterizer registers guest memory */
         if (bbgpu_init(&gpu)) fail("GPU initialization failed");
         printf("GPU: window and Vulkan presenter ready; SDK 0x%08x, %u HLE symbols\n",(unsigned)sdk,bbgpu_symbol_count());

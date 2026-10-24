@@ -33,6 +33,7 @@
 #include "core/signals.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/buffer_cache/buffer.h"
 
 extern "C" {
 // runtime_memory.c
@@ -253,6 +254,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     StartProfileWriter();
 #endif
     g_sdk_version = config->sdk_version;
+    VideoCore::SetStreamPlacementRenderHeight(config->render_height);
 #ifdef _WIN32
     if (config->user_dir && !std::getenv("BB_GPU_USER_DIR")) _putenv_s("BB_GPU_USER_DIR", config->user_dir);
 #else

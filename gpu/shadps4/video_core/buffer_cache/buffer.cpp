@@ -45,10 +45,11 @@ std::string_view BufferTypeName(MemoryType type) {
 /// "device" (shadPS4's choice) is VRAM written through the PCIe BAR: cheap with AMD Smart Access
 /// Memory on a desktop, but on a laptop NVIDIA GPU these writes took half of that thread's time
 /// on laptops measured so. "cached" is cached system memory the GPU reads over PCIe
-/// instead; "host" is uncached system memory. The default is cached on NVIDIA and Intel and
-/// device on AMD (SetStreamPlacementDefault).
+/// instead; "host" is uncached system memory. The default is device on AMD, and on NVIDIA when
+/// the game renders at 1080p or more; cached otherwise (SetStreamPlacementDefault).
 enum class StreamPlacement { Device, Host, Cached };
 static std::atomic<int> stream_default{int(StreamPlacement::Device)};
+static std::atomic<int> planned_render_height{0};
 static StreamPlacement StreamMemory() {
     static const StreamPlacement placement = [] {
         const char* env = std::getenv("BB_STREAM_MEMORY");
@@ -102,9 +103,22 @@ static StreamPlacement PlacementOf(MemoryType type) {
     return type == MemoryType::StreamRing ? RingMemory() : StreamMemory();
 }
 
+void SetStreamPlacementRenderHeight(s32 height) {
+    planned_render_height = height;
+}
+
+s32 PlannedRenderHeight() {
+    return planned_render_height.load();
+}
+
 void SetStreamPlacementDefault(u32 vendor_id) {
-    // NVIDIA 0x10DE, Intel 0x8086: cached system memory. AMD keeps VRAM (Smart Access Memory).
-    stream_default = int(vendor_id == 0x1002 ? StreamPlacement::Device : StreamPlacement::Cached);
+    // AMD keeps VRAM (Smart Access Memory). NVIDIA 0x10DE: VRAM from 1080p render up, where the GPU is the limit:
+    // 1440p uncapped 66.7 -> 79.1 FPS, sd 6.2 -> 2.7 ms, the 13/22 ms alternation nearly gone; capped 60 1% low
+    // 48.2 -> 56.3; 1080p render / 4K output 93.9 -> 99.0, 1% low 51.1 -> 57.1. At 720p
+    // render the draw recording thread is the limit and its BAR writes cost ~7%: cached system
+    // memory there. Intel 0x8086: cached.
+    const bool device = vendor_id == 0x1002 || (vendor_id == 0x10DE && planned_render_height.load() >= 1080);
+    stream_default = int(device ? StreamPlacement::Device : StreamPlacement::Cached);
 }
 
 // bbport: GDS gets GPU atomics and occasional CPU reads (ReadDataFromGds reads the mapping without an
