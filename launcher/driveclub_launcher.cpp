@@ -33,6 +33,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "datx.h"
 #include "scene_track_names.h"
@@ -1879,7 +1880,10 @@ std::wstring GameExe() {
   return Exists(bundled) ? bundled : g_home + L"\\..\\DriveClubGame.exe";
 }
 
+std::wstring g_external_progress;
+void WriteExternalProgress(int percent, const std::wstring& text);
 void SetProgress(int percent, const std::wstring& text) {
+  WriteExternalProgress(percent, text);
   g_progress = percent;
   g_progress_text = text;
   if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 1, 0, 0);
@@ -3026,6 +3030,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return DefWindowProcW(h, m, w, l);
 }
 
+#include "launcher_wpf_bridge.inc"
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
@@ -3049,6 +3055,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   MakeDirs(g_data + L"\\user");
   LoadSettings();
   LoadBenchResult();
+  {
+    int argc=0; wchar_t** argv=CommandLineToArgvW(GetCommandLineW(), &argc);
+    const int result=RunWpfBridge(argc,argv); LocalFree(argv);
+    if(result>=0){CoUninitialize();return result;}
+  }
   StartLauncherLog();
   if (!g_skip_gpu_check) {
     g_gpu_problem = CheckCpu();
