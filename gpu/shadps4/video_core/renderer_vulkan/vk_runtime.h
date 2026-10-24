@@ -82,6 +82,9 @@ public:
     /// Moves the pixels of an image that the guest reinterpreted between its depth and colour forms.
     /// False when the two forms cannot be copied between (multisampled): the caller chooses the fallback.
     bool CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
+    /// bbport: BB_FORM_COPY_VERIFY=<n>: compares every n-th depth->R32F draw with the raw depth bits.
+    void VerifyFormCopy(VideoCore::Image* src, VideoCore::Image* dst);
+    void SelfTestFormCopy();
 
     void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,
                           const VideoCore::SubresourceRange& sub_range);
