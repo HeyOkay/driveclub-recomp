@@ -1,3 +1,4 @@
+#include "bbport_diagnostics.h"
 // The last draws and dispatches that were recorded, kept in a small ring so that a crash, a freeze or a lost
 // device can say what the GPU was working on. One atomic increment and a few stores per call.
 #pragma once
@@ -31,10 +32,12 @@ inline std::uint64_t Now() {
 }
 
 inline void Draw(std::uint64_t vs, std::uint64_t ps, std::uint32_t indices, std::uint32_t instances) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     entries[next.fetch_add(1, std::memory_order_relaxed) & (Size - 1)] = {vs, ps, 0, indices, instances, 0, 'D'};
 }
 
 inline void Dispatch(std::uint64_t cs, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     entries[next.fetch_add(1, std::memory_order_relaxed) & (Size - 1)] = {cs, 0, 0, x, y, z, 'C'};
 }
 

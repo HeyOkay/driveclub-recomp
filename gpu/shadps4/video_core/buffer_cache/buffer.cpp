@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -160,8 +161,8 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             result = vmaCreateBuffer(allocator, &buffer_ci_unsafe, &over_budget_ci, &unsafe_buffer,
                                      &allocation, out_alloc_info);
         }
-        BbStats::alloc_count[0].fetch_add(1, std::memory_order_relaxed);
-        BbStats::alloc_bytes[0].fetch_add(buffer_ci_unsafe.size, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::alloc_count[0].fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::alloc_bytes[0].fetch_add(buffer_ci_unsafe.size, std::memory_order_relaxed);
         ASSERT_MSG(result == VK_SUCCESS, "Failed allocating buffer with error {}",
                    vk::to_string(vk::Result{result}));
         buffer = vk::Buffer{unsafe_buffer};

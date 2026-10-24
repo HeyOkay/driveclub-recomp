@@ -1,3 +1,4 @@
+#include "../gpu/shim/bbport_diagnostics.h"
 /* Minimal x86-64 native loader experiment. Not a PS4 emulator or game port. */
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -681,7 +682,7 @@ static void patch_shared_alloc(unsigned char *image, uint64_t size) {
     static const uint64_t alloc = 0x753a80, video_alloc = 0x753b40;
     static const uint64_t sites[7] = {0x744379, 0x744c8c, 0x75848e, 0x7584c4, 0x100acff, 0x100ad1c, 0x7584e1};
     const char *pad = getenv("BB_SHARED_PAD");
-    const int log = getenv("BB_SHARED_LOG") != NULL, padding = pad ? (int)strtoul(pad, NULL, 0) : 3;
+    const int log = BB_DIAGNOSTIC_ENV("BB_SHARED_LOG") != NULL, padding = pad ? (int)strtoul(pad, NULL, 0) : 3;
     if ((!log && !padding) || size < 0x100ad1c + 5) return;
     uintptr_t wrapper = bbgpu_shared_alloc_hook((uintptr_t)image + alloc, (uintptr_t)image);
     if (!wrapper) return;
@@ -1109,7 +1110,7 @@ int main(int argc, char **argv) {
     _set_invalid_parameter_handler(on_invalid_parameter);
     _set_purecall_handler(on_pure_call);
     SetConsoleCtrlHandler(console_closing,TRUE);
-    if (getenv("BB_STRICT_HANDLES")) {
+    if (BB_DIAGNOSTIC_ENV("BB_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
         strict.RaiseExceptionOnInvalidHandleReference=1;
         strict.HandleExceptionsPermanentlyEnabled=1;

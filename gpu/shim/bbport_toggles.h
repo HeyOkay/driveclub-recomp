@@ -1,3 +1,4 @@
+#include "bbport_diagnostics.h"
 // bbport: optimizations that can be switched off while the game runs (BB_TOGGLE_FILE,
 // see runtime_memory.c), to find which one changes rendering without restarting.
 #pragma once
@@ -113,7 +114,7 @@ inline std::atomic<const void*> pipe_scheduler{nullptr};
 inline bool (*pipe_in_flight)() = nullptr;
 /// Read once at startup: the checks on per-draw paths are a load of a constant when off.
 inline const bool pipe_check = [] {
-    const char* env = std::getenv("BB_PIPE_CHECK");
+    const char* env = BB_DIAGNOSTIC_ENV("BB_PIPE_CHECK");
     return env && env[0] == '1';
 }();
 inline bool PipeCheckEnabled() {
@@ -145,6 +146,7 @@ inline std::atomic<std::uint64_t> store_why[8]{};
 /// Instructions of write faults the emulation does not handle (rip, count), for BB_FRAME_STATS.
 inline std::atomic<std::uint64_t> store_skip_rip[64]{}, store_skip_count[64]{};
 inline void NoteStoreSkip(std::uint64_t rip) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     for (std::uint32_t i = 0, h = std::uint32_t((rip >> 2) * 2654435761u) & 63; i < 64; ++i, h = (h + 1) & 63) {
         std::uint64_t cur = store_skip_rip[h].load(std::memory_order_relaxed);
         if (cur == 0 && store_skip_rip[h].compare_exchange_strong(cur, rip)) {
@@ -164,7 +166,7 @@ inline std::atomic<std::uint64_t> t_resident{0}, t_protect{0}, t_image_create{0}
     t_write_faults{0}, t_copy_cpu{0}, copy_sys_us{0}, copy_minflt{0};
 /// Diagnostics are collected only with BB_FRAME_STATS=1.
 inline const bool enabled = [] {
-    const char* env = std::getenv("BB_FRAME_STATS");
+    const char* env = BB_DIAGNOSTIC_ENV("BB_FRAME_STATS");
     return env && env[0] == '1';
 }();
 struct Timer {
@@ -183,7 +185,7 @@ struct Timer {
 };
 /// The phase and packet timers cost a clock read each, many per draw: BB_PHASES=1 only.
 inline const bool phases_enabled = [] {
-    const char* env = std::getenv("BB_PHASES");
+    const char* env = BB_DIAGNOSTIC_ENV("BB_PHASES");
     return enabled && env && env[0] == '1';
 }();
 struct PhaseTimer {
@@ -214,6 +216,7 @@ inline std::atomic<std::uint64_t> wrm_waits[2]{}, wrm_wait_ns[2]{};
 inline std::atomic<std::uint64_t> wrm_addr[8]{}, wrm_forced[8]{}, wrm_forced_met[8]{}, wrm_forced_ns[8]{},
     wrm_info[8]{};
 inline void NoteWaitViewRead(std::uint64_t addr, std::uint64_t info, bool met, std::uint64_t ns) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     for (unsigned i = 0, at = static_cast<unsigned>((addr >> 2) * 0x9E3779B1u) & 7; i < 8; ++i, at = (at + 1) & 7) {
         std::uint64_t expected = 0;
         if (wrm_addr[at].load(std::memory_order_relaxed) == addr ||
@@ -229,6 +232,7 @@ inline void NoteWaitViewRead(std::uint64_t addr, std::uint64_t info, bool met, s
 /// Read faults taken by the GPU command thread itself, by faulting instruction (BB_FRAME_STATS).
 inline std::atomic<std::uint64_t> gpu_fault_rip[32]{}, gpu_fault_count[32]{};
 inline void NoteGpuReadFault(std::uint64_t rip) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     for (unsigned i = 0, at = static_cast<unsigned>((rip >> 2) * 0x9E3779B1u) & 31; i < 32; ++i, at = (at + 1) & 31) {
         std::uint64_t expected = 0;
         if (gpu_fault_rip[at].load(std::memory_order_relaxed) == rip ||
@@ -310,6 +314,7 @@ inline bool IsMirrorTarget(std::uint64_t address) {
     return false;
 }
 inline void NoteMirrorConsumer(std::uint64_t address, std::uint64_t hash) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     for (unsigned i = 0; i < 8; ++i) {
         if (mirror_keys[i].load(std::memory_order_relaxed) != address) {
             continue;
@@ -331,6 +336,7 @@ inline void NoteMirrorConsumer(std::uint64_t address, std::uint64_t hash) {
 inline std::atomic<std::uint64_t> image_creates[4]{}, image_tracking[2]{};
 inline std::atomic<std::uint64_t> image_free_rip[16]{}, image_free_count[16]{};
 inline void NoteImageFree(std::uint64_t rip) {
+    if constexpr (!BB_DIAGNOSTICS) return;
     for (unsigned i = 0, at = static_cast<unsigned>((rip >> 2) * 0x9E3779B1u) & 15; i < 16; ++i, at = (at + 1) & 15) {
         std::uint64_t expected = 0;
         if (image_free_rip[at].load(std::memory_order_relaxed) == rip ||
@@ -350,8 +356,10 @@ inline std::atomic<std::uint64_t> sync_recording_ns{0}, host_copies_wait_ns{0}, 
     copy_threads_wait_ns{0}, host_copy_waits{0};
 struct WaitTimer {
     std::atomic<std::uint64_t>& total;
-    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point start =
+        enabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     ~WaitTimer() {
+        if (!enabled) return;
         total.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - start).count(),
                         std::memory_order_relaxed);

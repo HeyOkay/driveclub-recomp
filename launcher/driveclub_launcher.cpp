@@ -1875,6 +1875,11 @@ std::wstring PatchXmlPath() {
 }
 
 std::wstring GameExe() {
+  wchar_t diagnostic[64] = {};
+  const DWORD length = GetEnvironmentVariableW(L"BB_DIAGNOSTIC_RUNTIME", diagnostic, 64);
+  if (length > 0 && length < 64 &&
+      std::wstring(diagnostic) == L"DriveClubGame.diagnostics.exe")
+    return g_runtime + L"\\DriveClubGame.diagnostics.exe";
   const std::wstring bundled = g_runtime + L"\\DriveClubGame.exe";
   return Exists(bundled) ? bundled : g_home + L"\\..\\DriveClubGame.exe";
 }

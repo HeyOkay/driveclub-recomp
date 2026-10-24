@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -120,7 +121,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     // Before the rasterizer is bound: Liverpool enqueues buffers only once it sees it.
     draw_prep = std::make_unique<DrawPreparation>(pipeline_cache);
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
-    if (instance.IsBufferMarkerSupported()) {
+    if (BB_DIAGNOSTICS && instance.IsBufferMarkerSupported()) {
         crumb_buffer = std::make_unique<VideoCore::Buffer>(instance, 0, 256, VideoCore::MemoryType::HostUncached,
                                                           "Breadcrumbs");
         if (crumb_buffer->mapped_data.data()) {
@@ -477,7 +478,7 @@ constexpr u32 AlignPacket(u32 size) {
 }
 u32 VerifyInterval() {
     static const u32 interval = [] {
-        const char* env = std::getenv("BB_PIPE_VERIFY");
+        const char* env = BB_DIAGNOSTIC_ENV("BB_PIPE_VERIFY");
         return env ? static_cast<u32>(std::strtoul(env, nullptr, 10)) : 0u;
     }();
     return interval;
@@ -518,7 +519,7 @@ void Rasterizer::DrainDrawPipe(u32 reason, u32 line, const char* function) {
     if (!draw_pipe || !OnStageA()) {
         return;
     }
-    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+    static const bool stats = BB_DIAGNOSTIC_ENV("BB_FRAME_STATS") != nullptr;
     if (!stats) {
         draw_pipe->Drain(reason);
         return;
@@ -1016,7 +1017,7 @@ void Rasterizer::RunDrawPacket(void* context, const u8* data, u32 size) {
 }
 
 void Rasterizer::PrintPipeStats() {
-    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+    static const bool stats = BB_DIAGNOSTIC_ENV("BB_FRAME_STATS") != nullptr;
     if (!stats || (draw_pipe->packets & 1023) != 0) {
         return;
     }
@@ -1113,20 +1114,20 @@ static bool SkipMirrorDraw(const AmdGpu::Regs& regs) {
     if (!small_scene) {
         return false;
     }
-    BbStats::mirror_seen.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::mirror_seen.fetch_add(1, std::memory_order_relaxed);
     // A depth-only pass at this size is not a picture the game shows: its depth feeds the game's own
     // visibility decisions (which objects to draw), and a stale one drops moving objects such as cars.
     // Only draws with a color target (the mirror pictures) are skipped.
     if (!color) {
-        BbStats::mirror_depth_only.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_depth_only.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     {
         const u32 n = regs.num_indices;
         const u32 bucket = n < 100 ? 0 : n < 300 ? 1 : n < 1000 ? 2 : n < 3000 ? 3 : n < 10000 ? 4 : 5;
-        BbStats::mirror_size_hist[bucket].fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_size_hist[bucket].fetch_add(1, std::memory_order_relaxed);
         if (regs.num_instances.NumInstances() > 1) {
-            BbStats::mirror_size_hist[6].fetch_add(1, std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_size_hist[6].fetch_add(1, std::memory_order_relaxed);
         }
     }
     // Draws of N indices or more are never skipped (BB_MIRROR_KEEP_ABOVE=N, default 3000, 0: skip all). The big
@@ -1173,13 +1174,13 @@ static bool SkipMirrorDraw(const AmdGpu::Regs& regs) {
         BbStats::mirror_stale[target - targets].store(target->skip, std::memory_order_relaxed);
     }
     BbStats::mirror_targets.store(num_targets, std::memory_order_relaxed);
-    BbStats::mirror_skipped.fetch_add(target->skip, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::mirror_skipped.fetch_add(target->skip, std::memory_order_relaxed);
     return target->skip;
 }
 
 void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* prepared) {
     RENDERER_TRACE;
-    BbStats::draws.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::draws.fetch_add(1, std::memory_order_relaxed);
     if (SkipMirrorDraw(Regs())) {
         // A draw that reads the mirror scene's own pictures keeps the simulation behind them in step (rain on the
         // windscreen, wipers): it is drawn every frame.
@@ -1194,7 +1195,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset, const PreparedDraw* pre
         if (!feedback) {
             return;
         }
-        BbStats::mirror_feedback_kept.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_feedback_kept.fetch_add(1, std::memory_order_relaxed);
     }
 
     // bbport: with the draw pipeline this thread only selects the pipeline and hands the draw
@@ -1289,7 +1290,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
             }
             camera_motion->SetJitter(upscaler->Jitter());
             object_motion->OnFrameStart();
-            static const char* scene_debug = std::getenv("BB_SCENE_DEBUG");
+            static const char* scene_debug = BB_DIAGNOSTIC_ENV("BB_SCENE_DEBUG");
             scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
             scene_targets->debug = scene_debug_frame;
         }
@@ -1469,8 +1470,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     const u32 first_vertex = vertex_offset;
     const u32 first_instance = instance_offset;
     // The number BbRecent::Draw below gives this draw; the GPU writes it when its command processor gets here.
-    const vk::Buffer crumb_handle = BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
-    const u32 crumb = BbRecent::next.load(std::memory_order_relaxed) + 1;
+    const vk::Buffer crumb_handle = BB_DIAGNOSTICS && BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
+    const u32 crumb = BB_DIAGNOSTICS ? BbRecent::next.load(std::memory_order_relaxed) + 1 : 0;
     scheduler.Record([=](vk::CommandBuffer cmdbuf) {
         cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, handle);
         if (is_indexed) {
@@ -1887,7 +1888,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
 
 void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
-    BbStats::dispatches.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::dispatches.fetch_add(1, std::memory_order_relaxed);
     // bbport: like draws, handed to the draw recording thread after the pipeline selection.
     const bool pipelined = UseDrawPipe() && !BbToggle::Disabled(BbToggle::PipelinedDispatch);
     if (!pipelined) {
@@ -1997,7 +1998,7 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
     }
     if (skip_mirror_dispatch) {
         skip_mirror_dispatch = false;
-        BbStats::mirror_dispatch_skipped.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_dispatch_skipped.fetch_add(1, std::memory_order_relaxed);
         ResetBindings(true);
         return;
     }
@@ -2012,8 +2013,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     const vk::Pipeline handle = pipeline->Handle();
     const u32 dim_x = cs_program.dim_x, dim_y = cs_program.dim_y, dim_z = cs_program.dim_z;
-    const vk::Buffer crumb_handle = BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
-    const u32 crumb = BbRecent::next.load(std::memory_order_relaxed) + 1;
+    const vk::Buffer crumb_handle = BB_DIAGNOSTICS && BbRecent::crumb ? crumb_buffer->Handle() : vk::Buffer{};
+    const u32 crumb = BB_DIAGNOSTICS ? BbRecent::next.load(std::memory_order_relaxed) + 1 : 0;
     BbRecent::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
     if (FrameCapture::Active()) {
         FrameCapture::Dispatch(cs.pgm_hash, dim_x, dim_y, dim_z);
@@ -2284,7 +2285,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
 
     bool uses_dma = false;
 
-    static const bool stats = std::getenv("BB_FRAME_STATS") != nullptr;
+    static const bool stats = BB_DIAGNOSTIC_ENV("BB_FRAME_STATS") != nullptr;
     if (stats && ((helper_full + helper_partial + helper_serial) & 1023) == 0) {
         static auto window = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
@@ -2879,7 +2880,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                 }
                 if (desc.is_written) {
                     // bbport: BB_READBACK_LOG names the shader that wrote what the guest reads back.
-                    BbTrace::writer_tag.store(stage.pgm_hash ^ (u64(stage.sw_stage) << 60), std::memory_order_relaxed);
+                    if constexpr (BB_DIAGNOSTICS) BbTrace::writer_tag.store(stage.pgm_hash ^ (u64(stage.sw_stage) << 60), std::memory_order_relaxed);
                 }
                 auto [buffer, offset] = buffer_cache.ObtainBuffer(
                     vsharp.base_address, size, desc.is_written, desc.is_formatted);
@@ -3654,8 +3655,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     }
     push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
     if (BbStats::enabled) {
-        BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
-        BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
     }
     RenderState state;
     state.width = instance.GetMaxFramebufferWidth();
@@ -3958,7 +3959,7 @@ void Rasterizer::FillBuffer(VAddr address, u32 num_bytes, u32 value, bool is_gds
         if (is_gds) {
             return {buffer_cache.GetGdsBuffer(), address};
         }
-        BbTrace::writer_tag.store(0xF111000000000000ull | num_bytes, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbTrace::writer_tag.store(0xF111000000000000ull | num_bytes, std::memory_order_relaxed);
         return buffer_cache.ObtainBuffer(address, num_bytes, true);
     }();
     runtime.FillBuffer(buffer, offset, num_bytes, value);
@@ -3988,7 +3989,7 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
         if (dst_gds) {
             return {gds_buffer, dst};
         }
-        BbTrace::writer_tag.store(0xC0B7000000000000ull | (src & 0xffffffffffull), std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbTrace::writer_tag.store(0xC0B7000000000000ull | (src & 0xffffffffffull), std::memory_order_relaxed);
         return buffer_cache.ObtainBuffer(dst, num_bytes, true, true);
     }();
     const vk::BufferCopy copy = {
@@ -4519,7 +4520,7 @@ void Rasterizer::NoteFrameStart() {
     // BB_BUFFER_STATS=1: how many earlier frames the GPU has not finished when the GPU thread
     // starts a frame - the lag that decides whether guest memory can be read in place.
     static const bool stats = [] {
-        const char* value = std::getenv("BB_BUFFER_STATS");
+        const char* value = BB_DIAGNOSTIC_ENV("BB_BUFFER_STATS");
         return value && value[0] == '1';
     }();
     if (!stats) {

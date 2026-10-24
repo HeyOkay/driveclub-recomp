@@ -15,7 +15,9 @@ Install MSYS2 and, from the CLANG64 shell, the build packages once:
 
     bash build.sh
 
-This produces `out/DriveClubGame.exe`.
+This produces `out/DriveClubGame.exe` without diagnostic capture/profiling code.
+For a separate diagnostic executable, use `BB_DIAGNOSTICS=ON bash build.sh`; see
+[Runtime diagnostics builds](docs/runtime-diagnostics.md).
 
 ## Release
 
