@@ -147,6 +147,7 @@ bool HasSubTabs() { return g_tab == kTabDriving; }
 bool OnPage(const Card& card) { return card.tab == g_tab && (card.sub < 0 || card.sub == g_subtab); }
 std::wstring g_status;
 std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while it is set, unless the check is skipped
+bool g_camera_patch = true;  // enabled by default; persisted in launcher.ini
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
@@ -726,6 +727,9 @@ void BuildModel() {
                        00));
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
+  const int camera_patch = toggle(L"High-FPS camera workaround (experimental)",
+      L"Reduces camera, replay HUD and driver shake above 30 FPS. Behavior is still incorrect in some situations and does not match the 30 FPS reference. Enabled by default; restart the game after changing it.",
+      "@camera_patch", true);
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
                           L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
                           "Disable motion blur and depth of field", false);
@@ -943,7 +947,7 @@ void BuildModel() {
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});
   g_cards.back().sub = kSubAssists;
-  g_cards.push_back({L"PATCHES", {blur, reset, barrier, pcol, pproc, skipgpu}, 0, kTabGameplay,
+  g_cards.push_back({L"PATCHES", {camera_patch, blur, reset, barrier, pcol, pproc, skipgpu}, 0, kTabGameplay,
                      L"Community patches for DriveClub version 1.28."});
   g_cards.push_back({L"BENCHMARK", {g_btrack, g_bcar, g_bmode, g_btod, g_bweather, g_brain, g_blen}, 0, kTabBench});
   g_cards.push_back({L"BENCHMARK RUN AND RESULT", {g_brun}, 0, kTabBench});
@@ -1038,6 +1042,7 @@ void LoadSettings() {
     if (line.rfind("aa=", 0) == 0) aa_saved = atoi(line.substr(3).c_str());
     if (line.rfind("fgen=", 0) == 0) fgen_saved = atoi(line.substr(5).c_str());
     if (line.rfind("unlocked=", 0) == 0) unlocked_saved = line.substr(9) == "1";
+    if (line.rfind("camera_patch=", 0) == 0) g_camera_patch = line.substr(13) == "1";
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
     if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
     if (line.rfind("draw_threads=", 0) == 0) g_two_thread = line.substr(13) == "1";
@@ -1098,6 +1103,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") {
       c.sel = g_check_updates ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") {
+      c.sel = g_camera_patch ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@skipgpu") {
@@ -1217,6 +1226,7 @@ void SaveSettings() {
     std::ofstream ini(IniPath().c_str(), std::ios::binary | std::ios::trunc);
     bool fps_on = false, fast_on = false, full_on = true, unlock_on = false;
     for (const auto& c : g_c) {
+      if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") g_camera_patch = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@full") full_on = c.sel != 0;
@@ -1231,6 +1241,7 @@ void SaveSettings() {
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
+    ini << "camera_patch=" << (g_camera_patch ? 1 : 0) << "\r\n";
     ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
@@ -2096,6 +2107,14 @@ std::wstring Preflight() {
 
 std::wstring g_game_log;  // the log file of the game started last
 
+// Set on every start, including on -> off in the same launcher process.
+void SetCameraPatchEnvironment() {
+  bool on = false;
+  for (const Ctl& c : g_c)
+    if (c.patches[0] == "@camera_patch") on = c.sel != 0;
+  SetEnvironmentVariableW(L"BB_CAMERA_PATCH", on ? L"1" : L"0");
+}
+
 // Starts the game. With `process` the caller gets the game's process handle (and closes it).
 std::wstring StartGame(HANDLE* process = nullptr) {
   const std::wstring exe = GameExe();
@@ -2165,6 +2184,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
                      unlock_arg + graphics_arg + L" --stub-unresolved";
   SetEnvironmentVariableW(L"BB_MOTION_BLUR_REFERENCE", MotionBlurReference());
+  SetCameraPatchEnvironment();
   SetEnvironmentVariableW(L"BB_GPU_USER_DIR", user.c_str());
   SetEnvironmentVariableW(L"BB_PREFLIGHT_NOTE", g_preflight_note.empty() ? nullptr : std::wstring(g_preflight_note.begin(), g_preflight_note.end()).c_str());
   SetEnvironmentVariableW(L"BB_CRASH_DIR", (g_home + L"\\logs").c_str());
