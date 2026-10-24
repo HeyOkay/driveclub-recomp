@@ -104,7 +104,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       memory{Core::Memory::Instance()}, texture_cache{texture_cache_},
       memory_tracker{std::make_unique<MemoryTracker>(tracker)},
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
-      gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
+      gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Gds, "GDS Buffer"},
       memory_semaphore{instance} {
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {

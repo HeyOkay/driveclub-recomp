@@ -29,6 +29,8 @@ std::string_view BufferTypeName(MemoryType type) {
         return "Stream";
     case MemoryType::StreamRing:
         return "StreamRing";
+    case MemoryType::Gds:
+        return "Gds";
     case MemoryType::DeviceLocal:
         return "DeviceLocal";
     case MemoryType::Sparse:
@@ -105,8 +107,11 @@ void SetStreamPlacementDefault(u32 vendor_id) {
     stream_default = int(vendor_id == 0x1002 ? StreamPlacement::Device : StreamPlacement::Cached);
 }
 
+// bbport: GDS gets GPU atomics and occasional CPU reads (ReadDataFromGds reads the mapping without an
+// invalidate), so it stays in mapped coherent memory, cached as with the stream buffer's cached placement,
+// whatever the stream buffer's placement (VRAM from 1080p render on NVIDIA).
 [[nodiscard]] VkMemoryPropertyFlags MemoryUsagePreferredVmaFlags(MemoryType type) {
-    if (IsStream(type) && PlacementOf(type) == StreamPlacement::Cached) {
+    if (type == MemoryType::Gds || (IsStream(type) && PlacementOf(type) == StreamPlacement::Cached)) {
         return VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
     }
     return type != MemoryType::DeviceLocal ? VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
@@ -124,6 +129,7 @@ void SetStreamPlacementDefault(u32 vendor_id) {
         return VMA_ALLOCATION_CREATE_MAPPED_BIT |
                VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
     case MemoryType::HostCached:
+    case MemoryType::Gds:
         return VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
     case MemoryType::DeviceLocal:
     default:
@@ -142,6 +148,7 @@ void SetStreamPlacementDefault(u32 vendor_id) {
         return VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     case MemoryType::HostUncached:
     case MemoryType::HostCached:
+    case MemoryType::Gds:
         return VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
     default:
         return VMA_MEMORY_USAGE_UNKNOWN;
@@ -176,7 +183,10 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
             .flags =
                 VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT | bda_flag | MemoryUsageVmaFlags(mem_type),
             .usage = MemoryUsageVma(mem_type),
-            .requiredFlags = 0,
+            .requiredFlags = mem_type == MemoryType::Gds
+                                 ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+                                 : VkMemoryPropertyFlags(0),
             .preferredFlags = MemoryUsagePreferredVmaFlags(mem_type),
             .pool = VK_NULL_HANDLE,
             .pUserData = nullptr,
@@ -248,6 +258,8 @@ Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes
             mapped_data = std::span<u8>{std::bit_cast<u8*>(alloc_info.pMappedData), size_bytes};
         }
         is_coherent = property_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        ASSERT_MSG(mem_type != MemoryType::Gds || (!mapped_data.empty() && is_coherent),
+                   "GDS requires a coherent CPU mapping");
     }
 }
 

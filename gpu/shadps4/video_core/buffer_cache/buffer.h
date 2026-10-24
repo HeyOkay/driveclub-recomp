@@ -37,6 +37,7 @@ enum class MemoryType : u8 {
     Stream,       ///< Requests device local host visible buffer, falling back host memory.
     Sparse,       ///< Requires an unbacked sparse resident buffer.
     StreamRing,   ///< bbport: Stream memory for the constant ring, placed by BB_RING_MEMORY (buffer.cpp).
+    Gds,          ///< bbport: GDS: mapped, coherent, cached host memory; not moved with the stream buffer.
 };
 
 constexpr vk::BufferUsageFlags ReadFlags =
