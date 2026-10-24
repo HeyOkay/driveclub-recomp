@@ -1,0 +1,13 @@
+{
+  "source_pixels": [
+    2560,
+    1440
+  ],
+  "gpu_samples": 3686400,
+  "changed_primary_face_ids": 0,
+  "gain": 1,
+  "originals": "PNG 2560x1440, no resizing",
+  "comparison_preview": "Lanczos downscale from full resolution, no upscaling",
+  "road_crop": "100% 1000x600 per side",
+  "scope": "Same saved frame; isolated global sky reflection; not full game rendering or new live screenshot."
+}

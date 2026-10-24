@@ -1,0 +1,9 @@
+{
+  "samples": 57600,
+  "changed_face_ids": 0,
+  "source": "rain_20261024_094652_595, main-frame depth/normal/material/camera and global environment cubemap",
+  "comparison": "Same saved inputs sampled on GPU through 2DArray and native CubeArray, actual production coordinate helper. Not a second live game capture.",
+  "scope": "Global fallback specular contribution; local probe lighting, SSR composition and full tonemapping not simulated.",
+  "display": "Identical x8 gain and Reinhard/sRGB transform for both contributions; no per-image normalization.",
+  "weather": "No weather-dependent gating in the fix. Only Light confirmed improved by user."
+}
