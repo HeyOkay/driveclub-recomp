@@ -85,12 +85,15 @@ render callback intervals; they are not GPU presentation timestamps.
 
 ## Startup splash
 
-Play (including auto-play) hides the main launcher and opens a separate centered
+Play (including auto-play) and Benchmark hide the main launcher and open a separate centered
 960 x 600 loading window with the existing startup artwork and animation. File
 preparation retains its real progress; runtime initialization shows an animated
 spinner without a fabricated percentage. Creating the game window does not dismiss
 the splash. It fades away after the first successfully submitted game presentation,
-then gives focus to the game. Benchmarks retain their existing in-window progress.
+then gives focus to the game. During a benchmark the launcher stays hidden,
+stops its loading animation, and returns with results when the game exits. The
+benchmark child PID is delivered through progress while its backend keeps waiting
+for completion.
 
 The WPF shell creates a unique manual-reset event named
 `Local\DriveClub.FirstFrame.<32 hex digits>` before starting the backend. Its name
@@ -114,7 +117,9 @@ C:\path\to\launcher_ready_test.exe
 
 `DriveClub.exe --preview --capture ABSOLUTE_PATH --capture-splash --exit` also
 exports `launch-splash.png` and checks that a separate window hides/restores the
-launcher without starting a game.
+launcher without starting a game. Add `--capture-benchmark-splash` to exercise
+the Benchmark preview path. `DriveClub.exe --benchmark` opens the Benchmark page
+and starts the configured run; it does not select or overwrite a performance preset.
 
 ## First-run setup
 

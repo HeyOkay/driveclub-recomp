@@ -2396,6 +2396,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     return L"Could not start the game.";
   }
   g_started_game_process_id = pi.dwProcessId;
+  WriteExternalProgress(100, L"Loading DRIVECLUB...");
   CloseHandle(pi.hThread);
   if (process) *process = pi.hProcess;
   else CloseHandle(pi.hProcess);

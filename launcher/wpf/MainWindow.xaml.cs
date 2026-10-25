@@ -137,6 +137,7 @@ public partial class MainWindow : Window
                 if (Environment.GetCommandLineArgs().Contains("--mod-manager")) ShowPage(ModsPage, false);
                 if (capture) await CapturePages();
                 else if (perf) await MeasureAnimations();
+                else if (!preview && Environment.GetCommandLineArgs().Contains("--benchmark")) { ShowPage(6, false); await Launch(true); }
                 else if (!preview && File.Exists(Path.Combine(root, "launcher.ini")) && File.ReadLines(Path.Combine(root, "launcher.ini")).Any(x => x.Trim() == "auto_play=1")) await Launch(false);
                 if (!preview && !capture && !perf && !busy) _ = CheckForUpdates();
             }
@@ -789,6 +790,11 @@ public partial class MainWindow : Window
         }
         catch (ArgumentException) { } catch (InvalidOperationException) { }
     }
+    private void StopLoadingAnimation()
+    {
+        spinnerTimer?.Stop();
+        ((RotateTransform)Spinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty, null);
+    }
     private async Task Launch(bool benchmark)
     {
         if (busy) return;
@@ -797,9 +803,10 @@ public partial class MainWindow : Window
         BusyOverlay.Visibility = Visibility.Visible;
         Progress.IsIndeterminate = false; Progress.Value = 0; PercentText.Text = "0%";
         ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game files...";
+        Task<LauncherState>? operation = null;
         try
         {
-            if (!benchmark) OpenLaunchSplash();
+            OpenLaunchSplash();
             StartLoadingAnimation();
             if (preview)
             {
@@ -808,36 +815,70 @@ public partial class MainWindow : Window
             }
             else
             {
-                if (!benchmark) launchSession = new LaunchSession();
-                var progress = new Progress<(int Percent, string Text)>(p =>
-                { Progress.Value = p.Percent; PercentText.Text = p.Percent + "%"; ProgressText.Text = p.Text; });
-                Adopt(await backend.Call(benchmark ? "benchmark" : "run", state, progress, launchSession?.EventName));
-                if (!benchmark)
+                launchSession = new LaunchSession();
+                var started = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var gameStarted = new Progress<int>(pid =>
                 {
+                    launchedGameId = pid;
+                    Progress.IsIndeterminate = true; PercentText.Text = "";
+                    ProgressText.Text = state.StartupSignalSupported ? "Loading DRIVECLUB..." : "DRIVECLUB is starting. Switch to its window when ready.";
+                    if (switchToGame != null) switchToGame.Visibility = Visibility.Visible;
+                    started.TrySetResult(pid);
+                });
+                var progress = new Progress<(int Percent, string Text)>(p =>
+                {
+                    if (launchedGameId == 0) { Progress.Value = p.Percent; PercentText.Text = p.Percent + "%"; ProgressText.Text = p.Text; }
+                });
+                operation = backend.Call(benchmark ? "benchmark" : "run", state, progress, launchSession.EventName, gameStarted);
+                if (benchmark)
+                {
+                    // The benchmark backend stays alive until the run finishes. Read its child PID
+                    // from progress, so waiting for that backend cannot keep the splash over the race.
+                    if (await Task.WhenAny(operation, started.Task) == started.Task)
+                    {
+                        using var stopWaiting = new CancellationTokenSource();
+                        var handoff = launchSession.WaitForFrameAsync(await started.Task, TimeSpan.FromMinutes(3), stopWaiting.Token);
+                        if (await Task.WhenAny(operation, handoff) == handoff)
+                        {
+                            await handoff;
+                            await FadeLaunchSplash(); CloseLaunchSplash(); StopLoadingAnimation();
+                            FocusLaunchedGame(launchedGameId);
+                        }
+                        else
+                        {
+                            stopWaiting.Cancel();
+                            try { await handoff; } catch (OperationCanceledException) { } catch (IOException) { }
+                        }
+                    }
+                    Adopt(await operation);
+                    CloseLaunchSplash(); Show(); Activate(); SetStatus("Benchmark complete.");
+                }
+                else
+                {
+                    Adopt(await operation);
                     launchedGameId = state.GameProcessId;
                     if (launchedGameId <= 0) throw new IOException("The launcher backend did not return the game process. Update the complete launcher package.");
                     Progress.IsIndeterminate = true; PercentText.Text = "";
                     ProgressText.Text = state.StartupSignalSupported ? "Loading DRIVECLUB..." : "DRIVECLUB is starting. Switch to its window when ready.";
                     if (switchToGame != null) switchToGame.Visibility = Visibility.Visible;
-                    await launchSession!.WaitForFrameAsync(launchedGameId, TimeSpan.FromMinutes(3));
-                    await FadeLaunchSplash();
-                    CloseLaunchSplash();
+                    await launchSession.WaitForFrameAsync(launchedGameId, TimeSpan.FromMinutes(3));
+                    await FadeLaunchSplash(); CloseLaunchSplash();
                     FocusLaunchedGame(launchedGameId);
                     allowClose = true; Close(); return;
                 }
-                SetStatus("Benchmark complete.");
             }
         }
         catch (Exception ex)
         {
-            CloseLaunchSplash(); Show(); Activate(); SetStatus(ex.Message, true);
+            CloseLaunchSplash(); StopLoadingAnimation(); BusyOverlay.Visibility = Visibility.Collapsed;
+            Show(); Activate(); SetStatus(ex.Message, true);
+            // Keep the IPC operation owned/observed; a timeout never kills an active benchmark.
+            if (operation != null && !operation.IsCompleted) try { await operation; } catch (Exception) { }
         }
         finally
         {
             launchSession?.Dispose(); launchSession = null;
-            CloseLaunchSplash();
-            spinnerTimer?.Stop();
-            ((RotateTransform)Spinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty, null);
+            CloseLaunchSplash(); StopLoadingAnimation();
             BusyOverlay.Visibility = Visibility.Collapsed; Progress.IsIndeterminate = false;
             busy = false; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = true;
         }
@@ -1125,7 +1166,7 @@ public partial class MainWindow : Window
         }
         if (args.Contains("--capture-splash"))
         {
-            var previewLaunch = Launch(false);
+            var previewLaunch = Launch(args.Contains("--capture-benchmark-splash"));
             await Task.Delay(700);
             if (launchSplash == null || !launchSplash.IsVisible || IsVisible)
                 throw new InvalidOperationException("The loading view is not a separate visible splash.");

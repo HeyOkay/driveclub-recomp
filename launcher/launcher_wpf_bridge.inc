@@ -7,7 +7,7 @@ void WriteJsonFile(const std::wstring& path, const Json& value) {
 }
 void WriteExternalProgress(int percent,const std::wstring& text) {
   if(g_external_progress.empty())return;
-  try{WriteJsonFile(g_external_progress,{{"Percent",percent},{"Text",Narrow(text)}});}catch(...){}
+  try{WriteJsonFile(g_external_progress,{{"Percent",percent},{"Text",Narrow(text)},{"GameProcessId",g_started_game_process_id}});}catch(...){}
 }
 // Cache both optional startup features in one streaming pass per backend process.
 struct RuntimeFeatures { bool camera=false; bool startup=false; };

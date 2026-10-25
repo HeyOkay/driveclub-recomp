@@ -62,7 +62,7 @@ public sealed class Backend
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
-    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null, string? launchReadyEvent = null)
+    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null, string? launchReadyEvent = null, IProgress<int>? gameStarted = null)
     {
         await gate.WaitAsync();
         string folder = Path.Combine(AppContext.BaseDirectory, "data", "ui");
@@ -79,11 +79,18 @@ public sealed class Backend
             start.ArgumentList.Add(output);
             using var process = Process.Start(start) ?? throw new IOException("The native backend could not be started.");
             var completion = process.WaitForExitAsync();
+            int reportedGameId = 0;
             while (!completion.IsCompleted)
             {
                 if (progress != null && File.Exists(output + ".progress"))
                 {
-                    try { using var json = JsonDocument.Parse(await File.ReadAllTextAsync(output + ".progress")); progress.Report((json.RootElement.GetProperty("Percent").GetInt32(), json.RootElement.GetProperty("Text").GetString() ?? "")); }
+                    try
+                    {
+                        using var json = JsonDocument.Parse(await File.ReadAllTextAsync(output + ".progress"));
+                        progress.Report((json.RootElement.GetProperty("Percent").GetInt32(), json.RootElement.GetProperty("Text").GetString() ?? ""));
+                        if (json.RootElement.TryGetProperty("GameProcessId", out var pid) && pid.GetInt32() > 0 && pid.GetInt32() != reportedGameId)
+                        { reportedGameId = pid.GetInt32(); gameStarted?.Report(reportedGameId); }
+                    }
                     catch (IOException) { } catch (JsonException) { }
                 }
                 await Task.WhenAny(completion, Task.Delay(100));

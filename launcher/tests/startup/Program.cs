@@ -50,6 +50,17 @@ async Task Scenario(string mode)
     finally { if (!process.HasExited) { process.Kill(); await process.WaitForExitAsync(); } }
 }
 foreach (var mode in new[] {"ready","manual","timeout","crash"}) await Scenario(mode);
+using (var session = new LaunchSession())
+using (var current = Process.GetCurrentProcess())
+using (var cancellation = new CancellationTokenSource())
+{
+    var waiting = session.WaitForFrameAsync(current.Id, TimeSpan.FromSeconds(5), cancellation.Token);
+    cancellation.Cancel();
+    try { await waiting; throw new Exception("cancellation not detected"); }
+    catch (OperationCanceledException) { Check(true, "benchmark completion can cancel its outstanding splash wait"); }
+    Check(!current.HasExited, "cancelling the splash wait does not terminate the process");
+}
+
 using (var first = new LaunchSession())
 using (var second = new LaunchSession())
 {
