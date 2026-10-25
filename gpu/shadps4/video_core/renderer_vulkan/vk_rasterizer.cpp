@@ -144,7 +144,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
                                                   *camera_motion, *scene_targets);
     g_drive_motion = &upscaler->GetDriveMotion();
     drive_aa = std::make_unique<DriveAA>(instance, scheduler, texture_cache, runtime,
-                                         upscaler->GetDriveMotion());
+                                         upscaler->GetDriveMotion(), *camera_motion);
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -362,7 +362,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     // bbport: the G-buffer pass (5+ color targets) holds the scene depth, and its constants the
     // main camera (shadow passes bind the same layout with the light's camera).
-    gbuffer_draw = camera_motion->Enabled() && std::popcount(key.mrt_mask) >= 5 && db_desc.first;
+    // DriveClub's scene G-buffer has three color targets. Ignore the optional motion output
+    // at slot 7 when identifying those guest targets.
+    const u32 guest_color_targets = std::popcount(key.mrt_mask & 0x7f);
+    gbuffer_draw = camera_motion->Enabled() && guest_color_targets >= 3 && db_desc.first;
     // HDR output: a 3D scene is drawn in this frame (its G-buffer: three or more targets and depth).
     if (std::popcount(key.mrt_mask) >= 3 && db_desc.first &&
         BbSettings::Get().hdr_output.load(std::memory_order_relaxed)) {
@@ -380,7 +383,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     // Frame generation: the G-buffer pass (three color targets and a depth target) holds the scene depth.
     if ((BbSettings::Get().frame_gen != BbSettings::FrameGenOff || drive_aa->Active()) &&
-        std::popcount(key.mrt_mask) == 3 &&
+        guest_color_targets == 3 &&
         db_desc.first && cb_descs[0].first) {
         // The biggest one of the frame: the mirror and reflection probe scenes use the same layout.
         const auto& size = texture_cache.GetImage(db_desc.first).info.size;
@@ -1297,7 +1300,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     } else {
         fg_in_display = false;
     }
-    if (display_draw) {
+    // Several draws target the display buffer in one game frame (scene composite, then UI).
+    // Advance temporal state only once, at the first display draw that closes the scene.
+    const bool frame_display = display_draw && fg_display_draws == 1;
+    if (frame_display) {
         // The frame counter also drives the mirror update rate: it must not depend on the upscaler.
         NoteFrameStart();
         drive_aa->NextFrame();
@@ -1308,8 +1314,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 object_motion->InvalidateHistory();
                 camera_motion->InvalidateHistory();
             }
-            camera_motion->SetJitter(upscaler->Jitter());
-            object_motion->OnFrameStart();
+            camera_motion->SetJitter(upscaler->Enabled() ? upscaler->Jitter() : drive_aa->Jitter());
             static const char* scene_debug = BB_DIAGNOSTIC_ENV("BB_SCENE_DEBUG");
             scene_debug_frame = scene_debug && std::remove(scene_debug) == 0;
             scene_targets->debug = scene_debug_frame;
