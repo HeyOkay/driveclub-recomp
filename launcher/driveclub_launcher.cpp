@@ -55,6 +55,20 @@ const Color kBg(255, 16, 18, 22), kCard(255, 24, 27, 33), kCardLine(255, 38, 42,
     kAccentHover(255, 240, 84, 58), kOff(255, 63, 69, 82), kWhite(255, 245, 246, 248), kOk(255, 90, 200, 120),
     kWarn(255, 240, 170, 60), kBad(255, 240, 96, 84);
 
+// The launcher's font: Segoe UI where there is one. Under Wine and Proton there often is not, and GDI+ then draws no text at
+// all, so the first of the others that exists is used.
+const FontFamily* UiFamily() {
+  static const FontFamily* family = []() -> const FontFamily* {
+    for (const wchar_t* name : {L"Segoe UI", L"Tahoma", L"Arial", L"Liberation Sans", L"DejaVu Sans", L"Verdana"}) {
+      auto* candidate = new FontFamily(name);
+      if (candidate->IsAvailable()) return candidate;
+      delete candidate;
+    }
+    return FontFamily::GenericSansSerif();
+  }();
+  return family;
+}
+
 constexpr float kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 96.f, kPad = 22.f, kTitleH = 44.f;
 constexpr float kTabH = 46.f;  // the row of tabs under the header: one group of cards at a time
 constexpr float kWinW = 960.f;
@@ -1554,7 +1568,7 @@ void RowLabel(Graphics& g, Ctl& c, int i, const Font& f, const RectF& r) {
   const bool hot = g_hover_info == i || g_info_open == i;
   Pen pen(hot ? kWhite : kMuted, 1.2f * S);
   g.DrawEllipse(&pen, c.info);
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   Font fi(&fam, 10.5f * S, FontStyleBold, UnitPixel);
   Text(g, L"i", fi, RectF(c.info.X, c.info.Y + 0.5f * S, c.info.Width, c.info.Height), hot ? kWhite : kMuted, StringAlignmentCenter);
 }
@@ -1562,7 +1576,7 @@ void RowLabel(Graphics& g, Ctl& c, int i, const Font& f, const RectF& r) {
 // A rounded panel of wrapped text at (x, y) at most `width` wide, kept inside the window; returns its rectangle.
 RectF TextPanel(Graphics& g, const std::wstring& title, const std::wstring& body, float x, float y, float width, int w, int h, bool above) {
   const float S = g_scale, pad = 14 * S;
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   Font ft(&fam, 14 * S, FontStyleBold, UnitPixel), fb(&fam, 13 * S, FontStyleRegular, UnitPixel);
   StringFormat mf;
   RectF tb{}, bb{};
@@ -1607,7 +1621,7 @@ void Paint(HDC hdc, int w, int h) {
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
   g.Clear(kBg);
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   const float S = g_scale;
   g_oy = ContentOy();
   for (auto& c : g_c) c.info = RectF();  // set again for the rows drawn below
@@ -2943,7 +2957,31 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
       if (g_busy) return 0;
       if (HitDiscord(x, y)) {
-        ShellExecuteW(h, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL);
+        // Where no browser can be opened the link goes to the clipboard. Under Wine and Proton ShellExecute reports success even
+        // when xdg-open is missing and nothing opens, so there the link is copied and shown every time.
+        const bool opened = reinterpret_cast<INT_PTR>(ShellExecuteW(h, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+        const bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+        if (!opened || wine) {
+          bool copied = false;
+          if (OpenClipboard(h)) {
+            const size_t bytes = (wcslen(kDiscordUrl) + 1) * sizeof(wchar_t);
+            if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+              if (void* p = GlobalLock(mem)) {
+                memcpy(p, kDiscordUrl, bytes);
+                GlobalUnlock(mem);
+                EmptyClipboard();
+                copied = SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+              }
+              if (!copied) GlobalFree(mem);
+            }
+            CloseClipboard();
+          }
+          const wchar_t* lead = opened ? L"Discord opens in your browser. The link is also " : L"The browser could not be opened. The link is ";
+          g_status = std::wstring(lead) + (copied ? L"copied: " : L"here: ") + kDiscordUrl;
+          g_status_color = copied || opened ? kOk : kWarn;
+          g_status_sticky = true;
+          InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
       }
       CommitName();
