@@ -6,6 +6,7 @@
 #include <psapi.h>
 #endif
 #include "bbport_frame_info.h"
+#include "bbport_launch_ready.h"
 #include "bbport_frametrace.h"
 #include "common/debug.h"
 #include "common/elf_info.h"
@@ -1018,7 +1019,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         wait_until(start + step * shown);
     }
     const auto presented_generated = std::chrono::steady_clock::now();
-    if (!PresentImage(frame, frame->image, true)) {
+    if (!PresentImage(frame, frame->image, true, is_game_frame && !is_reusing_frame)) {
         if (shown) {
             // The frame's fence was not reset and so does not cover the generated frames'
             // blits: they must be done before the frame is drawn again.
@@ -1221,7 +1222,7 @@ void Presenter::UpdateFrameGenLimit(bool wanted, double present_ms) {
     settings.frame_gen_display_hz = int(hz);
 }
 
-bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
+bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last, bool notify_launcher) {
     if (!swapchain.AcquireNextImage()) {
         swapchain.Recreate(window.GetWidth(), window.GetHeight());
         if (!swapchain.AcquireNextImage()) {
@@ -1372,7 +1373,11 @@ bool Presenter::PresentImage(Frame* frame, vk::Image image, bool last) {
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        const bool presented = swapchain.Present();
+        if (presented && notify_launcher) {
+            BbLauncherReady::GameFramePresented(true, false);
+        }
+        if (!presented && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }

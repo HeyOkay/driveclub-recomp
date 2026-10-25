@@ -1983,6 +1983,7 @@ std::wstring GameExe() {
   return Exists(bundled) ? bundled : g_home + L"\\..\\DriveClubGame.exe";
 }
 
+DWORD g_started_game_process_id = 0;
 std::wstring g_external_progress;
 void WriteExternalProgress(int percent, const std::wstring& text);
 void SetProgress(int percent, const std::wstring& text) {
@@ -2394,6 +2395,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     LauncherLog("CreateProcess failed, error " + std::to_string(GetLastError()));
     return L"Could not start the game.";
   }
+  g_started_game_process_id = pi.dwProcessId;
   CloseHandle(pi.hThread);
   if (process) *process = pi.hProcess;
   else CloseHandle(pi.hProcess);

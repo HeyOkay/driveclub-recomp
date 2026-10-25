@@ -38,6 +38,7 @@ public sealed class CardModel
 public sealed class LauncherState
 {
     public int Version { get; set; }
+    public int GameProcessId { get; set; }
     public int ChangedId { get; set; } = -1;
     public int ResetPage { get; set; } = -2;
     public int ResetSubpage { get; set; } = -1;
@@ -49,6 +50,7 @@ public sealed class LauncherState
     public string FolderProblem { get; set; } = "";
     public string HardwareProblem { get; set; } = "";
     public bool RuntimeAvailable { get; set; }
+    public bool StartupSignalSupported { get; set; }
     public List<int> QuickControls { get; set; } = [];
     public int PresetId { get; set; }
     public string Error { get; set; } = "";
@@ -60,7 +62,7 @@ public sealed class Backend
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
-    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null)
+    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null, string? launchReadyEvent = null)
     {
         await gate.WaitAsync();
         string folder = Path.Combine(AppContext.BaseDirectory, "data", "ui");
@@ -70,6 +72,8 @@ public sealed class Backend
         {
             var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "DriveClub.Backend.exe"))
             { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = AppContext.BaseDirectory };
+            // Scope the event name to this backend/game process tree, never the user's environment.
+            if (launchReadyEvent != null) start.Environment["BB_LAUNCH_READY_EVENT"] = launchReadyEvent;
             start.ArgumentList.Add("--ui-" + action);
             if (request != null) { await File.WriteAllTextAsync(input, JsonSerializer.Serialize(request, JsonOptions)); start.ArgumentList.Add(input); }
             start.ArgumentList.Add(output);

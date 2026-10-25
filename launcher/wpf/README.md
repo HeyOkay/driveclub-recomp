@@ -2,7 +2,8 @@
 
 Windows .NET 8 WPF shell over the native launcher backend. `DriveClub.exe` is the
 shell; `DriveClub.Backend.exe` owns settings, patch selection, game preparation,
-launch and benchmarks. This change does not replace game or renderer logic.
+launch and benchmarks. A one-shot runtime notification coordinates the splash
+handoff; rendering algorithms and game logic are unchanged.
 
 ## Settings
 
@@ -81,6 +82,39 @@ editable in this executable's own directory. `--preview --capture ABSOLUTE_PATH
 --exit` exports actual WPF pages, full settings canvases and layout diagnostics.
 `--compact` and `--maximized` exercise window bounds. `--perf --exit` reports WPF
 render callback intervals; they are not GPU presentation timestamps.
+
+## Startup splash
+
+Play (including auto-play) hides the main launcher and opens a separate centered
+960 x 600 loading window with the existing startup artwork and animation. File
+preparation retains its real progress; runtime initialization shows an animated
+spinner without a fabricated percentage. Creating the game window does not dismiss
+the splash. It fades away after the first successfully submitted game presentation,
+then gives focus to the game. Benchmarks retain their existing in-window progress.
+
+The WPF shell creates a unique manual-reset event named
+`Local\DriveClub.FirstFrame.<32 hex digits>` before starting the backend. Its name
+is passed through `BB_LAUNCH_READY_EVENT` only to the backend/game process tree.
+The backend returns the child PID. The normal runtime signals once after a
+successful real (not generated/reused) game presentation; no captures or GPU
+readbacks are involved. The launcher detects support from the runtime marker.
+
+A **Switch to game** button permits manual handoff, including with older runtimes
+without the notification. Early process exit restores the launcher with an error.
+A three-minute safety timeout also restores the launcher and leaves the game
+running. Neither path terminates the user's game or changes saved preferences.
+
+Startup lifecycle checks (real named events and child processes):
+
+```powershell
+dotnet run --project launcher/tests/startup/Startup.Tests.csproj -c Release
+clang++ -std=c++20 tools/launcher_ready_test.cpp -o C:\path\to\launcher_ready_test.exe
+C:\path\to\launcher_ready_test.exe
+```
+
+`DriveClub.exe --preview --capture ABSOLUTE_PATH --capture-splash --exit` also
+exports `launch-splash.png` and checks that a separate window hides/restores the
+launcher without starting a game.
 
 ## First-run setup
 

@@ -9,22 +9,32 @@ void WriteExternalProgress(int percent,const std::wstring& text) {
   if(g_external_progress.empty())return;
   try{WriteJsonFile(g_external_progress,{{"Percent",percent},{"Text",Narrow(text)}});}catch(...){}
 }
-// Capability check for the optional camera runtime; no game process is started.
-bool CameraPatchAvailable() {
-  static const bool available=[] {
+// Cache both optional startup features in one streaming pass per backend process.
+struct RuntimeFeatures { bool camera=false; bool startup=false; };
+const RuntimeFeatures& GetRuntimeFeatures() {
+  static const RuntimeFeatures features=[] {
+    RuntimeFeatures result;
     std::ifstream file(GameExe().c_str(),std::ios::binary);
-    const std::string marker="CameraPatch: experimental high-FPS camera/replay workaround enabled";
-    std::string buffer(65536+marker.size(), '\0'); size_t keep=0;
+    const std::string camera="CameraPatch: experimental high-FPS camera/replay workaround enabled";
+    const std::string startup="LauncherReady: first game frame submitted";
+    const size_t overlap=(std::max)(camera.size(),startup.size())-1;
+    std::string buffer(65536+overlap, '\0'); size_t keep=0;
     while(file) {
       file.read(buffer.data()+keep,65536); const size_t count=keep+size_t(file.gcount());
-      if(std::search(buffer.begin(),buffer.begin()+count,marker.begin(),marker.end())!=buffer.begin()+count) return true;
-      keep=(std::min)(count,marker.size()-1);
+      const auto contains=[&](const std::string& marker) {
+        return std::search(buffer.begin(),buffer.begin()+count,marker.begin(),marker.end())!=buffer.begin()+count;
+      };
+      result.camera=result.camera || contains(camera);
+      result.startup=result.startup || contains(startup);
+      if(result.camera && result.startup)break;
+      keep=(std::min)(count,overlap);
       std::memmove(buffer.data(),buffer.data()+count-keep,keep);
     }
-    return false;
+    return result;
   }();
-  return available;
+  return features;
 }
+bool CameraPatchAvailable() { return GetRuntimeFeatures().camera; }
 Json UiState(const std::wstring& error=L"") {
   Json controls=Json::array(),cards=Json::array();
   for(size_t i=0;i<g_c.size();++i){
@@ -45,9 +55,9 @@ Json UiState(const std::wstring& error=L"") {
       {"Controls",c.ctls},{"Note",c.note?Narrow(c.note):""}});
   }
 
-  return {{"Version",2},{"Controls",controls},{"Cards",cards},{"UpdatePath",Narrow(g_folder[0].path)},{"BasePath",Narrow(g_folder[1].path)},
+  return {{"Version",3},{"GameProcessId",g_started_game_process_id},{"Controls",controls},{"Cards",cards},{"UpdatePath",Narrow(g_folder[0].path)},{"BasePath",Narrow(g_folder[1].path)},
     {"FoldersOk",FoldersOk()},{"FolderProblem",Narrow(!FolderProblem(0).empty()?FolderProblem(0):FolderProblem(1))},
-    {"HardwareProblem",Narrow(g_gpu_problem)},{"RuntimeAvailable",Exists(GameExe())},{"Error",Narrow(error)},
+    {"HardwareProblem",Narrow(g_gpu_problem)},{"RuntimeAvailable",Exists(GameExe())},{"StartupSignalSupported",GetRuntimeFeatures().startup},{"Error",Narrow(error)},
     {"QuickControls",{g_preset,g_fps,g_outres,g_aa}},{"PresetId",g_preset},
     {"BenchmarkFps",Narrow(g_bench_result.fps)},{"BenchmarkLows",Narrow(g_bench_result.lows)},{"BenchmarkAbout",Narrow(g_bench_result.about)}};
 }

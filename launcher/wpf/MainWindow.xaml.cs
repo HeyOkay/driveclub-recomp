@@ -40,6 +40,12 @@ public partial class MainWindow : Window
     private int currentPage, revision;
     private int navigationSelection = -1;
     private bool suppress, busy, allowClose;
+    private Window? launchSplash;
+    private Panel? busyOverlayParent;
+    private Button? switchToGame;
+    private bool mayCloseSplash;
+    private int launchedGameId;
+    private LaunchSession? launchSession;
     private string baseStatus = "Loading your settings...";
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
     private readonly bool capture = Environment.GetCommandLineArgs().Contains("--capture");
@@ -711,26 +717,130 @@ public partial class MainWindow : Window
     private void MinimizeClick(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
     private void MaximizeClick(object sender, RoutedEventArgs e) { if (WindowState == WindowState.Maximized) SystemCommands.RestoreWindow(this); else SystemCommands.MaximizeWindow(this); }
     private void CloseClick(object sender, RoutedEventArgs e) => Close();
+    private void OpenLaunchSplash()
+    {
+        busyOverlayParent = (Panel)BusyOverlay.Parent;
+        busyOverlayParent.Children.Remove(BusyOverlay);
+        double width = Math.Min(960, ActualWidth), height = Math.Min(600, ActualHeight);
+        mayCloseSplash = false;
+        launchSplash = new Window
+        {
+            Title = "DRIVECLUB - Loading", Icon = Icon, Width = width, Height = height,
+            Left = Left + (ActualWidth - width) / 2, Top = Top + (ActualHeight - height) / 2,
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize,
+            Background = Brush("#101014"), Topmost = true, ShowInTaskbar = true,
+            FontFamily = FontFamily, UseLayoutRounding = true, SnapsToDevicePixels = true,
+            Content = BusyOverlay
+        };
+        switchToGame = new Button
+        {
+            Content = "Switch to game", Style = (Style)FindResource("FieldButton"),
+            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(24), Padding = new Thickness(16, 0, 16, 0),
+            Height = 36, FontSize = 12, Visibility = Visibility.Collapsed
+        };
+        switchToGame.Click += (_, _) => launchSession?.SwitchToGame();
+        BusyOverlay.Children.Add(switchToGame);
+        launchSplash.Closing += (_, e) =>
+        {
+            if (mayCloseSplash) return;
+            e.Cancel = true;
+            if (launchedGameId > 0) launchSession?.SwitchToGame();
+        };
+        Hide();
+        launchSplash.Show();
+        launchSplash.UpdateLayout();
+    }
+    private void CloseLaunchSplash()
+    {
+        if (launchSplash == null) return;
+        mayCloseSplash = true;
+        launchSplash.Content = null;
+        launchSplash.Close();
+        launchSplash = null;
+        if (switchToGame != null) BusyOverlay.Children.Remove(switchToGame);
+        switchToGame = null;
+        busyOverlayParent?.Children.Add(BusyOverlay);
+        busyOverlayParent = null;
+    }
+    private async Task FadeLaunchSplash()
+    {
+        if (launchSplash == null) return;
+        var finished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(160));
+        fade.Completed += (_, _) => finished.TrySetResult(true);
+        launchSplash.BeginAnimation(OpacityProperty, fade);
+        await finished.Task;
+    }
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern bool AllowSetForegroundWindow(uint processId);
+    private static void FocusLaunchedGame(int processId)
+    {
+        try
+        {
+            using var game = Process.GetProcessById(processId);
+            game.Refresh();
+            if (!game.HasExited && game.MainWindowHandle != IntPtr.Zero)
+            {
+                AllowSetForegroundWindow((uint)processId);
+                SetForegroundWindow(game.MainWindowHandle);
+            }
+        }
+        catch (ArgumentException) { } catch (InvalidOperationException) { }
+    }
     private async Task Launch(bool benchmark)
     {
         if (busy) return;
         busy = true; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = false;
-        BusyOverlay.Visibility = Visibility.Visible; Progress.Value = 0; PercentText.Text = "0%"; ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game files...";
-        StartLoadingAnimation();
+        launchedGameId = 0;
+        BusyOverlay.Visibility = Visibility.Visible;
+        Progress.IsIndeterminate = false; Progress.Value = 0; PercentText.Text = "0%";
+        ProgressText.Text = preview ? "Interface preview. No game is being prepared or launched." : "Preparing your game files...";
         try
         {
-            if (preview) { for (int i = 0; i <= 100; i += 5) { await Task.Delay(160); Progress.Value = i; PercentText.Text = i + "%"; } SetStatus("Preview finished. No game was started."); }
+            if (!benchmark) OpenLaunchSplash();
+            StartLoadingAnimation();
+            if (preview)
+            {
+                for (int i = 0; i <= 100; i += 5) { await Task.Delay(160); Progress.Value = i; PercentText.Text = i + "%"; }
+                CloseLaunchSplash(); Show(); Activate(); SetStatus("Preview finished. No game was started.");
+            }
             else
             {
-                var progress = new Progress<(int Percent, string Text)>(p => { Progress.Value = p.Percent; PercentText.Text = p.Percent + "%"; ProgressText.Text = p.Text; });
-                Adopt(await backend.Call(benchmark ? "benchmark" : "run", state, progress));
-
-                if (!benchmark) { allowClose = true; Close(); return; }
+                if (!benchmark) launchSession = new LaunchSession();
+                var progress = new Progress<(int Percent, string Text)>(p =>
+                { Progress.Value = p.Percent; PercentText.Text = p.Percent + "%"; ProgressText.Text = p.Text; });
+                Adopt(await backend.Call(benchmark ? "benchmark" : "run", state, progress, launchSession?.EventName));
+                if (!benchmark)
+                {
+                    launchedGameId = state.GameProcessId;
+                    if (launchedGameId <= 0) throw new IOException("The launcher backend did not return the game process. Update the complete launcher package.");
+                    Progress.IsIndeterminate = true; PercentText.Text = "";
+                    ProgressText.Text = state.StartupSignalSupported ? "Loading DRIVECLUB..." : "DRIVECLUB is starting. Switch to its window when ready.";
+                    if (switchToGame != null) switchToGame.Visibility = Visibility.Visible;
+                    await launchSession!.WaitForFrameAsync(launchedGameId, TimeSpan.FromMinutes(3));
+                    await FadeLaunchSplash();
+                    CloseLaunchSplash();
+                    FocusLaunchedGame(launchedGameId);
+                    allowClose = true; Close(); return;
+                }
                 SetStatus("Benchmark complete.");
             }
         }
-        catch (Exception ex) { SetStatus(ex.Message, true); }
-        finally { spinnerTimer?.Stop(); ((RotateTransform)Spinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty, null); BusyOverlay.Visibility = Visibility.Collapsed; busy = false; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = true; }
+        catch (Exception ex)
+        {
+            CloseLaunchSplash(); Show(); Activate(); SetStatus(ex.Message, true);
+        }
+        finally
+        {
+            launchSession?.Dispose(); launchSession = null;
+            CloseLaunchSplash();
+            spinnerTimer?.Stop();
+            ((RotateTransform)Spinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty, null);
+            BusyOverlay.Visibility = Visibility.Collapsed; Progress.IsIndeterminate = false;
+            busy = false; CloseButton.IsEnabled = SaveButton.IsEnabled = ResetButton.IsEnabled = true;
+        }
     }
     private Storyboard StartLoadingAnimation()
     {
@@ -1012,6 +1122,22 @@ public partial class MainWindow : Window
                 await Task.Delay(1050); SaveVisual(Path.Combine(directory, "loading.png"));
             }
             spinnerTimer?.Stop(); BusyOverlay.Visibility = Visibility.Collapsed;
+        }
+        if (args.Contains("--capture-splash"))
+        {
+            var previewLaunch = Launch(false);
+            await Task.Delay(700);
+            if (launchSplash == null || !launchSplash.IsVisible || IsVisible)
+                throw new InvalidOperationException("The loading view is not a separate visible splash.");
+            SaveVisual(Path.Combine(directory, "launch-splash.png"), BusyOverlay);
+            var splashInfo = new { Title = launchSplash.Title, launchSplash.Topmost,
+                launchSplash.ShowInTaskbar, Width = launchSplash.ActualWidth,
+                Height = launchSplash.ActualHeight, MainHidden = !IsVisible };
+            await previewLaunch;
+            if (launchSplash != null || !IsVisible || busy)
+                throw new InvalidOperationException("Preview splash did not restore the launcher.");
+            File.WriteAllText(Path.Combine(directory, "launch-splash.json"),
+                JsonSerializer.Serialize(new { Splash = splashInfo, Restored = true, GameStarted = false }, Backend.JsonOptions));
         }
         if (args.Contains("--exit")) { allowClose = true; Close(); }
     }
