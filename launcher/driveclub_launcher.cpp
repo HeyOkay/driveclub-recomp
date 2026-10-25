@@ -134,6 +134,15 @@ const wchar_t* const kTabHint[kTabCount] = {
     L"Drive one circuit on its own and get back the frame rate and the 1% and 0.1% lows."};
 int g_tab = kTabGraphics;
 RectF g_tab_rect[kTabCount];
+// The Discord button in the header: where it was drawn (layout pixels, before scaling), and whether the pointer is on it.
+RectF g_discord_rect;
+bool g_hover_discord = false;
+const wchar_t* const kDiscordUrl = L"https://discord.gg/62b8jceumR";
+bool HitDiscord(float x, float y) {
+  const float m = 2.f * g_scale;
+  return g_discord_rect.Width > 0 && x >= g_discord_rect.X * g_scale - m && x <= (g_discord_rect.X + g_discord_rect.Width) * g_scale + m &&
+         y >= g_discord_rect.Y * g_scale - m && y <= (g_discord_rect.Y + g_discord_rect.Height) * g_scale + m;
+}
 // The Driving tab has tabs of its own, in a smaller row under the main one (HitTab gives them as kTabCount + n).
 enum { kSubAssists, kSubWheel, kSubCount };
 const wchar_t* const kSubName[kSubCount] = {L"Assists and view", L"Wheel and force feedback"};
@@ -1627,6 +1636,33 @@ void Paint(HDC hdc, int w, int h) {
     g.FillEllipse(&dot, cr.X + 13 * S, cr.Y + 11 * S, 8 * S, 8 * S);
     Text(g, chip, fSeg, RectF(cr.X + 30 * S, cr.Y, cr.Width - 30 * S, cr.Height), chip_ok ? kOk : kWarn,
          StringAlignmentNear, StringAlignmentCenter, false, false);
+
+    // The Discord button, left of the chip: the community server.
+    g_discord_rect = RectF(g_win_w - kMargin - cw - 12.f - 30.f, 32.f, 30.f, 30.f);
+    const RectF dr = Scaled(g_discord_rect);
+    SolidBrush blurple(g_hover_discord ? Color(255, 112, 125, 255) : Color(255, 88, 101, 242));
+    g.FillEllipse(&blurple, dr);
+    // The mark: the face of the logo on a 24 x 24 grid, drawn in white with the two eyes cut out.
+    const float u = dr.Width * 0.62f / 24.f, ox = dr.X + dr.Width * 0.19f, oy = dr.Y + dr.Height * 0.21f;
+    const auto P = [&](float px, float py) { return PointF(ox + px * u, oy + py * u); };
+    GraphicsPath mark;
+    mark.StartFigure();
+    mark.AddBezier(P(4.5f, 4.2f), P(7.0f, 2.9f), P(9.5f, 2.4f), P(12.0f, 2.4f));
+    mark.AddBezier(P(12.0f, 2.4f), P(14.5f, 2.4f), P(17.0f, 2.9f), P(19.5f, 4.2f));
+    mark.AddBezier(P(19.5f, 4.2f), P(21.4f, 7.2f), P(22.5f, 11.0f), P(22.2f, 16.0f));
+    mark.AddBezier(P(22.2f, 16.0f), P(20.5f, 17.5f), P(18.7f, 18.4f), P(16.8f, 19.0f));
+    mark.AddLine(P(16.8f, 19.0f), P(15.8f, 17.2f));
+    mark.AddBezier(P(15.8f, 17.2f), P(16.6f, 16.9f), P(17.3f, 16.6f), P(18.0f, 16.1f));
+    mark.AddBezier(P(18.0f, 16.1f), P(15.0f, 17.5f), P(9.0f, 17.5f), P(6.0f, 16.1f));
+    mark.AddBezier(P(6.0f, 16.1f), P(6.7f, 16.6f), P(7.4f, 16.9f), P(8.2f, 17.2f));
+    mark.AddLine(P(8.2f, 17.2f), P(7.2f, 19.0f));
+    mark.AddBezier(P(7.2f, 19.0f), P(5.3f, 18.4f), P(3.5f, 17.5f), P(1.8f, 16.0f));
+    mark.AddBezier(P(1.8f, 16.0f), P(1.5f, 11.0f), P(2.6f, 7.2f), P(4.5f, 4.2f));
+    mark.CloseFigure();
+    SolidBrush white(Color(255, 255, 255, 255));
+    g.FillPath(&white, &mark);
+    g.FillEllipse(&blurple, ox + 5.9f * u, oy + 8.4f * u, 4.4f * u, 4.8f * u);
+    g.FillEllipse(&blurple, ox + 13.7f * u, oy + 8.4f * u, 4.4f * u, 4.8f * u);
   }
 
   // tabs: one page of cards at a time
@@ -1809,6 +1845,9 @@ void Paint(HDC hdc, int w, int h) {
     mc = kMuted;
   } else if (g_hover_browse >= 0) {
     msg = g_folder[g_hover_browse].hint;
+    mc = kMuted;
+  } else if (g_hover_discord) {
+    msg = L"Join the DriveClub Recomp community on Discord.";
     mc = kMuted;
   } else if (g_hover_tab >= 0) {
     msg = g_hover_tab < kTabCount ? kTabHint[g_hover_tab] : kSubHint[g_hover_tab - kTabCount];
@@ -2878,6 +2917,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_hover_tab = tab;
         InvalidateRect(h, nullptr, FALSE);
       }
+      if (const bool on_discord = HitDiscord(x, y); on_discord != g_hover_discord) {
+        g_hover_discord = on_discord;
+        InvalidateRect(h, nullptr, FALSE);
+      }
       UpdateMotionBlurTooltip(h);
       TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
       TrackMouseEvent(&t);
@@ -2886,12 +2929,23 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_MOUSELEAVE:
       g_hover_ctl = g_hover_seg = g_hover_btn = g_hover_browse = g_hover_tab = -1;
       g_hover_info = -1;
+      g_hover_discord = false;
       g_bench_ran_hover = false;
       InvalidateRect(h, nullptr, FALSE);
       return 0;
+    case WM_SETCURSOR:
+      if (g_hover_discord && LOWORD(l) == HTCLIENT) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+      }
+      break;
     case WM_LBUTTONDOWN: {
       const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
       if (g_busy) return 0;
+      if (HitDiscord(x, y)) {
+        ShellExecuteW(h, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL);
+        return 0;
+      }
       CommitName();
       g_status_sticky = false;
       // the details panel: a click anywhere closes it; a click on an (i) opens it
