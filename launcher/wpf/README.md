@@ -161,7 +161,7 @@ stationary grain is generated at device-pixel resolution with no tiling.
 The complete reviewed theme is tracked in `launcher/assets/` and copied to
 `assets/` beside the executable by the WPF project, including on publish. No
 manual theme extraction is needed. Keep this directory in the release package.
-See `launcher/ASSETS.md` for file layout, provenance and ownership notes.
+See `launcher/ASSETS.md` for the theme file layout.
 `wpf/Assets/app.ico` is the shared PC app/game icon. Captures, user settings,
 runtime binaries and example mods remain outside source commits.
 

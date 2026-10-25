@@ -21,8 +21,6 @@ for both build and publish. Preserve that directory when packaging the launcher.
 - `spinner/00.png` through `28.png`: startup spinner at approximately 30 Hz.
 
 Images and fonts were extracted/converted from DRIVECLUB interface assets.
-Their original copyright and font licensing terms remain with their respective
-owners; the repository's source-code license does not relicense those assets.
 Raw game archives, runtime binaries, user preferences and review captures are
 not included in this theme.
 
