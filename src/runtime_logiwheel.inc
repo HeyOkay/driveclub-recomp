@@ -255,6 +255,37 @@ static struct {
     float lp_load[2], x[2];       /* the front loads' recent average; how much of each front tyre slides, 0..1 */
     uint64_t key;                 /* the car's key for its own gain (ffb_car_key) */
 } ph={.m=PTHREAD_MUTEX_INITIALIZER};
+/* BB_FFB_TRACE=1: every physics step of the player's car (P rows) and every pass of the haptic thread (H rows) to
+ * logs/ffb_trace_<time>.csv, for measuring how the force follows the car: how often the game's physics comes, how long
+ * the force takes to reach the wheel, how it builds and drops with the tyres' slip, and (wheel position against the
+ * car's steering angle) how the game follows the wheel. Opened by ffb_start before the haptic thread runs; diagnostic
+ * builds only (BB_DIAGNOSTICS=ON), as BB_FFB_LOG. */
+static FILE *ffb_trace_file;
+static pthread_mutex_t ffb_trace_m=PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ffb_trace_t0;
+static void ffb_trace_open(void) {
+    const char *e=BB_DIAGNOSTIC_ENV("BB_FFB_TRACE");
+    if (!e || !*e || *e=='0') return;
+    const char *dir=getenv("BB_CRASH_DIR");   /* the launcher's logs folder */
+    char path[700];
+    const time_t t=time(NULL);
+    const struct tm *tm=localtime(&t);
+    snprintf(path,sizeof path,"%s/ffb_trace_%04d%02d%02d_%02d%02d%02d.csv",dir && *dir ? dir : ".",
+             tm->tm_year+1900,tm->tm_mon+1,tm->tm_mday,tm->tm_hour,tm->tm_min,tm->tm_sec);
+    if (!(ffb_trace_file=fopen(path,"wb"))) { printf("Runtime: FFB trace not written: %s\n",path); return; }
+    setvbuf(ffb_trace_file,NULL,_IOFBF,1<<20);
+    ffb_trace_t0=now_us();
+    fprintf(ffb_trace_file,
+            "# P: a physics step of the player's car. Wheels right front, left front, right rear, left rear; slip angles in rad\n"
+            "# (+ steering right), forces in N (lateral negative turning right), torque = the model's steering moment (+ right).\n"
+            "# H: a pass of the haptic thread. pos: the wheel in degrees from the centre (+ right); want: torque times the\n"
+            "# gains; out: after the filter; force: to the wheel (-1..1, + right) before the device's direction; sent: the\n"
+            "# effect was updated; age_us: how old the physics step behind it is.\n"
+            "P,t_ms,speed,steer,slip_rf,slip_lf,slip_rr,slip_lr,fy_rf,fy_lf,fy_rr,fy_lr,fz_rf,fz_lf,fz_rr,fz_lr,fx_rf,fx_lf,fx_rr,fx_lr,ratio_rf,ratio_lf,torque,slide_rf,slide_lf,road,k,mu,weight\n"
+            "H,t_ms,pos,want,out,force,sent,age_us\n");
+    printf("Runtime: FFB trace to %s\n",path);
+}
+
 /* A car's key for its own force feedback gain (ffb_cars.ini): values of its setup and drivetrain that stay the same
  * while it is driven and from one session to the next (the steering lock, engine figures), hashed. */
 static uint64_t ffb_car_key(uintptr_t setup) {
@@ -317,6 +348,15 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
     ph.slip=fminf(1.0f,fmaxf(0.0f,slipping))*smoothstep(2.0f,6.0f,speed);
     ph.speed=speed;
     ph.valid=true;
+    if (ffb_trace_file) {
+        const float *fx=st+0xa70/4;
+        pthread_mutex_lock(&ffb_trace_m);
+        fprintf(ffb_trace_file,"P,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f,%.3f,%.4f,%.3f,%.3f,%.4f,%.2f,%.3f,%.0f\n",
+                (double)(now-ffb_trace_t0)*1e-3,speed,st[0xe4/4],slip[0],slip[1],slip[2],slip[3],lat[0],lat[1],lat[2],lat[3],
+                load[0],load[1],load[2],load[3],fx[0],fx[1],fx[2],fx[3],ratio[0],ratio[1],ph.torque,ph.x[0],ph.x[1],ph.road,
+                ph.k,ph.mu,ph.weight);
+        pthread_mutex_unlock(&ffb_trace_m);
+    }
     /* BB_FFB_LOG: ten lines a second of the model while driving */
     static uint64_t logged; static unsigned lines;
     if (ffb_log() && now-logged>=100000 && lines<6000) {
@@ -436,6 +476,7 @@ static void ffb_gain_buttons(uint64_t car) {
 static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
     pthread_mutex_lock(&ph.m);
     const float torque=ph.torque, road=ph.road, slip=ph.slip, speed=ph.speed;
+    const uint64_t step_us=ph.us;
     pthread_mutex_unlock(&ph.m);
     const float car_gain=(float)ffb_car_percent/100.0f;   /* this car's own percentage (ffb_gain_buttons) */
     const uint64_t now=now_us();
@@ -481,13 +522,24 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
     e.constant.direction.type=SDL_HAPTIC_CARTESIAN; e.constant.direction.dir[0]=1;
     e.constant.length=SDL_HAPTIC_INFINITY;
     e.constant.level=(Sint16)rd_clamp((int32_t)lroundf(force*dir*32767.0f),-32767,32767);
+    bool sent=false;
     if (pw.id<0 || abs(e.constant.level-pw.sent)>=16) {
         const bool first=pw.id<0;
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
+            sent=true;
             if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%\n",
                               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper);
         }
+    }
+    if (ffb_trace_file) {
+        const uint64_t done=now_us();
+        pthread_mutex_lock(&ffb_trace_m);
+        fprintf(ffb_trace_file,"H,%.2f,%.2f,%.4f,%.4f,%.4f,%d,%lld\n",(double)(done-ffb_trace_t0)*1e-3,(double)((float)pos*deg_per_unit),
+                want,pw.out,pw.force,sent,(long long)(step_us ? done-step_us : -1));
+        static uint64_t flushed;   /* the process ends without closing it (runtime_ffb_release flushes too) */
+        if (done-flushed>=500000) { fflush(ffb_trace_file); flushed=done; }
+        pthread_mutex_unlock(&ffb_trace_m);
     }
     /* damper: the wheel's own, strongest at a standstill (the tyres scrub) and a third of that at speed */
     const Uint16 damping=ffb_zero ? 0 : (Uint16)(32767.0f*(float)ffb_ph_damper/100.0f*(0.35f+0.65f*(1.0f-smoothstep(0.0f,12.0f,speed))));
@@ -616,6 +668,7 @@ static bool ffb_guard(SDL_Haptic **haptic, bool *running) {
 void runtime_ffb_release(const char *why) {
     static int once;
     if (__atomic_exchange_n(&once,1,__ATOMIC_ACQ_REL)) return;
+    if (ffb_trace_file) { pthread_mutex_lock(&ffb_trace_m); fflush(ffb_trace_file); pthread_mutex_unlock(&ffb_trace_m); }
     pthread_mutex_lock(&ffb.m);
     const bool started=ffb.started;
     pthread_mutex_unlock(&ffb.m);
@@ -827,6 +880,7 @@ static void ffb_start(void) {
     /* BB_FFB_MODEL=game|software|physics: the model for this start, whatever default.ini says (test runs) */
     { const char *e=getenv("BB_FFB_MODEL");
       if (e && *e) { ffb_software=!strcmp(e,"software"); ffb_physics=!strcmp(e,"physics"); printf("Runtime: FFB model %s (BB_FFB_MODEL)\n",e); } }
+    ffb_trace_open();
     pthread_t t;
     if (pthread_create(&t,NULL,ffb_thread,NULL)==0) pthread_detach(t);
 }
