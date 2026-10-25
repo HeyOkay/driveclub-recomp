@@ -41,8 +41,9 @@ camera preference derive it from their saved frame mode; existing preferences
 are retained.
 
 The runtime contract matches PR #187: camera_patch=0/1 in launcher.ini and
-BB_CAMERA_PATCH=0/1 for the game. The implementation remains in that separate
-PR. Unsupported runtimes show an unavailable control with an explanation.
+BB_CAMERA_PATCH=0/1 for the game. That runtime implementation is now in main
+through merged PR #187; this frontend configures it. Unsupported older runtimes
+show an unavailable control with an explanation.
 Selecting a profile does not install a runtime patch.
 
 Reset this page affects only the current page or active Driving subpage. Play
@@ -51,8 +52,9 @@ Reset and profile selection do not save; Save settings and Play persist changes.
 
 ## Build and review
 
-Requires Windows, MSYS2 CLANG64, .NET SDK 8+ with Windows desktop targeting, and
-.NET 8 Windows Desktop runtime for the framework-dependent shell.
+Building requires Windows, MSYS2 CLANG64 and .NET SDK 8+ with Windows desktop
+targeting. The default package includes `Setup.exe`, which checks for .NET 8
+Desktop x64 and offers to install it from Microsoft only when missing.
 
 ```powershell
 ./launcher/build-wpf.ps1 -OutputDirectory C:\path\to\separate\preview
@@ -68,12 +70,40 @@ and publish. This script does not replace an installed game.
 The normal upstream build path remains available; this is a separate Windows
 frontend build until packaging is explicitly adopted upstream.
 
+For an offline package that carries .NET, pass `-SelfContained` to
+`build-wpf.ps1`. It publishes the x64 runtime beside the application and includes
+its runtime license/notices under `licenses/dotnet/`; it does not install .NET
+system-wide. The default compact package is framework-dependent.
+
 `DriveClub.exe --preview` prevents auto-play and previews the loading sequence
 when Play/Benchmark is pressed; no game is prepared or launched. Settings remain
 editable in this executable's own directory. `--preview --capture ABSOLUTE_PATH
 --exit` exports actual WPF pages, full settings canvases and layout diagnostics.
 `--compact` and `--maximized` exercise window bounds. `--perf --exit` reports WPF
 render callback intervals; they are not GPU presentation timestamps.
+
+## First-run setup
+
+Extract the complete launcher package and run `Setup.exe`. It runs the supplied
+`Install-Launcher.ps1` with Windows PowerShell, which is available independently
+of .NET 8. If a compatible x64 Core and Desktop runtime is already present, Setup
+opens `DriveClub.exe` without a download or runtime installation. It also detects
+a self-contained package. Running `DriveClub.exe` directly still works when its
+runtime is available.
+
+If missing, Setup asks before downloading the newest stable .NET 8 Desktop x64
+installer from Microsoft's HTTPS release metadata. It checks the SHA-512 and a
+valid Microsoft Corporation Authenticode signature before requesting elevation
+for the official installer. The installer is run with `/install /quiet /norestart`;
+cancellation/errors do not launch the WPF shell. A requested Windows restart is
+reported rather than performed automatically. Downloads are process-local
+temporary files and are removed on completion. Setup does not copy, reset or
+rewrite launcher preferences, patches or game data. This is prerequisite setup
+for the portable launcher, not an installer for the game files.
+
+`Setup.exe --check-only` and `Install-Launcher.ps1 -CheckOnly` only report runtime
+availability; they never download, install or open the launcher. Offline logic
+checks: `powershell -NoProfile -File launcher/tests/setup/verify.ps1 -OutputDirectory C:\path\to\fixtures`.
 
 ## Visual design and assets
 
