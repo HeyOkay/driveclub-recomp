@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 
@@ -52,7 +53,7 @@ std::array<float, 12> Multiply(const std::array<float, 12>& a, const std::array<
 CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
                            VideoCore::TextureCache& texture_cache_, Runtime& runtime_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_} {
-    const char* env = std::getenv("BB_DEBUG_MOTION");
+    const char* env = BB_DIAGNOSTIC_ENV("BB_DEBUG_MOTION");
     debug_overlay = env && env[0] == '1';
     // The upscaler can be switched on from the menu at any time: the camera is always tracked
     // unless BB_UPSCALER=none.
