@@ -36,9 +36,11 @@ static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
+#include "runtime_camera_patch.inc"
 #include "runtime_scene_debug.inc"
 #include "runtime_motion_blur.inc"
 #include "runtime_menu_repeat.inc"
+#include "runtime_resource_entry.inc"
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
 static uint64_t module_count;
@@ -1293,6 +1295,8 @@ int main(int argc, char **argv) {
         printf("SSE4a: %" PRIu64 " guest EXTRQ rewritten, %" PRIu64 " left to the fault handler\n", rewritten, left);
     }
     menu_repeat_install();
+    resource_entry_install();
+    if (!cpu_only) camera_patch_install();
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
