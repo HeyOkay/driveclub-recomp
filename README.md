@@ -6,6 +6,8 @@
 
 The source code is in this repository and the build is on the [Releases](../../releases) page.
 
+## Join our Discord community: https://discord.gg/62b8jceumR
+
 ## Planned for the next major release
 - **DLSS/FSR Frame Generation, DLSS up to 4X, FSR up to 2X**
 - **DLSS Neural Rendering (Standard and Optimised model support)**
