@@ -92,6 +92,26 @@ static void touch_click(PadData *d, int right) {
 #include "runtime_wheel.inc"
 #include "runtime_logiwheel.inc"
 
+/* The overlay's pedal display (F2): the throttle, brake and clutch the game read last, 0..1. Returns 3 for a wheel
+ * with a clutch axis, 2 for a wheel without one, 1 for a gamepad's triggers (R2 throttle, L2 brake), 0 before the
+ * game has read a pad. */
+static PadData pad_last_read;   /* the last read of any port, under lock */
+static bool pad_was_read;
+int runtime_pad_pedals(float *throttle, float *brake, float *clutch) {
+    pthread_mutex_lock(&lock);
+    WheelExtension w; memcpy(&w,wheel_last_read.extension,sizeof w);
+    const PadData p=pad_last_read;
+    const bool read=pad_was_read, has_clutch=wheel_axis[WAX_CLUTCH].axis>=0;
+    pthread_mutex_unlock(&lock);
+    if (w.magic==WHEEL_MAGIC) {
+        *throttle=(float)w.throttle/65535.0f; *brake=(float)w.brake/65535.0f; *clutch=(float)w.clutch/65535.0f;
+        return has_clutch ? 3 : 2;
+    }
+    if (!read) return 0;
+    *throttle=(float)p.r2/255.0f; *brake=(float)p.l2/255.0f; *clutch=0.0f;
+    return 1;
+}
+
 /* ---- motion -------------------------------------------------------------------------
  * Like shadPS4: the pad's sensors pass straight through. Acceleration is reported the way the
  * console does it (SDL's m/s^2 * 0.098, so rest reads ~0.96 on the vertical axis); angular
@@ -777,6 +797,7 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     if (is_wheel_port(handle)) { wheel_sample(data,bbgpu_overlay_captures_input()); wheel_last_read=*data; }
+    pad_last_read=*data; pad_was_read=true;
 #ifdef _WIN32
     { static int armed; if (data->buttons && !armed && BB_DIAGNOSTIC_ENV("DR_WATCH")) { armed=1; watch_install(data); } }
 #endif
