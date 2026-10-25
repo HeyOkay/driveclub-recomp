@@ -14,6 +14,7 @@
 #include <xxhash.h>
 #include "video_core/renderer_vulkan/ui_composition.h"
 #include "bbport_settings.h"
+#include "bbport_frame_info.h"
 #include "bbport_motion_blur.h"
 extern "C" int runtime_motion_blur_clock(float*, uint64_t*);
 #include "bbport_toggles.h"
@@ -369,6 +370,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     }
     if (gbuffer_draw) {
         camera_motion->OnGBufferPass(db_desc.first);
+    }
+    // The overlay's Render size: the scene is the largest G-buffer pass (three color targets and a depth target),
+    // also when it is as large as the output. Otherwise a half-size pass of the frame was shown for it whenever the
+    // render size equals the output size and the game's own anti-aliasing is on.
+    if (std::popcount(key.mrt_mask) == 3 && db_desc.first && cb_descs[0].first) {
+        const auto& scene_size = texture_cache.GetImage(db_desc.first).info.size;
+        BbFrame::NoteScene(scene_size.width, scene_size.height);
     }
     // Frame generation: the G-buffer pass (three color targets and a depth target) holds the scene depth.
     if ((BbSettings::Get().frame_gen != BbSettings::FrameGenOff || drive_aa->Active()) &&
