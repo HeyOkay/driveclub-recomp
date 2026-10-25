@@ -58,6 +58,9 @@ static int ffb_center, ffb_slide;
  * and a damper that is strongest at a standstill. */
 static bool ffb_physics;
 static int ffb_ph_gain=100, ffb_ph_filter=0, ffb_ph_min_force=0, ffb_ph_kerbs=50, ffb_ph_road=50, ffb_ph_slip=30, ffb_ph_damper=10;
+/* wheel_button = <n>, ffb_gain_up / ffb_gain_down: wheel buttons that make the physics model's force for the car being
+ * driven 5% stronger or weaker, kept for each car (runtime_logiwheel.inc, ffb_cars.ini); -1: not bound */
+static int ffb_gain_button[2]={-1,-1};
 
 static SDL_Joystick *wheel;
 static SDL_JoystickID wheel_id;
@@ -219,6 +222,7 @@ static void wheel_parse(const char *lhs, char *rhs) {
         int index=-1; char name[32]="";
         if (sscanf(rhs," %d , %31s",&index,name)!=2 || index<0 || wheel_button_count>=(int)(sizeof wheel_buttons/sizeof *wheel_buttons)) return;
         lower(name);
+        if (!strcmp(name,"ffb_gain_up") || !strcmp(name,"ffb_gain_down")) { ffb_gain_button[name[9]=='d']=index; return; }
         int slot=wheel_button_count;
         wheel_buttons[slot].index=index;
         if (!strcmp(name,"touchpad") || !strcmp(name,"touchpad_left") || !strcmp(name,"touchpad_right") || !strcmp(name,"touchpad_center")) {
@@ -261,6 +265,8 @@ static const char wheel_default_config[]=
     "wheel_handbrake = none\n"
     "# Wheel buttons: wheel_button = <button number>, <PS4 button>; PS4 buttons as above (cross, r1, options,\n"
     "# pad_up, touchpad_left...). The paddles are usually the first two: shift down is l1, shift up is r1.\n"
+    "# ffb_gain_up and ffb_gain_down in place of a PS4 button: the force feedback of the car being driven 5% stronger\n"
+    "# or weaker (Reworked Physics), kept for each car in ffb_cars.ini (WheelSetup has them as FFB gain + and -).\n"
     "wheel_button = 0, r1\n"
     "wheel_button = 1, l1\n"
     "# The wheel's hat switch works as the d-pad.\n"
