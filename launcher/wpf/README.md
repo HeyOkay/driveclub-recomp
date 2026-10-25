@@ -62,8 +62,9 @@ dotnet run --project launcher/tests/mod-manager/ModManager.Tests.csproj -c Relea
 ```
 
 Build outputs go into a separate directory. To run normally, provide the release
-runtime, native helper applications/licenses, game folders and optional local
-assets beside the shell. This script does not replace an installed game.
+runtime, native helper applications/licenses and game folders beside the shell.
+The theme is copied automatically from `launcher/assets/` during both build
+and publish. This script does not replace an installed game.
 The normal upstream build path remains available; this is a separate Windows
 frontend build until packaging is explicitly adopted upstream.
 
@@ -77,7 +78,7 @@ render callback intervals; they are not GPU presentation timestamps.
 ## Visual design and assets
 
 Opaque WindowChrome window, 228-DIP neutral sidebar, accent #ED2B38, integrated
-caption/footer, original game logos and optional external fonts/artwork. Cards
+caption/footer, original game logos and bundled fonts/artwork. Cards
 use the measured Game Status width, centered within safe margins, with an 18-DIP
 column gap. Minimum width accommodates two cards. Long captions wrap. Quick
 Settings stays at the bottom when space permits; the whole page scrolls when
@@ -88,10 +89,12 @@ Page transitions use 280 ms vertical slide/fade; the sidebar selection moves ove
 animation and 29-frame spinner retain their independent timelines. Uniform,
 stationary grain is generated at device-pixel resolution with no tiling.
 
-See `launcher/ASSETS.md` for optional local asset paths. Original game artwork,
-fonts, captures, user settings and example mods must stay out of source commits.
-Only the separately approved app icon, `wpf/Assets/app.ico`, is embedded in the
-EXE/window; it does not replace the game logos displayed inside the interface.
+The complete reviewed theme is tracked in `launcher/assets/` and copied to
+`assets/` beside the executable by the WPF project, including on publish. No
+manual theme extraction is needed. Keep this directory in the release package.
+See `launcher/ASSETS.md` for file layout, provenance and ownership notes.
+`wpf/Assets/app.ico` is the shared PC app/game icon. Captures, user settings,
+runtime binaries and example mods remain outside source commits.
 
 ## Local Mod Manager
 

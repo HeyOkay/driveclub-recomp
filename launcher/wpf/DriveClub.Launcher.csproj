@@ -13,5 +13,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets/app.ico" />
+    <Content Include="..\assets\**\*">
+      <Link>assets\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 </Project>

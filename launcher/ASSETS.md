@@ -1,29 +1,36 @@
-# Optional local launcher artwork
+# Bundled launcher artwork
 
-The WPF shell uses optional external files beside DriveClub.exe in assets/.
-Original game images and fonts are not part of the source patch or public PR.
-The separately approved app icon at launcher/wpf/Assets/app.ico is embedded as
-an EXE/window resource. Windows game packaging uses that same icon so the game
-window and WPF launcher match; original logos inside the UI stay unchanged.
+The WPF launcher includes its theme under `launcher/assets/`: the eight page
+backgrounds, red DRIVECLUB logo, two interface fonts, inactive option texture,
+swipe/stamp graphics and all 29 spinner frames. These are the same files used by
+the reviewed local interface, with no separate asset download or extraction step.
 
-Required paths for the locally themed preview:
+The WPF project copies the complete theme into `assets/` beside `DriveClub.exe`
+for both build and publish. Preserve that directory when packaging the launcher.
+`assets/manifest.json` records each file's size and SHA-256 for verification.
 
-- brand/logo-red.png, brand/emblem-white.png
-- fonts/001futura-webfont.ttf, fonts/004russian-webfont.ttf
-- backgrounds/page-0.png (Play), page-2.png (Display), detail.png (Graphics),
-  page-4.png (General), driving.png, patches.png, page-5.png (Benchmark), mods.png
-- controls/option-active.png, option-inactive.png, option-current.png, panel.png
-- transitions/swipe.png, transitions/stamp.png
-- spinner/00.png through 28.png
+## Theme layout
 
-Images/fonts remain local game-derived assets. Backgrounds are converted to
-monochrome once on load and receive a uniform dim layer; source files are not
-changed. Stationary device-pixel grain is generated procedurally. Page artwork
-only crossfades; the foreground uses 280 ms slide/fade, navigation selection
-220 ms, and game-folder opacity approximately 120 ms. Startup keeps the existing
-swipe/stamp/logo timeline and the spinner's separate approximately 30 Hz cadence.
+- `backgrounds/`: `page-0.png` (Play), `page-2.png` (Display),
+  `detail.png` (Graphics), `page-4.png` (General), `driving.png`,
+  `patches.png`, `page-5.png` (Benchmark), `mods.png`.
+- `brand/logo-red.png`: title and Play-page logo.
+- `fonts/001futura-webfont.ttf`, `fonts/004russian-webfont.ttf`.
+- `controls/option-inactive.png`: option-field texture.
+- `transitions/swipe.png`, `transitions/stamp.png`: startup graphics.
+- `spinner/00.png` through `28.png`: startup spinner at approximately 30 Hz.
 
-Read launcher/wpf/README.md for building, safe preview and capture commands.
-Keep raw textures/fonts, binaries, user configurations, test packages and review
-captures out of source commits. HTML/screenshot review publication is separate
-from shipping or publishing original assets.
+Images and fonts were extracted/converted from DRIVECLUB interface assets.
+Their original copyright and font licensing terms remain with their respective
+owners; the repository's source-code license does not relicense those assets.
+Raw game archives, runtime binaries, user preferences and review captures are
+not included in this theme.
+
+Backgrounds are converted to monochrome once on load and receive a uniform dim
+layer; source images are unchanged. Stationary device-pixel grain is generated
+procedurally. Artwork crossfades; foreground transitions take 280 ms and sidebar
+selection movement 220 ms. Startup retains its swipe/stamp timeline and spinner.
+
+The shared PC app/window icon is `launcher/wpf/Assets/app.ico`, embedded into
+the WPF executable and Windows game resource. It does not replace logos inside
+the interface. Read `launcher/wpf/README.md` for build, preview and capture usage.
