@@ -1262,7 +1262,7 @@ void SaveSettings() {
     // built-in default (runtime_memory.c), plus bit 37 (the two-thread draw path) when "Two-thread rendering" is off.
     const std::wstring toggles = g_data + L"\\user\\toggles.txt";
     std::ofstream tog(toggles.c_str(), std::ios::binary | std::ios::trunc);
-    tog << (g_two_thread ? "2199023808512" : "2336462761984");
+    tog << (g_two_thread ? "2199023792128" : "2336462745600");
     const std::wstring game_ini = g_data + L"\\user\\driveclub.ini";
     std::ofstream game(game_ini.c_str(), std::ios::binary | std::ios::trunc);
     game << "show_fps=" << (fps_on ? 1 : 0) << "\r\n";
