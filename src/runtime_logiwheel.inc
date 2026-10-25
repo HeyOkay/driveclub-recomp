@@ -325,12 +325,28 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
         else if (a>0.12f) ph.mu+=(fminf(2.5f,fmaxf(0.6f,f))-ph.mu)*0.01f;
     }
     const float a_slide=3.0f*ph.mu/ph.k, a_peak=2.0f*ph.mu/ph.k;   /* all the patch slides; the most lateral force */
+    /* wheel_ffb_physics_tyre = grip: where the game's tyre runs out of grip, about 1.6 mu/k (measured on the 458 and the
+     * Zonda R: its lateral force is linear to about mu/k and flat from about 1.6 mu/k on) */
+    const float a_sat=1.6f*ph.mu/ph.k;
     float moment=0.0f, slipping=0.0f;
     for (int i=0;i<2;++i) {
         if (load[i]<50.0f) { ph.x[i]=1.0f; continue; }   /* in the air */
-        const float x=fminf(1.0f,fabsf(tanf(slip[i]))/tanf(a_slide)), r=1.0f-x;
-        ph.x[i]=x;
-        moment+=lat[i]*(PH_MECH_TRAIL+r*r*r/(1.0f-x+x*x/3.0f));
+        if (ffb_ph_tyre_grip) {
+            /* The pneumatic trail from the grip in use, u = (Fy/Fz)/mu from the game's own forces: (1-u^4) keeps most of it
+             * to about 70% of the grip and takes it away by the limit, so the force peaks well before the limit and is
+             * about half of that at it (measured on the 458: -24% at 4.9 degrees of slip, -51% where the tyre saturates,
+             * where classic gives -8% and -26%). 0.78 keeps the peak where classic has it, so the gains mean the same.
+             * Past the limit the game's lateral force stays flat where a real tyre's falls off: the force falls by up to
+             * 30% over the next 14 degrees of slip, so countersteer brings it back step by step. */
+            const float u=fminf(1.0f,fabsf(lat[i])/load[i]/ph.mu), u2=u*u;
+            const float past=fmaxf(0.0f,fabsf(slip[i])-a_sat), fall=1.0f-0.3f*fminf(1.0f,past/0.25f);
+            ph.x[i]=u;
+            moment+=lat[i]*fall*0.78f*(PH_MECH_TRAIL+1.0f-u2*u2);
+        } else {
+            const float x=fminf(1.0f,fabsf(tanf(slip[i]))/tanf(a_slide)), r=1.0f-x;
+            ph.x[i]=x;
+            moment+=lat[i]*(PH_MECH_TRAIL+r*r*r/(1.0f-x+x*x/3.0f));
+        }
         slipping=fmaxf(slipping,fabsf(slip[i])/a_peak-1.0f);
     }
     for (int i=0;i<4;++i) slipping=fmaxf(slipping,(fabsf(ratio[i])-0.12f)*5.0f);   /* wheelspin, locked wheels */
@@ -528,8 +544,9 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
             sent=true;
-            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%\n",
-                              ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper);
+            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s\n",
+                              ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
+                              ffb_ph_tyre_grip ? "grip" : "classic");
         }
     }
     if (ffb_trace_file) {
@@ -602,8 +619,9 @@ static bool ffb_settings_reload(void) {
     for (int i=0;i<LOGI_EFFECTS;++i) ffb.fx[i].dirty=ffb.fx[i].used;
     pthread_mutex_unlock(&ffb.m);
     if (ffb_physics)
-        printf("Runtime: FFB settings reloaded from default.ini (physics model: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%)\n",
-               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper);
+        printf("Runtime: FFB settings reloaded from default.ini (physics model: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s)\n",
+               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
+               ffb_ph_tyre_grip ? "grip" : "classic");
     else printf("Runtime: FFB settings reloaded from default.ini (%s model, strength %d%%, falloff %d%%)\n",
                 ffb_software ? "software" : "game",ffb_strength,ffb_falloff);
     return true;
@@ -880,6 +898,9 @@ static void ffb_start(void) {
     /* BB_FFB_MODEL=game|software|physics: the model for this start, whatever default.ini says (test runs) */
     { const char *e=getenv("BB_FFB_MODEL");
       if (e && *e) { ffb_software=!strcmp(e,"software"); ffb_physics=!strcmp(e,"physics"); printf("Runtime: FFB model %s (BB_FFB_MODEL)\n",e); } }
+    /* BB_FFB_TYRE=grip|classic: wheel_ffb_physics_tyre for this start (test runs) */
+    { const char *e=getenv("BB_FFB_TYRE");
+      if (e && *e) { ffb_ph_tyre_grip=!strncmp(e,"grip",4); printf("Runtime: FFB tyre %s (BB_FFB_TYRE)\n",ffb_ph_tyre_grip ? "grip" : "classic"); } }
     ffb_trace_open();
     pthread_t t;
     if (pthread_create(&t,NULL,ffb_thread,NULL)==0) pthread_detach(t);
