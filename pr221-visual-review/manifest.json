@@ -1,0 +1,72 @@
+{
+  "main_commit": "79fc2fe801bd0b11bf9bd16c233910b228e1f8aa",
+  "pr_commit": "4a674c7bd4e38fb85b4db56c6fc87637cbf2d515",
+  "method": "Independent AI runs, native DLAA, 2560x1440 render/output, Unlocked, 18:00; Clear/Dry and Cloudy/Light Precipitation. No image exposure adjustment. Dynamic clouds, camera poses, rain and HUD animation may differ. Both visual-only executables had the same one-line expanded-overlay startup addition.",
+  "files": [
+    {
+      "file": "clear-comparison-1.jpg",
+      "bytes": 655294,
+      "sha256": "8f4d510ce374c84f559edc63af08f86e7af664765e36be32af82197c0d8352e5"
+    },
+    {
+      "file": "clear-comparison-2.jpg",
+      "bytes": 655492,
+      "sha256": "b75a5e259234dcd71c53b94f149523b0f96b1b03eec41ca27e18e805fd34face"
+    },
+    {
+      "file": "clear-flare-burst-check.jpg",
+      "bytes": 293339,
+      "sha256": "43e6b83ac6f4b6167f05e33ed42fe783a47d44b6ed7a2c721c1011a734bc256e"
+    },
+    {
+      "file": "clear-hud-burst-check.jpg",
+      "bytes": 279317,
+      "sha256": "28ce708611c5847ccc23302cb81803c734ce04eef916c226b33c60702e13160a"
+    },
+    {
+      "file": "originals/main-clear-near-chase-2560x1440.png",
+      "bytes": 3509721,
+      "sha256": "9cd87fd56866e82a44247c48afae19b2a35de154cd0774bd4bb7532d4b4047bd"
+    },
+    {
+      "file": "originals/main-light-rain-near-chase-2560x1440.png",
+      "bytes": 3469818,
+      "sha256": "7297fdeeb2af8b0d10b5f08ac63a7fd7949350f120ad4277f9722ac413dea693"
+    },
+    {
+      "file": "originals/main-light-rain-repeat-near-chase-2560x1440.png",
+      "bytes": 3678072,
+      "sha256": "ab5a2ca9ba21b056aa9e9e7a57ff699e70681e89415dbfe71a9d2dae090267eb"
+    },
+    {
+      "file": "originals/pr-clear-near-chase-2560x1440.png",
+      "bytes": 3436985,
+      "sha256": "c7ccb9bafdbe873f750bf5d1ce6b5583e851ab30731f7573d7cc69403c354d42"
+    },
+    {
+      "file": "originals/pr-light-rain-near-chase-2560x1440.png",
+      "bytes": 3715637,
+      "sha256": "a69a3bf07c2849f20af48b30ec30e221c5d4ef922bfc2806c14b57dcbe1da6b9"
+    },
+    {
+      "file": "weather-repeat-control.jpg",
+      "bytes": 359553,
+      "sha256": "e3fa23ff9de3dbe0d6e5bd5ea2223ed08660c45233bd7a208ae1ca98ec9bc167"
+    },
+    {
+      "file": "wet-comparison-1.jpg",
+      "bytes": 719335,
+      "sha256": "098dff289928aff7815f796c91b99fd48ec856c36210d30bbf7164f0a40c8374"
+    },
+    {
+      "file": "wet-comparison-2.jpg",
+      "bytes": 762418,
+      "sha256": "6e9ad68a8dc4047dd848854446746ff3cada1ede90d9384060cb075dbfb8640e"
+    },
+    {
+      "file": "wet-reflection-detail.png",
+      "bytes": 1931118,
+      "sha256": "60666680500783e54c53b49e3d7c29500b1990cc5ddd338e61a9a8f4e66ae4e8"
+    }
+  ]
+}
