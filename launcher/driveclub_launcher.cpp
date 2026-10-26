@@ -1147,7 +1147,11 @@ void BuildModel() {
                                L"All views: the bonnet, bumper and chase views too. Off: the view moves with the car's body, as on PS4.",
                                {L"Off", L"Cockpit", L"All views"}, {"@lock_horizon", "", ""}, 0);
   {
-    Ctl c{L"Camera shake", L"How much the camera shakes over bumps, kerbs and at speed. 100% is the game's own; lower it if the shaking is tiring or makes you feel sick.",
+    Ctl c{L"Camera shake",
+          L"How much the camera shakes over bumps, kerbs and at speed.\n"
+          L"\x2022 100%: as the game made it.\n"
+          L"\x2022 Lower it if the shaking is tiring or makes you feel sick.\n"
+          L"Tip: the game's own Options menu has a Camera shake setting that adds more shake on top. Set it to 0 there too for the calmest view.",
           Kind::Slider, {}, {"@camera_shake"}, 100, 100};
     c.min = 0;
     c.max = 100;
