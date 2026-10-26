@@ -925,13 +925,14 @@ void BuildModel() {
                  L"you can still change each size below.",
                  {L"Custom", L"Handheld", L"Low", L"Medium", L"High", L"Ultra"}, {"@preset", "", "", "", "", ""}, 0);
   const int fps = (g_fps = int(g_c.size()), seg(L"Frame rate",
-                      L"60 FPS (deltatime) scales the game by elapsed time, so speed stays right if the frame rate dips. "
-                      L"Unlocked (VRR) uses the same timing up to your display's refresh rate: the game runs as fast as your PC allows, the speed stays right, "
-                      L"and variable refresh (G-Sync, FreeSync) is on, so the display shows every frame as it comes (no stutter). "
-                      L"Fixed tick uses the engine's own 60 Hz mode (works with every feature, speed follows the frame rate). "
-                      L"No V-Sync is unlocked without a cap or V-Sync: frames go out the moment they are done, for displays without variable "
-                      L"refresh (you may see tearing). Above about 120 FPS the game's movement timing breaks: the car can run slower or behave wrongly, "
-                      L"so use a frame limiter in your graphics driver if your PC goes past 120.",
+                      L"How fast the game runs.\n"
+                      L"\x2022 30 FPS: as on PS4.\n"
+                      L"\x2022 60 FPS: smooth; the game speed stays right if the frame rate dips.\n"
+                      L"\x2022 60 FPS (fixed tick): the engine's own 60 Hz mode. Works with every feature, but the game slows down when the frame rate dips.\n"
+                      L"\x2022 Unlocked (VRR): as fast as your PC allows, up to your display's refresh rate, with the speed kept right.\n"
+                      L"\x2022 No V-Sync: unlocked with no cap and no V-Sync, for displays without G-Sync or FreeSync. You may see tearing.\n"
+                      L"Note: above about 120 FPS the game's movement timing breaks: the car can run slower or behave wrongly. Cap it in your graphics driver if your PC goes past 120.\n"
+                      L"Tip: 60 FPS suits most PCs. Unlocked (VRR) is for G-Sync or FreeSync displays: they show every frame as it comes, with no stutter.",
                       {L"30 FPS", L"60 FPS", L"60 FPS (fixed tick)", L"Unlocked (VRR)", L"No V-Sync"},
                       {"", "60 FPS with deltatime", "60 FPS with fixed tickrate", "@unlocked", "@unlocked"}, 1));
   {
