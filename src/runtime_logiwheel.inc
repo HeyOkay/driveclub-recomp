@@ -254,6 +254,7 @@ static struct {
     float k, mu, weight;          /* cornering stiffness over load (1/rad), peak friction, half the car's weight (N) */
     float lp_load[2], x[2];       /* the front loads' recent average; how much of each front tyre slides, 0..1 */
     uint64_t key;                 /* the car's key for its own gain (ffb_car_key) */
+    float relaxed[2]; bool relaxed_set;   /* each front tyre's moment after its relaxation length */
 } ph={.m=PTHREAD_MUTEX_INITIALIZER};
 /* BB_FFB_TRACE=1: every physics step of the player's car (P rows) and every pass of the haptic thread (H rows) to
  * logs/ffb_trace_<time>.csv, for measuring how the force follows the car: how often the game's physics comes, how long
@@ -308,6 +309,7 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
     pthread_mutex_lock(&ph.m);
     if (ph.car!=car) {   /* another car: its tyres are learnt again from the usual values */
         ph.car=car; ph.us=0; ph.k=24.0f; ph.mu=1.3f; ph.weight=0.0f; ph.lp_load[0]=ph.lp_load[1]=0.0f;
+        ph.relaxed_set=false;
         ph.key=ffb_car_key(car);
     }
     float dt=ph.us ? (float)(now-ph.us)*1e-6f : 0.016f;
@@ -335,7 +337,7 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
     /* wheel_ffb_physics_tyre = grip: where the game's tyre runs out of grip, about 1.6 mu/k (measured on the 458 and the
      * Zonda R: its lateral force is linear to about mu/k and flat from about 1.6 mu/k on) */
     const float a_sat=1.6f*ph.mu/ph.k;
-    float moment=0.0f, slipping=0.0f;
+    float moment=0.0f, slipping=0.0f, tyre[2]={0.0f,0.0f};   /* each front tyre's moment on the steering */
     for (int i=0;i<2;++i) {
         if (load[i]<50.0f) { ph.x[i]=1.0f; continue; }   /* in the air */
         if (ffb_ph_tyre_grip) {
@@ -353,11 +355,11 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
             const float u=fminf(1.0f,used/load[i]/ph.mu), u2=u*u;
             const float past=fmaxf(0.0f,fabsf(slip[i])-a_sat), fall=1.0f-0.3f*fminf(1.0f,past/0.25f);
             ph.x[i]=u;
-            moment+=lat[i]*fall*0.78f*(PH_MECH_TRAIL+1.0f-u2*u2);
+            tyre[i]=lat[i]*fall*0.78f*(PH_MECH_TRAIL+1.0f-u2*u2);
         } else {
             const float x=fminf(1.0f,fabsf(tanf(slip[i]))/tanf(a_slide)), r=1.0f-x;
             ph.x[i]=x;
-            moment+=lat[i]*(PH_MECH_TRAIL+r*r*r/(1.0f-x+x*x/3.0f));
+            tyre[i]=lat[i]*(PH_MECH_TRAIL+r*r*r/(1.0f-x+x*x/3.0f));
         }
         slipping=fmaxf(slipping,fabsf(slip[i])/a_peak-1.0f);
     }
@@ -369,7 +371,23 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
      * trail of a gripping tyre, about 2.5 cm), scaled as the grip curve is. The 458 and Zonda R on the AI benchmark: the
      * fronts' forces differ by 1-1.4 kN in the hardest 10% of braking, a few percent of the steering force; kerbs and
      * the grass give several kN. */
-    if (ffb_ph_scrub) moment+=(lon[1]-lon[0])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
+    if (ffb_ph_scrub) {
+        const float scrub=0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
+        tyre[0]-=lon[0]*scrub;   /* the right front */
+        tyre[1]+=lon[1]*scrub;
+    }
+    /* Relaxation: a tyre's forces build up over the first part of a wheel turn, its relaxation length (about 0.4 m on a
+     * road car), not in an instant, and its load cannot follow a single physics step. The game's kerb strikes and
+     * landings put 15-41 kN (two to five times the car's weight) on one front tyre for one step, which gave a full-force
+     * hit; each tyre's moment now follows over 0.4 m of road: 15 ms at 100 km/h, at most 50 ms. A player's race replayed:
+     * steps that jump by more than 0.3 of the wheel's force from 69 to 23, the biggest from 1.69 to 0.66; the force
+     * otherwise about one physics step (9 ms) later. A tyre in the air lets go the same way. */
+    if (ffb_ph_relax) {
+        const float tau=fminf(0.05f,fmaxf(0.003f,0.4f/fmaxf(speed,1.0f))), k=1.0f-expf(-dt/tau);
+        if (!ph.relaxed_set) { ph.relaxed[0]=tyre[0]; ph.relaxed[1]=tyre[1]; ph.relaxed_set=true; }
+        for (int i=0;i<2;++i) tyre[i]=ph.relaxed[i]+=(tyre[i]-ph.relaxed[i])*k;
+    } else ph.relaxed_set=false;
+    moment=tyre[0]+tyre[1];
     for (int i=0;i<4;++i) slipping=fmaxf(slipping,(fabsf(ratio[i])-0.12f)*5.0f);   /* wheelspin, locked wheels */
     const float moving=smoothstep(1.0f,4.0f,speed);   /* slip angles mean little at a crawl */
     /* Self-centring from the steering axis' inclination: steering lifts the car a little on its front wheels, so their
@@ -572,10 +590,10 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
             sent=true;
-            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s, combined %s, centre %s\n",
+            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s, combined %s, centre %s, relax %s\n",
                               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
                               ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off",ffb_ph_combined ? "on" : "off",
-                              ffb_ph_centre ? "on" : "off");
+                              ffb_ph_centre ? "on" : "off",ffb_ph_relax ? "on" : "off");
         }
     }
     if (ffb_trace_file) {
