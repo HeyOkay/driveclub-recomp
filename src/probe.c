@@ -38,6 +38,7 @@ static uint64_t import_count;
 static unsigned char *image;
 static size_t page_size;
 #include "runtime_camera_patch.inc"
+#include "runtime_horizon_lock.inc"
 #include "runtime_scene_debug.inc"
 #include "runtime_motion_blur.inc"
 #include "runtime_menu_repeat.inc"
@@ -1498,6 +1499,7 @@ int main(int argc, char **argv) {
     menu_repeat_install();
     resource_entry_install();
     if (!cpu_only) camera_patch_install();
+    if (!cpu_only) horizon_lock_install();
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;

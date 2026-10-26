@@ -171,6 +171,7 @@ bool OnPage(const Card& card) { return card.tab == g_tab && (card.sub < 0 || car
 std::wstring g_status;
 std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while it is set, unless the check is skipped
 bool g_camera_patch = true;  // enabled by default; persisted in launcher.ini
+bool g_lock_horizon = false;  // the in-car camera keeps the horizon level (BB_LOCK_HORIZON); launcher.ini lock_horizon=
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
@@ -1138,6 +1139,11 @@ void BuildModel() {
     g_fov = int(g_c.size());
     g_c.push_back(std::move(c));
   }
+  const int lock_horizon = toggle(L"Lock to horizon (cockpit view)",
+                                  L"In the cockpit (driver's head) view the horizon stays level when the car leans in corners and dips under braking, as in "
+                                  L"Assetto Corsa. The driver's head still looks into corners. The bonnet, bumper and chase views are not changed. "
+                                  L"Off: the view moves with the car's body, as on PS4.",
+                                  "@lock_horizon", false);
   // Steering wheel: Wheel Setup, then the force feedback.
   g_wheel_setup = int(g_c.size());
   g_c.push_back(Ctl{L"Controls", L"Set up your wheel, pedals, handbrake and shifter. Click Map next to a control, then move it.",
@@ -1197,7 +1203,7 @@ void BuildModel() {
   g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
                      L"The game's own camera effects, each on as on PS4."});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
-  g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
+  g_cards.push_back({L"VIEW AND KEYS", {g_fov, lock_horizon}, 0, kTabDriving,
                      L"Keys while playing:  F2  pedal inputs.   F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
@@ -1301,6 +1307,7 @@ void LoadSettings() {
     if (line.rfind("fgen=", 0) == 0) fgen_saved = atoi(line.substr(5).c_str());
     if (line.rfind("unlocked=", 0) == 0) unlocked_saved = line.substr(9) == "1";
     if (line.rfind("camera_patch=", 0) == 0) g_camera_patch = line.substr(13) == "1";
+    if (line.rfind("lock_horizon=", 0) == 0) g_lock_horizon = line.substr(13) == "1";
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
     if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
     if (line.rfind("draw_threads=", 0) == 0) g_two_thread = line.substr(13) == "1";
@@ -1369,6 +1376,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") {
       c.sel = g_camera_patch ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@lock_horizon") {
+      c.sel = g_lock_horizon ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@skipgpu") {
@@ -1490,6 +1501,7 @@ void SaveSettings() {
     bool fps_on = false, pedals_on = false, fast_on = false, full_on = true, unlock_on = false;
     for (const auto& c : g_c) {
       if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") g_camera_patch = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@lock_horizon") g_lock_horizon = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") pedals_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
@@ -1507,6 +1519,7 @@ void SaveSettings() {
     }
     ini << "pedals=" << (pedals_on ? 1 : 0) << "\r\n";
     ini << "camera_patch=" << (g_camera_patch ? 1 : 0) << "\r\n";
+    ini << "lock_horizon=" << (g_lock_horizon ? 1 : 0) << "\r\n";
     ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
@@ -2414,6 +2427,10 @@ void SetCameraPatchEnvironment() {
   for (const Ctl& c : g_c)
     if (c.patches[0] == "@camera_patch") on = c.sel != 0;
   SetEnvironmentVariableW(L"BB_CAMERA_PATCH", on ? L"1" : L"0");
+  bool level = false;
+  for (const Ctl& c : g_c)
+    if (c.patches[0] == "@lock_horizon") level = c.sel != 0;
+  SetEnvironmentVariableW(L"BB_LOCK_HORIZON", level ? L"1" : L"0");
 }
 
 // Starts the game. With `process` the caller gets the game's process handle (and closes it).
