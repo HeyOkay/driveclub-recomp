@@ -70,6 +70,9 @@ std::string text_entry_prompt, text_entry_text;
 std::string note_text;
 std::chrono::steady_clock::time_point note_until{};
 std::atomic<bool> note_active{false};
+// The picture row F4 chose (0 brightness, 1 contrast, 2 gamma), -1 closed; closes by itself at picture_until.
+std::atomic<int> picture_row{-1};
+std::chrono::steady_clock::time_point picture_until{};
 float base_scale = 1.0f;
 
 // Present rate for the FPS counter.
@@ -220,10 +223,35 @@ void PollHotkeys() {
     }
     f9_down = f9;
     f10_down = f10;
-    // Page Up / Page Down: HDR brightness (SDR white) in steps of 25 nits, kept for the next start.
+    // F4: the picture (PicturePanel): brightness, contrast, gamma in turn, then closed. SDR only.
+    static bool f4_down = false;
+    if (edge(VK_F4, f4_down) && SDL_GetKeyboardFocus() && !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+        if (s.hdr_output) {
+            Note("Brightness, contrast and gamma are for SDR   (HDR: Page Up / Page Down)");
+        } else {
+            picture_row = picture_row >= 2 ? -1 : picture_row + 1;
+        }
+        picture_until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    }
+    if (picture_row >= 0 && std::chrono::steady_clock::now() > picture_until) {
+        picture_row = -1;
+    }
+    // Page Up / Page Down: the picture row F4 chose, else HDR brightness (SDR white) in steps of 25 nits; both kept
+    // for the next start.
     static bool page_up_down = false, page_down_down = false;
     const bool brighter = edge(VK_PRIOR, page_up_down), darker = edge(VK_NEXT, page_down_down);
-    if (s.hdr_output && (brighter || darker)) {
+    if (picture_row >= 0 && (brighter || darker)) {
+        const int step = brighter ? 1 : -1;
+        if (picture_row == 0) {
+            s.picture_brightness = std::clamp(s.picture_brightness.load() + 2 * step, -50, 50);
+        } else if (picture_row == 1) {
+            s.picture_contrast = std::clamp(s.picture_contrast.load() + 5 * step, 50, 150);
+        } else {
+            s.picture_gamma = std::clamp(s.picture_gamma.load() + 5 * step, 180, 280);
+        }
+        BbSettings::SavePicture();
+        picture_until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    } else if (s.hdr_output && (brighter || darker)) {
         const int now = int(std::lround(s.hdr_paper.load() / 25.0f)) * 25;
         const int next = std::clamp(now + (brighter ? 25 : -25), 100, 600);
         s.hdr_paper = float(next);
@@ -301,6 +329,35 @@ void PedalPanel() {
                       bars[i].name);
     }
     ImGui::Dummy(ImVec2(float(count) * bar_w + float(count - 1) * gap, line + space + bar_h + space + line));
+    ImGui::End();
+}
+
+/// The picture (F4), bottom centre: brightness, contrast and gamma, the one Page Up / Page Down changes marked.
+void PicturePanel() {
+    const auto& s = BbSettings::Get();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                                   viewport->WorkPos.y + viewport->WorkSize.y - 60.0f * base_scale),
+                            ImGuiCond_Always, ImVec2(0.5f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.75f);
+    ImGui::Begin("##picture", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImGui::SetWindowFontScale(1.3f);
+    char rows[3][32];
+    std::snprintf(rows[0], sizeof(rows[0]), "Brightness  %+d", s.picture_brightness.load());
+    std::snprintf(rows[1], sizeof(rows[1]), "Contrast  %d%%", s.picture_contrast.load());
+    std::snprintf(rows[2], sizeof(rows[2]), "Gamma  %.2f", float(s.picture_gamma.load()) / 100.0f);
+    for (int i = 0; i < 3; ++i) {
+        if (i) ImGui::SameLine(0.0f, 28.0f * base_scale);
+        if (i == picture_row) {
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.35f, 1.0f), "> %s", rows[i]);
+        } else {
+            ImGui::TextDisabled("  %s", rows[i]);
+        }
+    }
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::TextDisabled("Page Up / Page Down: change    F4: next    defaults: brightness 0, contrast 100%%, gamma 2.40 (TV)");
     ImGui::End();
 }
 
@@ -582,7 +639,7 @@ bool HandleEvent(const SDL_Event& event) {
 
 bool Visible() {
     return initialized && (menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
-                           BbSettings::Get().show_pedals);
+                           BbSettings::Get().show_pedals || picture_row >= 0);
 }
 
 void Note(const std::string& text) {
@@ -647,6 +704,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     }
     if (BbSettings::Get().show_pedals && !menu_open) {
         PedalPanel();
+    }
+    if (picture_row >= 0 && !menu_open) {
+        PicturePanel();
     }
     if (text_entry_active) {
         TextEntryBox();
