@@ -372,7 +372,14 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
     if (ffb_ph_scrub) moment+=(lon[1]-lon[0])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
     for (int i=0;i<4;++i) slipping=fmaxf(slipping,(fabsf(ratio[i])-0.12f)*5.0f);   /* wheelspin, locked wheels */
     const float moving=smoothstep(1.0f,4.0f,speed);   /* slip angles mean little at a crawl */
-    ph.torque=moment/(ph.weight*PH_NORM)*moving;
+    /* Self-centring from the steering axis' inclination: steering lifts the car a little on its front wheels, so their
+     * load turns the steering back, in proportion to the sine of the steering angle (st+0xe4). About 1 cm of lever on
+     * a road car (the game does not give its geometry), in the units above: 13% of a 1 g corner's force at 17 degrees of
+     * front wheel angle, 24% at full lock, 1-2% at the angles of fast corners. Not at a standstill: the tyres' grip on the
+     * road holds the wheels where they are until they roll (the damper is that resistance). */
+    float centre=0.0f;
+    if (ffb_ph_centre) centre=-sinf(st[0xe4/4])*(load[0]+load[1])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f)*smoothstep(0.0f,1.0f,speed);
+    ph.torque=(moment*moving+centre)/(ph.weight*PH_NORM);
     /* Road: each front tyre's load against its average of the last 0.08 s; a bump on one side turns the wheel */
     const float kf=1.0f-expf(-dt/0.08f);
     float bump[2];
@@ -565,9 +572,10 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
             sent=true;
-            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s, combined %s\n",
+            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s, combined %s, centre %s\n",
                               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
-                              ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off",ffb_ph_combined ? "on" : "off");
+                              ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off",ffb_ph_combined ? "on" : "off",
+                              ffb_ph_centre ? "on" : "off");
         }
     }
     if (ffb_trace_file) {

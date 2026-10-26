@@ -67,6 +67,9 @@ static bool ffb_ph_scrub=true;
 /* The trail from the grip in use by braking, drive and cornering together (the friction circle), and the tyres' grip
  * learnt that way; wheel_ffb_physics_combined = off: from cornering alone. */
 static bool ffb_ph_combined=true;
+/* Self-centring from the steering axis' inclination (the front wheels' load, the steering angle); wheel_ffb_physics_centre
+ * = off leaves it out. */
+static bool ffb_ph_centre=true;
 /* wheel_button = <n>, ffb_gain_up / ffb_gain_down: wheel buttons that make the physics model's force for the car being
  * driven 5% stronger or weaker, kept for each car (runtime_logiwheel.inc, ffb_cars.ini); -1: not bound */
 static int ffb_gain_button[2]={-1,-1};
@@ -197,6 +200,7 @@ static void wheel_parse(const char *lhs, char *rhs) {
         else if (!strcmp(k,"tyre")) { lower(rhs); ffb_ph_tyre_grip=strncmp(rhs,"classic",7)!=0; }
         else if (!strcmp(k,"scrub")) { lower(rhs); ffb_ph_scrub=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
         else if (!strcmp(k,"combined")) { lower(rhs); ffb_ph_combined=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
+        else if (!strcmp(k,"centre") || !strcmp(k,"center")) { lower(rhs); ffb_ph_centre=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
         return;
     }
     if (!strcmp(key,"ffb_strength")) { const int v=atoi(rhs); ffb_strength=v<0 ? 0 : v>1000 ? 1000 : v; return; }
@@ -323,8 +327,9 @@ static const char wheel_default_config[]=
     "# The wheel goes light where the game's tyres run out of grip and keeps getting lighter in a slide, and the front\n"
     "# tyres' braking and drive forces turn it through the steering geometry (a kerb under braking, torque steer), and\n"
     "# braking hard into a corner lightens it as the front nears its limit (its grip used by braking and cornering\n"
-    "# together); wheel_ffb_physics_tyre = classic, wheel_ffb_physics_scrub = off and wheel_ffb_physics_combined = off\n"
-    "# go back to the model before those.\n"
+    "# together), and it centres itself when rolling with the wheel turned (the steering axis' inclination);\n"
+    "# wheel_ffb_physics_tyre = classic, wheel_ffb_physics_scrub = off, wheel_ffb_physics_combined = off and\n"
+    "# wheel_ffb_physics_centre = off go back to the model before those.\n"
     "# wheel_ffb_invert = true if the wheel pulls the wrong way.\n"
     "# H-pattern shifter: wheel_shifter = auto (a controller named \"Shifter\"), wheel (its buttons are on the wheel),\n"
     "# off, or part of its name; then one line per gear: wheel_gear = <button number>, <1..6 or r>. WheelSetup.exe\n"
