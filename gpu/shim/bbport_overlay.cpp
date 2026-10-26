@@ -236,8 +236,8 @@ void PollHotkeys() {
     if (picture_row >= 0 && std::chrono::steady_clock::now() > picture_until) {
         picture_row = -1;
     }
-    // Page Up / Page Down: the picture row F4 chose, else HDR brightness (SDR white) in steps of 25 nits; both kept
-    // for the next start.
+    // Page Up / Page Down: the picture row F4 chose; else HDR brightness (SDR white) in steps of 25 nits with HDR on, the
+    // picture's brightness without it. All kept for the next start.
     static bool page_up_down = false, page_down_down = false;
     const bool brighter = edge(VK_PRIOR, page_up_down), darker = edge(VK_NEXT, page_down_down);
     if (picture_row >= 0 && (brighter || darker)) {
@@ -257,6 +257,12 @@ void PollHotkeys() {
         s.hdr_paper = float(next);
         BbSettings::SaveHdrBrightness(next);
         Note("HDR brightness " + std::to_string(next) + " nits   (Page Up / Page Down)");
+    } else if (brighter || darker) {
+        const int next = std::clamp(s.picture_brightness.load() + (brighter ? 2 : -2), -50, 50);
+        s.picture_brightness = next;
+        BbSettings::SavePicture();
+        Note("Brightness " + std::string(next > 0 ? "+" : "") + std::to_string(next) +
+             "   (Page Up / Page Down;  F4: contrast and gamma)");
     }
     // F8: frame generation paused and resumed (everything stays set up).
     static bool f8_down = false;

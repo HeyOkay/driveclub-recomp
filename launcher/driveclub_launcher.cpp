@@ -1059,7 +1059,7 @@ void BuildModel() {
   }
   {
     const struct { const wchar_t* label; const wchar_t* hint; int def, min, max, decimals; const wchar_t* unit; } kPicture[3] = {
-        {L"Brightness", L"Lifts or lowers the whole picture. Raise it if dark corners and night races are too hard to see. While playing: F4, then Page Up / Page Down.",
+        {L"Brightness", L"Lifts or lowers the whole picture. Raise it if dark corners and night races are too hard to see. While playing: Page Up brighter, Page Down darker.",
          0, -50, 50, 0, L""},
         {L"Contrast", L"The difference between dark and bright. Lower it if the picture looks harsh, raise it if it looks flat. While playing: F4 twice, then Page Up / Page Down.",
          100, 50, 150, 0, L"%"},
@@ -1216,7 +1216,7 @@ void BuildModel() {
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
   g_cards.push_back({L"PICTURE", {g_picture[0], g_picture[1], g_picture[2]}, 0, kTabGraphics,
-                     L"For SDR (with HDR on, use HDR brightness). F4 while playing changes them on the track."});
+                     L"For SDR (with HDR on, use HDR brightness). While playing: Page Up / Page Down change the brightness; F4 picks contrast or gamma for them."});
   g_cards.push_back({L"GRAPHICS DETAIL",
                      {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
                       g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
@@ -1225,7 +1225,7 @@ void BuildModel() {
                      L"The game's own camera effects, each on as on PS4."});
   g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"Keys while playing:  F2  pedal inputs.   F4  brightness, contrast, gamma (then Page Up / Page Down).   F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
+                     L"Keys while playing:  F2  pedal inputs.   F4  contrast and gamma (then Page Up / Page Down).   F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  brightness (HDR brightness with HDR on)."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});
