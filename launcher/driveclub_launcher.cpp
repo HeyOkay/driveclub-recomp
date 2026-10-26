@@ -1052,6 +1052,10 @@ void BuildModel() {
     g_c.push_back(std::move(c));
   }
   const int showfps = toggle(L"Show FPS counter", L"Draws the frame rate in the top right corner while playing.", "@fps", false);
+  const int showpedals = toggle(L"Show pedal inputs",
+                                L"Draws how far the clutch, brake and throttle are pressed, in the bottom left corner while "
+                                L"playing, so you can see a pedal reach 100%. F2 turns it on and off in the game.",
+                                "@pedals", false);
   const int full = toggle(L"Fullscreen", L"Plays borderless fullscreen. Turn off for a window.", "@full", true);
   const int unlock = toggle(L"Unlock DLC content",
                             L"Unlocks the DLC content: add-on cars, bikes, tours and livery decals. Cars you earn by playing still unlock through normal progression. Built from your own game files; the game folders are not modified.",
@@ -1192,9 +1196,9 @@ void BuildModel() {
                      0, kTabDetail});
   g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
                      L"The game's own camera effects, each on as on PS4."});
-  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, overlays, autoplay, updatecheck}, 0, kTabGameplay});
+  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"Keys while playing:  F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
+                     L"Keys while playing:  F2  pedal inputs.   F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});
@@ -1260,7 +1264,7 @@ std::wstring BenchName(const BenchChoice* list, int count, const std::string& id
   return i >= 0 ? std::wstring(list[i].name) : Widen(id);
 }
 
-bool fps_counter = false, fast_render = false, full_screen = true, unlock_dlc = false;  // the settings that are not patches
+bool fps_counter = false, pedal_display = false, fast_render = false, full_screen = true, unlock_dlc = false;  // the settings that are not patches
 
 // Output / render choices per preset: indices into the "Output resolution" and "Render resolution" rows,
 // and the "Mirror and reflection updates" choice (slower presets update the mirrors less often).
@@ -1284,6 +1288,7 @@ void LoadSettings() {
     if (line.rfind("update=", 0) == 0) g_folder[0].path = Widen(line.substr(7));
     if (line.rfind("base=", 0) == 0) g_folder[1].path = Widen(line.substr(5));
     if (line.rfind("fps=", 0) == 0) fps_counter = line.substr(4) == "1";
+    if (line.rfind("pedals=", 0) == 0) pedal_display = line.substr(7) == "1";
     if (line.rfind("fast=", 0) == 0) fast_render = line.substr(5) == "1";
     if (line.rfind("name=", 0) == 0) g_name = Widen(line.substr(5));
     if (line.rfind("mirror=", 0) == 0) mirror_saved = atoi(line.substr(7).c_str());
@@ -1336,6 +1341,10 @@ void LoadSettings() {
   for (auto& c : g_c) {
     if (c.kind == Kind::Toggle && c.patches[0] == "@fps") {
       c.sel = fps_counter ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") {
+      c.sel = pedal_display ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@fast") {
@@ -1478,10 +1487,11 @@ void SaveSettings() {
   MakeDirs(g_data + L"\\user");
   {
     std::ofstream ini(IniPath().c_str(), std::ios::binary | std::ios::trunc);
-    bool fps_on = false, fast_on = false, full_on = true, unlock_on = false;
+    bool fps_on = false, pedals_on = false, fast_on = false, full_on = true, unlock_on = false;
     for (const auto& c : g_c) {
       if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") g_camera_patch = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") pedals_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@full") full_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") unlock_on = c.sel != 0;
@@ -1495,6 +1505,7 @@ void SaveSettings() {
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
+    ini << "pedals=" << (pedals_on ? 1 : 0) << "\r\n";
     ini << "camera_patch=" << (g_camera_patch ? 1 : 0) << "\r\n";
     ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
@@ -1520,6 +1531,7 @@ void SaveSettings() {
     const std::wstring game_ini = g_data + L"\\user\\driveclub.ini";
     std::ofstream game(game_ini.c_str(), std::ios::binary | std::ios::trunc);
     game << "show_fps=" << (fps_on ? 1 : 0) << "\r\n";
+    game << "show_pedals=" << (pedals_on ? 1 : 0) << "\r\n";
   }
   std::ofstream out(SelectionPath().c_str(), std::ios::binary | std::ios::trunc);
   for (const auto& c : g_c) {

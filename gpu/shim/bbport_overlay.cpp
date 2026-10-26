@@ -52,6 +52,8 @@ extern "C" const unsigned char bb_font_ttf_end[];
 
 static bool g_aa_used = false;
 static bool g_fg_used = false;
+// src/runtime_pad.c: the pedals the game read last, 0..1; 3 a wheel with a clutch, 2 without, 1 a gamepad, 0 none yet.
+extern "C" int runtime_pad_pedals(float* throttle, float* brake, float* clutch);
 
 namespace BbOverlay {
 
@@ -169,6 +171,12 @@ void PollHotkeys() {
         std::printf("MotionBlur: F3 %s\n", reference == 30 ? "Slow" : "Fast");
         std::fflush(stdout);
     }
+    // F2: the pedal inputs (PedalPanel) on and off.
+    static bool f2_down = false;
+    if (edge(VK_F2, f2_down) && SDL_GetKeyboardFocus()) {
+        s.show_pedals = !s.show_pedals;
+        Note(s.show_pedals ? "Pedal inputs on  (F2: off)" : "Pedal inputs off  (F2: on)");
+    }
     static bool f12_down = false;
     if (edge(VK_F12, f12_down)) {
         if (!SceneDebug::Enabled()) {
@@ -246,6 +254,53 @@ void NoteBox() {
     ImGui::SetWindowFontScale(1.3f);
     ImGui::Text("%s", note_text.c_str());
     ImGui::SetWindowFontScale(1.0f);
+    ImGui::End();
+}
+
+/// The pedals the game read last (F2), bottom left: clutch, brake and throttle as bars with their percentage. A pedal
+/// at the end of its travel is drawn bright and outlined, so a press that stops short of full shows.
+void PedalPanel() {
+    float throttle = 0.0f, brake = 0.0f, clutch = 0.0f;
+    const int kind = runtime_pad_pedals(&throttle, &brake, &clutch);
+    if (!kind) return;
+    struct Bar { const char* name; float value; ImU32 color; };
+    Bar bars[3];
+    int count = 0;
+    if (kind == 3) bars[count++] = {"Clutch", clutch, IM_COL32(70, 140, 255, 255)};
+    bars[count++] = {"Brake", brake, IM_COL32(235, 60, 55, 255)};
+    bars[count++] = {"Throttle", throttle, IM_COL32(60, 200, 90, 255)};
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float pad = 12.0f * base_scale, gap = 12.0f * base_scale, bar_h = 150.0f * base_scale;
+    float bar_w = 40.0f * base_scale;   // as wide as the widest name
+    for (int i = 0; i < count; ++i) bar_w = std::max(bar_w, ImGui::CalcTextSize(bars[i].name).x + 6.0f * base_scale);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + pad, viewport->WorkPos.y + viewport->WorkSize.y - pad),
+                            ImGuiCond_Always, ImVec2(0.0f, 1.0f));
+    ImGui::SetNextWindowBgAlpha(0.5f);
+    ImGui::Begin("##pedals", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs |
+                     ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float line = ImGui::GetTextLineHeight(), space = 4.0f * base_scale;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    for (int i = 0; i < count; ++i) {
+        const float x = origin.x + float(i) * (bar_w + gap);
+        const float v = std::clamp(bars[i].value, 0.0f, 1.0f);
+        const int percent = int(v * 100.0f + 0.5f);
+        const bool full = percent >= 100;
+        char text[16];
+        std::snprintf(text, sizeof(text), "%d%%", percent);
+        const float text_w = ImGui::CalcTextSize(text).x, name_w = ImGui::CalcTextSize(bars[i].name).x;
+        draw->AddText(ImVec2(x + (bar_w - text_w) * 0.5f, origin.y), full ? IM_COL32_WHITE : ImGui::GetColorU32(ImGuiCol_Text), text);
+        const float top = origin.y + line + space, bottom = top + bar_h;
+        draw->AddRectFilled(ImVec2(x, top), ImVec2(x + bar_w, bottom), IM_COL32(255, 255, 255, 40));
+        // below full the colour is dimmed, at full it is bright with an outline
+        const ImU32 fill = full ? bars[i].color : (bars[i].color & 0x00ffffffu) | (150u << 24);
+        draw->AddRectFilled(ImVec2(x, bottom - bar_h * v), ImVec2(x + bar_w, bottom), fill);
+        if (full) draw->AddRect(ImVec2(x, top), ImVec2(x + bar_w, bottom), IM_COL32_WHITE, 0.0f, 0, 2.0f * base_scale);
+        draw->AddText(ImVec2(x + (bar_w - name_w) * 0.5f, bottom + space), ImGui::GetColorU32(ImGuiCol_TextDisabled),
+                      bars[i].name);
+    }
+    ImGui::Dummy(ImVec2(float(count) * bar_w + float(count - 1) * gap, line + space + bar_h + space + line));
     ImGui::End();
 }
 
@@ -526,7 +581,8 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || note_active || BbSettings::Get().show_fps);
+    return initialized && (menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
+                           BbSettings::Get().show_pedals);
 }
 
 void Note(const std::string& text) {
@@ -588,6 +644,9 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     ImGui::NewFrame();
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
+    }
+    if (BbSettings::Get().show_pedals && !menu_open) {
+        PedalPanel();
     }
     if (text_entry_active) {
         TextEntryBox();
