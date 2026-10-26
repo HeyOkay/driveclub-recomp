@@ -1059,11 +1059,11 @@ void BuildModel() {
   }
   {
     const struct { const wchar_t* label; const wchar_t* hint; int def, min, max, decimals; const wchar_t* unit; } kPicture[3] = {
-        {L"Brightness", L"Lifts or lowers the whole picture. Raise it if dark corners and night races are too hard to see. While playing: Page Up brighter, Page Down darker.",
+        {L"Brightness", L"Lifts or lowers the whole picture.\n\x2022 Raise it if dark corners and night races are too hard to see.\nIn game: Page Up brighter, Page Down darker.",
          0, -50, 50, 0, L""},
-        {L"Contrast", L"The difference between dark and bright. Lower it if the picture looks harsh, raise it if it looks flat. While playing: F4 twice, then Page Up / Page Down.",
+        {L"Contrast", L"The difference between dark and bright.\n\x2022 Lower it if the picture looks harsh; raise it if it looks flat.\nIn game: F4 twice, then Page Up / Page Down.",
          100, 50, 150, 0, L"%"},
-        {L"Gamma", L"The screen the picture is made for: 2.40 is the TVs the game was made for (the default), 2.20 is a PC monitor and looks brighter and paler in the shadows. While playing: F4 three times, then Page Up / Page Down.",
+        {L"Gamma", L"The kind of screen the picture is made for.\n\x2022 2.40: the TVs the game was made for (the default).\n\x2022 2.20: a PC monitor. Brighter and paler in the shadows.\nIn game: F4 three times, then Page Up / Page Down.",
          240, 180, 280, 2, L""},
     };
     for (int k = 0; k < 3; ++k) {
@@ -1216,7 +1216,7 @@ void BuildModel() {
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
   g_cards.push_back({L"PICTURE", {g_picture[0], g_picture[1], g_picture[2]}, 0, kTabGraphics,
-                     L"For SDR (with HDR on, use HDR brightness). While playing: Page Up / Page Down change the brightness; F4 picks contrast or gamma for them."});
+                     L"For SDR. With HDR on, use HDR brightness.\nIn game: Page Up / Page Down change the brightness; F4 picks contrast or gamma."});
   g_cards.push_back({L"GRAPHICS DETAIL",
                      {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
                       g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
