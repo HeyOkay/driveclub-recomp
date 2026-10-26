@@ -830,6 +830,17 @@ static void QueueNpStateEvent(Libraries::UserService::OrbisUserServiceUserId use
     g_np_state_events.emplace_back(event);
 }
 
+// A local account (BB_NP_LOCAL) has no login to wait for: the game is told it is signed in when it
+// registers for state changes, as the console does for a user who is already signed in.
+static void QueueLocalSignedIn() {
+    if (!Libraries::Np::NpHandler::GetInstance().IsLocalAccount()) {
+        return;
+    }
+    s32 user_id = 1;
+    Libraries::UserService::sceUserServiceGetInitialUser(&user_id);
+    QueueNpStateEvent(user_id, OrbisNpState::SignedIn);
+}
+
 void NotifyNpStateFromUserServiceEvent(Libraries::UserService::OrbisUserServiceEventType event_type,
                                        Libraries::UserService::OrbisUserServiceUserId user_id) {
     switch (event_type) {
@@ -983,14 +994,17 @@ s32 PS4_SYSV_ABI sceNpRegisterStateCallback(OrbisNpStateCallback callback, void*
         return ORBIS_NP_ERROR_INVALID_ARGUMENT;
     }
 
-    std::scoped_lock lk{g_np_state_callbacks_mutex};
-    if (LegacyNpStateCb.func != nullptr) {
-        return ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED;
-    }
+    {
+        std::scoped_lock lk{g_np_state_callbacks_mutex};
+        if (LegacyNpStateCb.func != nullptr) {
+            return ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+        }
 
-    LOG_INFO(Lib_NpManager, "called, userdata = {}", userdata);
-    LegacyNpStateCb.func = callback;
-    LegacyNpStateCb.userdata = userdata;
+        LOG_INFO(Lib_NpManager, "called, userdata = {}", userdata);
+        LegacyNpStateCb.func = callback;
+        LegacyNpStateCb.userdata = userdata;
+    }
+    QueueLocalSignedIn();
     return ORBIS_OK;
 }
 
@@ -1006,7 +1020,11 @@ s32 PS4_SYSV_ABI sceNpUnregisterStateCallback() {
 
 s32 PS4_SYSV_ABI sceNpRegisterStateCallbackA(OrbisNpStateCallbackA callback, void* userdata) {
     LOG_INFO(Lib_NpManager, "called, userdata = {}", userdata);
-    return RegisterStateCallbackA(callback, userdata);
+    const s32 id = RegisterStateCallbackA(callback, userdata);
+    if (id > 0) {
+        QueueLocalSignedIn();
+    }
+    return id;
 }
 
 s32 PS4_SYSV_ABI sceNpUnregisterStateCallbackA(s32 callback_id) {

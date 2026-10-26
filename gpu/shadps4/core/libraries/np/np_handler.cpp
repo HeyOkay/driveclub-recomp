@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <httplib.h>
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -17,6 +18,7 @@
 #include "core/libraries/np/np_score/np_score.h"
 #include "core/libraries/np/np_web_api/np_web_api.h"
 #include "core/libraries/system/systemservice.h"
+#include "core/libraries/system/userservice.h"
 #include "core/user_settings.h"
 #include "imgui/invitation_prompt_layer.h"
 #include "imgui/shadnet_notifications_layer.h"
@@ -25,6 +27,18 @@
 #include "shadnet/server_probe.h"
 
 namespace Libraries::Np {
+
+namespace {
+// BB_NP_LOCAL=<name>: a signed-in account that lives on this PC. The game sees an online ID and a Plus
+// subscription without a PSN or a shadNet server, which unlocks its online menus; nothing is sent anywhere.
+const std::string& LocalNpName() {
+    static const std::string name = [] {
+        const char* env = std::getenv("BB_NP_LOCAL");
+        return std::string(env ? env : "");
+    }();
+    return name;
+}
+} // namespace
 
 NpHandler& NpHandler::GetInstance() {
     static NpHandler s_instance;
@@ -100,6 +114,10 @@ void NpHandler::Initialize() {
 
     if (!EmulatorSettings.IsShadNetEnabled()) {
         LOG_INFO(NpHandler, "shadNet disabled globally we are in offline mode");
+        return;
+    }
+    if (!LocalNpName().empty()) {
+        LOG_INFO(NpHandler, "local account '{}': no shadNet server is contacted", LocalNpName());
         return;
     }
 
@@ -413,13 +431,23 @@ void NpHandler::TryReconnect() {
     }
 }
 
+bool NpHandler::IsLocalAccount() const {
+    return !LocalNpName().empty();
+}
+
 bool NpHandler::IsPsnSignedIn(s32 user_id) const {
+    if (!LocalNpName().empty()) {
+        return true;
+    }
     std::lock_guard lock(m_mutex_clients);
     auto it = m_clients.find(user_id);
     return it != m_clients.end() && it->second->IsAuthenticated();
 }
 
 bool NpHandler::IsAnySignedIn() const {
+    if (!LocalNpName().empty()) {
+        return true;
+    }
     std::lock_guard lock(m_mutex_clients);
     for (auto& [_, client] : m_clients)
         if (client->IsAuthenticated())
@@ -428,6 +456,11 @@ bool NpHandler::IsAnySignedIn() const {
 }
 
 OrbisNpId NpHandler::GetNpId(s32 user_id) const {
+    if (!LocalNpName().empty()) {
+        OrbisNpId id{};
+        SetNpOnlineId(id.handle, LocalNpName());
+        return id;
+    }
     std::lock_guard lock(m_mutex_clients);
     auto it = m_np_ids.find(user_id);
     return it != m_np_ids.end() ? it->second : OrbisNpId{};
@@ -444,6 +477,13 @@ std::string NpHandler::GetAvatarUrl(s32 user_id) const {
 }
 
 OrbisNpAccountId NpHandler::GetAccountId(s32 user_id) const {
+    if (!LocalNpName().empty()) {
+        u64 hash = 1469598103934665603ull; // FNV-1a of the name: the same account ID on every start
+        for (const unsigned char c : LocalNpName()) {
+            hash = (hash ^ c) * 1099511628211ull;
+        }
+        return static_cast<OrbisNpAccountId>(hash | 0x1000000000000000ull);
+    }
     std::lock_guard lock(m_mutex_clients);
     auto it = m_clients.find(user_id);
     return it != m_clients.end() ? static_cast<OrbisNpAccountId>(it->second->GetUserId()) : 0;
@@ -678,6 +718,11 @@ u32 NpHandler::GetLocalIpAddr(s32 user_id) const {
 }
 
 s32 NpHandler::GetUserIdByAccountId(u64 account_id) const {
+    if (!LocalNpName().empty()) {
+        s32 user_id = 1;
+        Libraries::UserService::sceUserServiceGetInitialUser(&user_id);
+        return GetAccountId(user_id) == account_id ? user_id : -1;
+    }
     std::lock_guard lock(m_mutex_clients);
     for (auto& [uid, client] : m_clients) {
         if (static_cast<u64>(client->GetUserId()) == account_id)
@@ -687,6 +732,13 @@ s32 NpHandler::GetUserIdByAccountId(u64 account_id) const {
 }
 
 s32 NpHandler::GetUserIdByOnlineId(const OrbisNpOnlineId& online_id) const {
+    if (!LocalNpName().empty()) {
+        s32 user_id = 1;
+        Libraries::UserService::sceUserServiceGetInitialUser(&user_id);
+        return strncmp(GetNpId(user_id).handle.data, online_id.data, ORBIS_NP_ONLINEID_MAX_LENGTH) == 0
+                   ? user_id
+                   : -1;
+    }
     std::lock_guard lock(m_mutex_clients);
     for (auto& [uid, np_id] : m_np_ids) {
         if (strncmp(np_id.handle.data, online_id.data, ORBIS_NP_ONLINEID_MAX_LENGTH) == 0)
