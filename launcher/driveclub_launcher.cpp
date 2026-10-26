@@ -1142,9 +1142,12 @@ void BuildModel() {
     g_c.push_back(std::move(c));
   }
   const int lock_horizon = seg(L"Lock to horizon",
-                               L"The horizon stays level when the car leans in corners and dips under braking, as in Assetto Corsa; the driver's head "
-                               L"still looks into corners, and its sway is smoothed (easier on motion sickness). Cockpit: the driver's view only. "
-                               L"All views: the bonnet, bumper and chase views too. Off: the view moves with the car's body, as on PS4.",
+                               L"Keeps the horizon level when the car leans in corners and dips under braking, as in Assetto Corsa.\n"
+                               L"\x2022 Off: the view moves with the car's body, as on PS4.\n"
+                               L"\x2022 Cockpit: the driver's view only.\n"
+                               L"\x2022 All views: the bonnet, bumper and chase views too.\n"
+                               L"\x2022 The driver's head still looks into corners; its sway is smoothed.\n"
+                               L"Tip: helps with motion sickness, together with a lower Camera shake.",
                                {L"Off", L"Cockpit", L"All views"}, {"@lock_horizon", "", ""}, 0);
   {
     Ctl c{L"Camera shake",
