@@ -64,6 +64,9 @@ static bool ffb_ph_tyre_grip=true;
 /* The front tyres' braking and drive forces through the scrub radius (runtime_logiwheel.inc); wheel_ffb_physics_scrub =
  * off leaves them out. */
 static bool ffb_ph_scrub=true;
+/* The trail from the grip in use by braking, drive and cornering together (the friction circle), and the tyres' grip
+ * learnt that way; wheel_ffb_physics_combined = off: from cornering alone. */
+static bool ffb_ph_combined=true;
 /* wheel_button = <n>, ffb_gain_up / ffb_gain_down: wheel buttons that make the physics model's force for the car being
  * driven 5% stronger or weaker, kept for each car (runtime_logiwheel.inc, ffb_cars.ini); -1: not bound */
 static int ffb_gain_button[2]={-1,-1};
@@ -193,6 +196,7 @@ static void wheel_parse(const char *lhs, char *rhs) {
         else if (!strcmp(k,"damper")) ffb_ph_damper=v<0 ? 0 : v>100 ? 100 : v;
         else if (!strcmp(k,"tyre")) { lower(rhs); ffb_ph_tyre_grip=strncmp(rhs,"classic",7)!=0; }
         else if (!strcmp(k,"scrub")) { lower(rhs); ffb_ph_scrub=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
+        else if (!strcmp(k,"combined")) { lower(rhs); ffb_ph_combined=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
         return;
     }
     if (!strcmp(key,"ffb_strength")) { const int v=atoi(rhs); ffb_strength=v<0 ? 0 : v>1000 ? 1000 : v; return; }
@@ -317,8 +321,10 @@ static const char wheel_default_config[]=
     "# wheel_ffb_physics_kerbs, wheel_ffb_physics_road and wheel_ffb_physics_slip (0..200), wheel_ffb_physics_damper\n"
     "# (0..100). wheel_ffb_soft_lock, wheel_ffb_vibration_wave and wheel_ffb_invert apply too.\n"
     "# The wheel goes light where the game's tyres run out of grip and keeps getting lighter in a slide, and the front\n"
-    "# tyres' braking and drive forces turn it through the steering geometry (a kerb under braking, torque steer);\n"
-    "# wheel_ffb_physics_tyre = classic and wheel_ffb_physics_scrub = off go back to the model before those.\n"
+    "# tyres' braking and drive forces turn it through the steering geometry (a kerb under braking, torque steer), and\n"
+    "# braking hard into a corner lightens it as the front nears its limit (its grip used by braking and cornering\n"
+    "# together); wheel_ffb_physics_tyre = classic, wheel_ffb_physics_scrub = off and wheel_ffb_physics_combined = off\n"
+    "# go back to the model before those.\n"
     "# wheel_ffb_invert = true if the wheel pulls the wrong way.\n"
     "# H-pattern shifter: wheel_shifter = auto (a controller named \"Shifter\"), wheel (its buttons are on the wheel),\n"
     "# off, or part of its name; then one line per gear: wheel_gear = <button number>, <1..6 or r>. WheelSetup.exe\n"

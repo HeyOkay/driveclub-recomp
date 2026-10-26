@@ -303,7 +303,7 @@ static uint64_t ffb_car_key(uintptr_t setup) {
 static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) {
     float speed, front;
     memcpy(&speed,in+0x18,4); memcpy(&front,in+0x2c,4);
-    const float *load=st+0xa50/4, *lat=st+0xa60/4, *ratio=st+0xb30/4, *slip=st+0xb50/4;
+    const float *load=st+0xa50/4, *lat=st+0xa60/4, *lon=st+0xa70/4, *ratio=st+0xb30/4, *slip=st+0xb50/4;
     const uint64_t now=now_us();
     pthread_mutex_lock(&ph.m);
     if (ph.car!=car) {   /* another car: its tyres are learnt again from the usual values */
@@ -318,11 +318,18 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
         if (w>500.0f && w<50000.0f) ph.weight=ph.weight>0.0f ? ph.weight+(w-ph.weight)*0.01f : w;
     }
     if (ph.weight<=0.0f) { ph.valid=false; pthread_mutex_unlock(&ph.m); return; }
-    /* The car's tyres: the lateral force per load and slip angle while they grip, and the most they give */
+    /* The car's tyres: the lateral force per load and slip angle while they grip, and the most they give. Combined
+     * (wheel_ffb_physics_combined): the stiffness only while the tyre does not brake or drive much, and the most it
+     * gives from braking, drive and cornering together (its friction circle), learnt where it slides either way. The
+     * game's tyre has about one budget for both: a player's straight-line braking peaked at 1.26-1.28 of the load, the
+     * cornering plateau of that car is 1.22; learnt from cornering alone, braking in corners left mu too low (1.22
+     * for the 458, whose plateau is about 1.28). */
     for (int i=0;i<2;++i) if (speed>10.0f && load[i]>1000.0f) {
         const float a=fabsf(slip[i]), f=fabsf(lat[i])/load[i];
-        if (a>0.004f && a<0.02f) ph.k+=(fminf(60.0f,fmaxf(8.0f,f/a))-ph.k)*0.002f;
-        else if (a>0.12f) ph.mu+=(fminf(2.5f,fmaxf(0.6f,f))-ph.mu)*0.01f;
+        if (a>0.004f && a<0.02f && (!ffb_ph_combined || fabsf(lon[i])<0.1f*load[i])) ph.k+=(fminf(60.0f,fmaxf(8.0f,f/a))-ph.k)*0.002f;
+        else if (ffb_ph_combined) {
+            if (a>0.12f || fabsf(ratio[i])>0.1f) ph.mu+=(fminf(2.5f,fmaxf(0.6f,hypotf(lat[i],lon[i])/load[i]))-ph.mu)*0.01f;
+        } else if (a>0.12f) ph.mu+=(fminf(2.5f,fmaxf(0.6f,f))-ph.mu)*0.01f;
     }
     const float a_slide=3.0f*ph.mu/ph.k, a_peak=2.0f*ph.mu/ph.k;   /* all the patch slides; the most lateral force */
     /* wheel_ffb_physics_tyre = grip: where the game's tyre runs out of grip, about 1.6 mu/k (measured on the 458 and the
@@ -337,8 +344,13 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
              * about half of that at it (measured on the 458: -24% at 4.9 degrees of slip, -51% where the tyre saturates,
              * where classic gives -8% and -26%). 0.78 keeps the peak where classic has it, so the gains mean the same.
              * Past the limit the game's lateral force stays flat where a real tyre's falls off: the force falls by up to
-             * 30% over the next 14 degrees of slip, so countersteer brings it back step by step. */
-            const float u=fminf(1.0f,fabsf(lat[i])/load[i]/ph.mu), u2=u*u;
+             * 30% over the next 14 degrees of slip, so countersteer brings it back step by step.
+             * Combined: the grip in use from braking or drive and cornering together, sqrt(Fy^2+Fx^2)/(Fz mu): the more
+             * of the patch the braking makes slide, the shorter the trail, so braking hard into a corner lightens the
+             * wheel as the front nears its limit, as a real tyre's aligning moment does (a player's race: 11% of the
+             * cornering with braking, the grip in use 0.92 against 0.69 from cornering alone). */
+            const float used=ffb_ph_combined ? hypotf(lat[i],lon[i]) : fabsf(lat[i]);
+            const float u=fminf(1.0f,used/load[i]/ph.mu), u2=u*u;
             const float past=fmaxf(0.0f,fabsf(slip[i])-a_sat), fall=1.0f-0.3f*fminf(1.0f,past/0.25f);
             ph.x[i]=u;
             moment+=lat[i]*fall*0.78f*(PH_MECH_TRAIL+1.0f-u2*u2);
@@ -357,10 +369,7 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
      * trail of a gripping tyre, about 2.5 cm), scaled as the grip curve is. The 458 and Zonda R on the AI benchmark: the
      * fronts' forces differ by 1-1.4 kN in the hardest 10% of braking, a few percent of the steering force; kerbs and
      * the grass give several kN. */
-    if (ffb_ph_scrub) {
-        const float *fx=st+0xa70/4;
-        moment+=(fx[1]-fx[0])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
-    }
+    if (ffb_ph_scrub) moment+=(lon[1]-lon[0])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
     for (int i=0;i<4;++i) slipping=fmaxf(slipping,(fabsf(ratio[i])-0.12f)*5.0f);   /* wheelspin, locked wheels */
     const float moving=smoothstep(1.0f,4.0f,speed);   /* slip angles mean little at a crawl */
     ph.torque=moment/(ph.weight*PH_NORM)*moving;
@@ -556,9 +565,9 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
             sent=true;
-            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s\n",
+            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s, combined %s\n",
                               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
-                              ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off");
+                              ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off",ffb_ph_combined ? "on" : "off");
         }
     }
     if (ffb_trace_file) {
