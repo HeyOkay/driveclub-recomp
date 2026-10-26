@@ -349,6 +349,18 @@ static void ffb_physics_step(const float *st, const uint8_t *in, uintptr_t car) 
         }
         slipping=fmaxf(slipping,fabsf(slip[i])/a_peak-1.0f);
     }
+    /* The front tyres' braking and drive forces (+0xa70, negative braking) through the scrub radius: the steering axis
+     * meets the road a little inside each tyre's contact patch (about 1 cm on a road car, as the caster trail here; the
+     * game does not give its geometry), so each tyre's force turns its wheel about that axis. Equal forces cancel; a
+     * difference turns the steering: the harder braking wheel pulls it to its side (a kerb, a bump, the grass under
+     * braking, ABS), the harder driven one pushes it away (torque steer). In the moment's units above (the pneumatic
+     * trail of a gripping tyre, about 2.5 cm), scaled as the grip curve is. The 458 and Zonda R on the AI benchmark: the
+     * fronts' forces differ by 1-1.4 kN in the hardest 10% of braking, a few percent of the steering force; kerbs and
+     * the grass give several kN. */
+    if (ffb_ph_scrub) {
+        const float *fx=st+0xa70/4;
+        moment+=(fx[1]-fx[0])*0.4f*(ffb_ph_tyre_grip ? 0.78f : 1.0f);
+    }
     for (int i=0;i<4;++i) slipping=fmaxf(slipping,(fabsf(ratio[i])-0.12f)*5.0f);   /* wheelspin, locked wheels */
     const float moving=smoothstep(1.0f,4.0f,speed);   /* slip angles mean little at a crawl */
     ph.torque=moment/(ph.weight*PH_NORM)*moving;
@@ -544,9 +556,9 @@ static void ffb_physics_pass(SDL_Haptic *haptic, int32_t pos) {
         if (ffb_physics_effect(haptic,&pw.id,&pw.running,&e)) {
             pw.sent=e.constant.level;
             sent=true;
-            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s\n",
+            if (first) printf("Runtime: FFB physics model on: gain %d%%, filter %d%%, minimum force %d%%, kerbs %d%%, road %d%%, slip %d%%, damper %d%%, tyre %s, scrub %s\n",
                               ffb_ph_gain,ffb_ph_filter,ffb_ph_min_force,ffb_ph_kerbs,ffb_ph_road,ffb_ph_slip,ffb_ph_damper,
-                              ffb_ph_tyre_grip ? "grip" : "classic");
+                              ffb_ph_tyre_grip ? "grip" : "classic",ffb_ph_scrub ? "on" : "off");
         }
     }
     if (ffb_trace_file) {

@@ -58,9 +58,12 @@ static int ffb_center, ffb_slide;
  * and a damper that is strongest at a standstill. */
 static bool ffb_physics;
 static int ffb_ph_gain=100, ffb_ph_filter=0, ffb_ph_min_force=0, ffb_ph_kerbs=50, ffb_ph_road=50, ffb_ph_slip=30, ffb_ph_damper=10;
-/* wheel_ffb_physics_tyre = grip: the tyres' trail follows how much of their grip the game's forces say is used (light at
- * the real limit) and the force keeps falling past it; classic (the default): the trail from the brush model's slip. */
-static bool ffb_ph_tyre_grip;
+/* The tyres' trail follows how much of their grip the game's forces say is used (light at the real limit) and the force
+ * keeps falling past it; wheel_ffb_physics_tyre = classic: the trail from the brush model's slip, as before. */
+static bool ffb_ph_tyre_grip=true;
+/* The front tyres' braking and drive forces through the scrub radius (runtime_logiwheel.inc); wheel_ffb_physics_scrub =
+ * off leaves them out. */
+static bool ffb_ph_scrub=true;
 /* wheel_button = <n>, ffb_gain_up / ffb_gain_down: wheel buttons that make the physics model's force for the car being
  * driven 5% stronger or weaker, kept for each car (runtime_logiwheel.inc, ffb_cars.ini); -1: not bound */
 static int ffb_gain_button[2]={-1,-1};
@@ -188,7 +191,8 @@ static void wheel_parse(const char *lhs, char *rhs) {
         else if (!strcmp(k,"road")) ffb_ph_road=v<0 ? 0 : v>200 ? 200 : v;
         else if (!strcmp(k,"slip")) ffb_ph_slip=v<0 ? 0 : v>200 ? 200 : v;
         else if (!strcmp(k,"damper")) ffb_ph_damper=v<0 ? 0 : v>100 ? 100 : v;
-        else if (!strcmp(k,"tyre")) { lower(rhs); ffb_ph_tyre_grip=!strncmp(rhs,"grip",4); }
+        else if (!strcmp(k,"tyre")) { lower(rhs); ffb_ph_tyre_grip=strncmp(rhs,"classic",7)!=0; }
+        else if (!strcmp(k,"scrub")) { lower(rhs); ffb_ph_scrub=strcmp(rhs,"off") && strcmp(rhs,"false") && strcmp(rhs,"0"); }
         return;
     }
     if (!strcmp(key,"ffb_strength")) { const int v=atoi(rhs); ffb_strength=v<0 ? 0 : v>1000 ? 1000 : v; return; }
@@ -312,8 +316,9 @@ static const char wheel_default_config[]=
     "# wheel_ffb_physics_filter (0..100), wheel_ffb_physics_min_force (0..30, for gear and belt wheels),\n"
     "# wheel_ffb_physics_kerbs, wheel_ffb_physics_road and wheel_ffb_physics_slip (0..200), wheel_ffb_physics_damper\n"
     "# (0..100). wheel_ffb_soft_lock, wheel_ffb_vibration_wave and wheel_ffb_invert apply too.\n"
-    "# wheel_ffb_physics_tyre = grip: the wheel goes light where the game's tyres run out of grip and keeps getting\n"
-    "# lighter in a slide (understeer and slides are easier to feel); classic (the default): as before.\n"
+    "# The wheel goes light where the game's tyres run out of grip and keeps getting lighter in a slide, and the front\n"
+    "# tyres' braking and drive forces turn it through the steering geometry (a kerb under braking, torque steer);\n"
+    "# wheel_ffb_physics_tyre = classic and wheel_ffb_physics_scrub = off go back to the model before those.\n"
     "# wheel_ffb_invert = true if the wheel pulls the wrong way.\n"
     "# H-pattern shifter: wheel_shifter = auto (a controller named \"Shifter\"), wheel (its buttons are on the wheel),\n"
     "# off, or part of its name; then one line per gear: wheel_gear = <button number>, <1..6 or r>. WheelSetup.exe\n"
