@@ -228,7 +228,9 @@ target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui
     third_party/imgui/backends/imgui_impl_vulkan.cpp)
 target_include_directories(bbgpu PRIVATE third_party/imgui third_party/imgui/backends)
 target_compile_definitions(bbgpu PRIVATE IMGUI_IMPL_VULKAN_NO_PROTOTYPES
-    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf")
+    BB_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf"
+    BB_EXIT_BODY_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../launcher/assets/fonts/001futura-webfont.ttf"
+    BB_EXIT_HEADING_FONT_PATH="${CMAKE_CURRENT_SOURCE_DIR}/../launcher/assets/fonts/004russian-webfont.ttf")
 set_source_files_properties(shim/bbport_overlay.cpp PROPERTIES
     OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fonts/DejaVuSans.ttf)
 target_include_directories(bbgpu PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include third_party/half/include)

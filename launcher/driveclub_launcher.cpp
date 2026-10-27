@@ -31,8 +31,10 @@
 #include <cwchar>
 #include <fstream>
 #include <string>
+#include <sstream>
 #include <thread>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "datx.h"
 #include "scene_track_names.h"
@@ -138,14 +140,15 @@ int g_hover_tab = -1;
 int g_hover_info = -1, g_info_open = -1;
 
 // The cards are split over tabs so a page holds what belongs together and needs no scrolling.
-enum { kTabGraphics, kTabDetail, kTabGameplay, kTabDriving, kTabBench, kTabCount };
-const wchar_t* const kTabName[kTabCount] = {L"Graphics", L"Detail", L"Gameplay", L"Driving", L"Benchmark"};
+enum { kTabGraphics, kTabDetail, kTabGameplay, kTabDriving, kTabBench, kTabPatches, kTabCount };
+const wchar_t* const kTabName[kTabCount] = {L"Display", L"Graphics", L"General", L"Driving", L"Benchmark", L"Patches"};
 const wchar_t* const kTabHint[kTabCount] = {
     L"Frame rate, the sizes the game draws and shows, anti-aliasing and texture filtering.",
     L"Model, scenery, reflection and shadow detail, and the game's own camera effects.",
-    L"Your name and language, the mirrors, the window, the add-on content and the community patches.",
+    L"Player identity, add-on content, startup and overlays.",
     L"Driving: the field of view and the game's driving assists, and the steering wheel (its setup and force feedback).",
-    L"Drive one circuit on its own and get back the frame rate and the 1% and 0.1% lows."};
+    L"Drive one circuit on its own and get back the frame rate and the 1% and 0.1% lows.",
+    L"Compatibility workarounds, community patches and advanced runtime options."};
 int g_tab = kTabGraphics;
 RectF g_tab_rect[kTabCount];
 // The Discord button in the header: where it was drawn (layout pixels, before scaling), and whether the pointer is on it.
@@ -169,8 +172,8 @@ RectF g_sub_rect[kSubCount];
 bool HasSubTabs() { return g_tab == kTabDriving; }
 bool OnPage(const Card& card) { return card.tab == g_tab && (card.sub < 0 || card.sub == g_subtab); }
 std::wstring g_status;
+std::wstring g_settings_error;
 std::wstring g_gpu_problem;  // from CheckGpu() at start; Play stays off while it is set, unless the check is skipped
-bool g_camera_patch = true;  // enabled by default; persisted in launcher.ini
 bool g_skip_gpu_check = false;  // "Skip the graphics card check" in the launcher (skip_gpu_check= in launcher.ini)
 bool g_allow_overlays = false;  // "Let overlay programs into the game" (overlays= in launcher.ini)
 bool g_two_thread = true;       // "Two-thread rendering" (draw_threads= in launcher.ini; off by default on AMD)
@@ -345,6 +348,9 @@ enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles
               kGfxHaze, kGfxFxaa, kGfxRows };
 int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 int g_motion_blur = -1;
+int g_camera_patch_row = -1;
+bool g_camera_patch = true;
+bool g_camera_patch_saved = false;
 int motion_blur_saved = 0;  // Slow by default; Fast uses the native 60 FPS exposure.
 const wchar_t* MotionBlurHint(int choice) {
   return choice == 1
@@ -380,7 +386,7 @@ const BenchChoice kBenchTracks[] = {
     {"canada_road_circuit_01_n", L"Oliver's Landing", L"Canada"},
     {"canada_dlc_road_circuit_03_n", L"Sinclair Point", L"Canada"},
     {"canada_race_track_v1", L"Maplewood Motorsport Park", L"Canada"},
-    {"chile_road_circuit_01_n", L"Chungará Lake", L"Chile"},
+    {"chile_road_circuit_01_n", L"ChungarГЎ Lake", L"Chile"},
     {"chile_road_circuit_02_n", L"Salar de Surire", L"Chile"},
     {"chile_race_track_v1", L"Autodromo Frontera", L"Chile"},
     {"india_road_circuit_01_n", L"Glenmorgan", L"India"},
@@ -416,7 +422,7 @@ const BenchChoice kBenchCars[] = {
     {"au_rs6", L"Audi RS 6 Avant", L"Performance"},  // not run
     {"ma_mc_st", L"Maserati GranTurismo MC Stradale", L"Performance"},
     {"lo_ex", L"Lotus Exige S", L"Performance"},  // not run
-    {"au_rs5", L"Audi RS 5 Coupé", L"Sports"},
+    {"au_rs5", L"Audi RS 5 CoupГ©", L"Sports"},
     {"bm_m2", L"BMW M235i", L"Sports"},
     {"ren_dez", L"Renault DeZir", L"Sports"},
     {"vw_golf_gti", L"Volkswagen Golf GTI", L"Hot hatch"},
@@ -644,17 +650,24 @@ bool WriteWheelChanges() {
 }
 // The rows from default.ini (the runtime's defaults where it has no line); choices still waiting in launcher.ini
 // are written into it now that it exists.
+bool IsPendingWheelSetting(const std::string& line) {
+  if(line.rfind("ffb.",0)!=0) return false;
+  const auto equal=line.find('='); if(equal==std::string::npos) return false;
+  const auto key=line.substr(4,equal-4);
+  for(const auto& c:g_c) if(IsFfbKeyRow(c) && c.patches[0].substr(5)==key) return true;
+  return false;
+}
 void LoadWheel() {
   for (auto& c : g_c) if (IsFfbKeyRow(c)) c.sel = c.def;
   std::vector<std::string> pending;
-  for (const auto& l : ReadLines(IniPath())) if (l.rfind("ffb.", 0) == 0) pending.push_back(l);
+  for (const auto& l : ReadLines(IniPath())) if (IsPendingWheelSetting(l)) pending.push_back(l);
   if (WheelIniReady()) ApplyWheelLines(ReadLines(WheelIniPath()), "");
   for (auto& c : g_c) if (IsFfbKeyRow(c)) c.loaded = c.sel;
   ApplyWheelLines(pending, "ffb.");
   if (!pending.empty() && WheelIniReady() && WriteWheelChanges()) {
     // written: the waiting lines go from launcher.ini
     std::vector<std::string> keep;
-    for (const auto& l : ReadLines(IniPath())) if (l.rfind("ffb.", 0) != 0) keep.push_back(l);
+    for (const auto& l : ReadLines(IniPath())) if (!IsPendingWheelSetting(l)) keep.push_back(l);
     std::ofstream ini(IniPath().c_str(), std::ios::binary | std::ios::trunc);
     for (const auto& l : keep) ini << l << "\r\n";
   }
@@ -663,7 +676,7 @@ void LoadWheel() {
 // On Save and Play: into default.ini, or, before the game has made it, as ffb.<key>= lines for launcher.ini.
 std::string SaveWheel() {
   if (WheelIniReady()) {
-    WriteWheelChanges();
+    if(!WriteWheelChanges()) g_settings_error=L"Could not save steering-wheel settings.";
     return "";
   }
   std::string pending;
@@ -676,7 +689,12 @@ std::string SaveWheel() {
 void OpenWheelSetup() {
   for (const std::wstring& p : {g_home + L"\\WheelSetup.exe", g_home + L"\\..\\WheelSetup.exe", g_home + L"\\..\\tools\\WheelSetup.exe"}) {
     if (!Exists(p)) continue;
-    ShellExecuteW(g_hwnd, L"open", p.c_str(), nullptr, Dir(p).c_str(), SW_SHOWNORMAL);
+    const auto opened = reinterpret_cast<INT_PTR>(ShellExecuteW(g_hwnd, L"open", p.c_str(), nullptr, Dir(p).c_str(), SW_SHOWNORMAL));
+    if (opened <= 32) {
+      g_status = L"Wheel Setup could not be started (Windows error " + std::to_wstring(opened) + L").";
+      g_status_color = kBad;
+      return;
+    }
     g_status = L"Wheel Setup is open: map the wheel, pedals, handbrake and shifter there, then press Save in its window.";
     g_status_color = kMuted;
     return;
@@ -922,8 +940,8 @@ void BuildModel() {
   };
   g_preset = seg(L"Performance preset",
                  L"Picks the render and output sizes for your PC. Lower the preset if the game is slow; "
-                 L"you can still change each size below.",
-                 {L"Custom", L"Handheld", L"Low", L"Medium", L"High", L"Ultra"}, {"@preset", "", "", "", "", ""}, 0);
+                 L"you can still change each size below. PS4 restores 30 FPS, native 1080p, the game's anti-aliasing and original graphics effects, without changing core compatibility fixes.",
+                 {L"Custom", L"Handheld", L"Low", L"Medium", L"High", L"Ultra", L"PS4"}, {"@preset", "", "", "", "", "", ""}, 0);
   const int fps = (g_fps = int(g_c.size()), seg(L"Frame rate",
                       L"60 FPS (deltatime) scales the game by elapsed time, so speed stays right if the frame rate dips. "
                       L"Unlocked (VRR) uses the same timing up to your display's refresh rate: the game runs as fast as your PC allows, the speed stays right, "
@@ -969,8 +987,8 @@ void BuildModel() {
                        00));
   const int fov = toggle(L"Widescreen field-of-view fix", L"For wide and ultrawide resolutions only.",
                          "FOV fix for wide resolutions", false);
-  const int camera_patch = toggle(L"High-FPS camera workaround (experimental)",
-      L"Reduces camera, replay HUD and driver shake above 30 FPS. Behavior is still incorrect in some situations and does not match the 30 FPS reference. Enabled by default; restart the game after changing it.",
+  const int camera_patch = g_camera_patch_row = toggle(L"Camera/replay shake workaround",
+      L"Temporary, experimental high-FPS workaround. Auto-enabled for 60 FPS delta time/VRR; off for PS4/30 FPS. Manual opt-out persists until the FPS mode changes. Disable once native timing is fixed. Requires a compatible runtime.",
       "@camera_patch", true);
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
                           L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
@@ -1187,24 +1205,31 @@ void BuildModel() {
   }
   NameFfbGainRows();
   // The cards flow into as many columns as the window width allows (see LayoutPass), on the page of their tab.
-  g_cards.push_back({L"FRAME RATE AND RESOLUTION", {g_preset, fps, g_fps_cap, outres, inres, wide, fov, twothread}, 0, kTabGraphics});
+  g_cards.push_back({L"FRAME RATE", {g_preset, fps, g_fps_cap}, 0, kTabGraphics});
+  if (g_fgen >= 0) g_cards.back().ctls.push_back(g_fgen);
+  g_cards.push_back({L"RESOLUTION AND WINDOW", {outres, inres, wide, g_gfx[kGfxDynres], full}, 0, kTabGraphics});
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
-  g_cards.push_back({L"GRAPHICS DETAIL",
-                     {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery], g_gfx[kGfxSsr], g_gfx[kGfxShadows],
-                      g_gfx[kGfxParticles], g_gfx[kGfxDynres]},
-                     0, kTabDetail});
-  g_cards.push_back({L"EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail,
-                     L"The game's own camera effects, each on as on PS4."});
-  g_cards.push_back({L"GAMEPLAY", {pname, g_lang, g_mirror, full, unlock, showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
+  g_cards.push_back({L"SCENE DETAIL", {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery],
+                                      g_gfx[kGfxShadows], g_gfx[kGfxParticles]}, 0, kTabDetail});
+  g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
+  g_cards.push_back({L"CAMERA EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail});
+  g_cards.push_back({L"PLAYER", {pname, g_lang}, 0, kTabGameplay});
+  g_cards.push_back({L"CONTENT", {unlock}, 0, kTabGameplay});
+  g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"Keys while playing:  F2  pedal inputs.   F5 / F6  narrower / wider view.   F7  mouse look on or off.   F9  the new anti-aliasing on or off (not while upscaling).   F10  FSR or DLSS.   F12  FPS counter.   Page Up / Page Down  HDR brightness."});
+                     L"F2: pedal inputs. F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
-                     L"In-game: the launcher leaves that setting alone and the game's own Options menu decides. Any other choice is set by the launcher every time the game starts."});
+                     L"In-game leaves the setting to the game's Options menu. Other choices are applied when the game starts."});
   g_cards.back().sub = kSubAssists;
-  g_cards.push_back({L"PATCHES", {camera_patch, blur, reset, barrier, pcol, pproc, skipgpu}, 0, kTabGameplay,
-                     L"Community patches for DriveClub version 1.28."});
+  g_cards.push_back({L"TEMPORARY WORKAROUNDS", {camera_patch}, 0, kTabPatches,
+                     L"Optional workaround for high-FPS shake. Not needed at 30 FPS. Disable it if your runtime already corrects camera/replay timing."});
+  g_cards.push_back({L"DISPLAY COMPATIBILITY", {fov}, 0, kTabPatches});
+  g_cards.push_back({L"GAMEPLAY PATCHES", {reset, barrier}, 0, kTabPatches});
+  g_cards.push_back({L"PHOTO MODE", {pcol, pproc}, 0, kTabPatches});
+  g_cards.push_back({L"EFFECT OVERRIDES", {blur}, 0, kTabPatches});
+  g_cards.push_back({L"ADVANCED", {twothread, skipgpu}, 0, kTabGameplay});
   g_cards.push_back({L"BENCHMARK", {g_btrack, g_bcar, g_bmode, g_btod, g_bweather, g_brain, g_blen}, 0, kTabBench});
   g_cards.push_back({L"BENCHMARK RUN AND RESULT", {g_brun}, 0, kTabBench});
   // The details each (i) opens, after the row's hint.
@@ -1272,16 +1297,50 @@ const int kPresetOut[6] = {0, 1, 0, 2, 4, 4};     // Default 720p 1440p 1800p 4K
 const int kPresetIn[6] = {0, 1, 1, 0, 2, 4};      // Default(1080p) 720p 1440p 1800p 4K 8K
 const int kPresetMirror[6] = {0, 1, 0, 0, 0, 0};  // Live, Static (Handheld takes the speed)
 
+// Temporary compatibility policy: verify the native correction without this
+// workaround, then retire its auto-enable and UI entry. Do not stack a known
+// corrected native path with the workaround or infer correctness from version.
+bool FrameModeNeedsCameraPatch() {
+  return g_fps>=0 && (g_c[g_fps].sel==1 || g_c[g_fps].sel==3);
+}
+void ApplyFrameModeCameraDefault() {
+  if(g_camera_patch_row>=0)g_c[g_camera_patch_row].sel=FrameModeNeedsCameraPatch()?1:0;
+}
+constexpr int kPs4Preset = 6;
+std::vector<std::pair<int, int>> Ps4Profile() {
+  std::vector<std::pair<int,int>> values = {{g_fps,0},{g_outres,0},{g_inres,0},{g_wide,0},
+      {g_aa,0},{g_up,0},{g_aniso,1},{g_mirror,0},{g_hdr,0},{g_fgen,0},
+      {g_motion_blur,0},{g_fov,100},{g_camera_patch_row,0}};
+  for (int i=0;i<kGfxRows;++i) if(g_gfx[i]>=0) values.emplace_back(g_gfx[i],g_c[g_gfx[i]].def);
+  for(size_t i=0;i<g_c.size();++i) {
+    const auto& tag=g_c[i].patches[0];
+    if(tag=="FOV fix for wide resolutions" || tag=="Disable motion blur and depth of field" ||
+       tag=="Reset Disable" || tag=="Barrier Disable" || tag=="Disable Photomode Free Camera Collision" ||
+       tag=="Disable Photomode Processing") values.emplace_back(int(i),0);
+  }
+  return values;
+}
+bool IsPs4Profile() {
+  for(const auto& [id,value]:Ps4Profile()) if(id>=0 && g_c[id].sel!=value) return false;
+  return true;
+}
+
 // The preset row has no patch of its own: it shows the preset whose sizes are selected, else Custom.
 void DerivePreset() {
   if (g_preset < 0 || g_outres < 0 || g_inres < 0) return;
   g_c[g_preset].sel = 0;
+  if (IsPs4Profile()) { g_c[g_preset].sel=kPs4Preset; return; }
   if (g_wide >= 0 && g_c[g_wide].sel != 0) return;
   for (int p = 1; p <= 5; ++p) {
     if (g_c[g_outres].sel == kPresetOut[p] && g_c[g_inres].sel == kPresetIn[p]) g_c[g_preset].sel = p;
   }
 }
 
+bool ReadOptimizationMask(uint64_t& mask) {
+  std::ifstream in((g_data+L"\\user\\toggles.txt").c_str());
+  if(!(in>>mask)) return false;
+  in>>std::ws; return in.eof();
+}
 void LoadSettings() {
   g_two_thread = !PrimaryGpuIsAmd();  // the saved choice (draw_threads=) replaces it below
   for (const auto& line : ReadLines(IniPath())) {
@@ -1300,7 +1359,7 @@ void LoadSettings() {
     if (line.rfind("aa=", 0) == 0) aa_saved = atoi(line.substr(3).c_str());
     if (line.rfind("fgen=", 0) == 0) fgen_saved = atoi(line.substr(5).c_str());
     if (line.rfind("unlocked=", 0) == 0) unlocked_saved = line.substr(9) == "1";
-    if (line.rfind("camera_patch=", 0) == 0) g_camera_patch = line.substr(13) == "1";
+    if (line.rfind("camera_patch=",0)==0) { g_camera_patch=line.substr(13)=="1";g_camera_patch_saved=true; }
     if (line.rfind("skip_gpu_check=", 0) == 0) g_skip_gpu_check = line.substr(15) == "1";
     if (line.rfind("overlays=", 0) == 0) g_allow_overlays = line.substr(9) == "1";
     if (line.rfind("draw_threads=", 0) == 0) g_two_thread = line.substr(13) == "1";
@@ -1333,6 +1392,8 @@ void LoadSettings() {
       if (v >= 0 && v < int(g_c[b.row].items.size())) g_c[b.row].sel = v;
     }
   }
+  uint64_t existing_mask=0;
+  if(ReadOptimizationMask(existing_mask)) g_two_thread=(existing_mask & (1ull<<37))==0;
   ShowBenchChoices();
   for (auto& c : g_c) if (c.patches[0] == "@name") c.items[0] = g_name;
   CheckFolders();
@@ -1367,10 +1428,7 @@ void LoadSettings() {
       c.sel = g_check_updates ? 1 : 0;
       continue;
     }
-    if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") {
-      c.sel = g_camera_patch ? 1 : 0;
-      continue;
-    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") { c.sel=g_camera_patch?1:0; continue; }
     if (c.kind == Kind::Toggle && c.patches[0] == "@skipgpu") {
       c.sel = g_skip_gpu_check ? 1 : 0;
       continue;
@@ -1425,7 +1483,7 @@ void LoadSettings() {
   if (g_motion_blur >= 0) g_c[g_motion_blur].sel = motion_blur_saved;
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
   NameNativeUpscale();
-  DerivePreset();
+  if(!g_camera_patch_saved)ApplyFrameModeCameraDefault();
   LoadWheel();
   LoadFfbGainButtons();
   DeriveDrivePreset();
@@ -1434,6 +1492,7 @@ void LoadSettings() {
       if (line.rfind("fov=", 0) == 0) g_c[g_fov].sel = (std::clamp)(atoi(line.substr(4).c_str()), g_c[g_fov].min, g_c[g_fov].max);
     }
   }
+  DerivePreset();
 }
 
 // Resolutions above 1080p need more memory: the game's own "Memory for up to ..." patch plus a larger
@@ -1476,6 +1535,10 @@ int MemoryTier() { return (std::max)(RenderMemoryTier(), OutputMemoryTier()); }
 
 // Output / render choices per preset: indices into the "Output resolution" and "Render resolution" rows.
 void ApplyPreset(int preset) {
+  if(preset==kPs4Preset) {
+    for(const auto& [id,value]:Ps4Profile()) if(id>=0) g_c[id].sel=value;
+    NameNativeUpscale(); return;
+  }
   if (preset <= 0 || preset > 5 || g_outres < 0 || g_inres < 0) return;
   g_c[g_outres].sel = kPresetOut[preset];
   g_c[g_inres].sel = kPresetIn[preset];
@@ -1483,13 +1546,46 @@ void ApplyPreset(int preset) {
   if (g_mirror >= 0) g_c[g_mirror].sel = kPresetMirror[preset];
 }
 
-void SaveSettings() {
+bool SaveTextAtomically(const std::wstring& path,const std::string& text) {
+  const auto temp=path+L".launcher-"+std::to_wstring(GetCurrentProcessId())+L".tmp";
+  { std::ofstream out(temp.c_str(),std::ios::binary|std::ios::trunc);
+    if(out) { out<<text; out.flush(); }
+    if(!out) { DeleteFileW(temp.c_str()); g_settings_error=L"Could not write settings; the previous file was retained."; return false; }
+  }
+  if(!MoveFileExW(temp.c_str(),path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+    DeleteFileW(temp.c_str());g_settings_error=L"Could not replace settings; the previous file was retained.";return false;
+  }
+  return true;
+}
+std::string PreserveUnmanagedIni(const std::vector<std::string>& old,const std::string& managed,bool launcher=false) {
+  std::vector<std::string> keys; std::istringstream values(managed);std::string line;
+  while(std::getline(values,line)) { const auto at=line.find('=');if(at!=std::string::npos)keys.push_back(line.substr(0,at)); }
+  std::string result=managed;
+  for(const auto& previous:old) {
+    const auto at=previous.find('=');
+    if(at!=std::string::npos && std::find(keys.begin(),keys.end(),previous.substr(0,at))!=keys.end()) continue;
+    if(launcher && IsPendingWheelSetting(previous)) continue;
+    result+=previous+"\r\n";
+  }
+  return result;
+}
+bool SaveIniValue(const std::wstring& path,const std::string& key,const std::string& value) {
+  return SaveTextAtomically(path,PreserveUnmanagedIni(ReadLines(path),key+"="+value+"\r\n"));
+}
+bool SaveSettings() {
   MakeDirs(g_data + L"\\user");
+  g_settings_error.clear();
+  uint64_t saved_mask=2199023792128ull;
+  const auto toggles=g_data+L"\\user\\toggles.txt";
+  if(Exists(toggles) && !ReadOptimizationMask(saved_mask)) {
+    g_settings_error=L"The existing optimization mask is invalid; settings were not changed.";return false;
+  }
+  const auto old_ini=ReadLines(IniPath());
+  const auto old_patches=ReadLines(SelectionPath());
   {
-    std::ofstream ini(IniPath().c_str(), std::ios::binary | std::ios::trunc);
-    bool fps_on = false, pedals_on = false, fast_on = false, full_on = true, unlock_on = false;
+    std::ostringstream ini;
+    bool fps_on = false, pedals_on = false, fast_on = fast_render, full_on = true, unlock_on = false;
     for (const auto& c : g_c) {
-      if (c.kind == Kind::Toggle && c.patches[0] == "@camera_patch") g_camera_patch = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") pedals_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
@@ -1501,12 +1597,12 @@ void SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") g_check_updates = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : 0) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
     ini << "pedals=" << (pedals_on ? 1 : 0) << "\r\n";
-    ini << "camera_patch=" << (g_camera_patch ? 1 : 0) << "\r\n";
+    ini << "camera_patch=" << (g_c[g_camera_patch_row].sel ? 1 : 0) << "\r\n";
     ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
         << "\r\nbench_mode=" << g_c[g_bmode].sel << "\r\nbench_tod=" << g_c[g_btod].sel << "\r\nbench_weather=" << g_c[g_bweather].sel
@@ -1514,26 +1610,22 @@ void SaveSettings() {
     for (const auto& d : g_drive) if (d.row >= 0) ini << d.key << g_c[d.row].sel << "\r\n";
     // Only when moved here: the game may have saved a newer one since this window read it.
     if (g_hdr_paper >= 0 && g_c[g_hdr_paper].sel != g_c[g_hdr_paper].loaded) {
-      std::ofstream hdr_ini(HdrIniPath().c_str(), std::ios::binary | std::ios::trunc);
-      hdr_ini << "paper=" << g_c[g_hdr_paper].sel << "\r\n";
+      if(!SaveIniValue(HdrIniPath(),"paper",std::to_string(g_c[g_hdr_paper].sel))) return false;
       g_c[g_hdr_paper].loaded = g_c[g_hdr_paper].sel;
     }
     if (g_fov >= 0 && (g_c[g_fov].sel != 100 || Exists(CameraIniPath()))) {
-      std::ofstream cam(CameraIniPath().c_str(), std::ios::binary | std::ios::trunc);
-      cam << "fov=" << g_c[g_fov].sel << "\r\n";
+      if(!SaveIniValue(CameraIniPath(),"fov",std::to_string(g_c[g_fov].sel))) return false;
     }
     ini << SaveWheel();  // into default.ini; before the game has made it, kept here
-    // The renderer optimizations that are switched off, as a bit mask (gpu/shim/bbport_toggles.h): the game's
-    // built-in default (runtime_memory.c), plus bit 37 (the two-thread draw path) when "Two-thread rendering" is off.
-    const std::wstring toggles = g_data + L"\\user\\toggles.txt";
-    std::ofstream tog(toggles.c_str(), std::ios::binary | std::ios::trunc);
-    tog << (g_two_thread ? "2199023792128" : "2336462745600");
-    const std::wstring game_ini = g_data + L"\\user\\driveclub.ini";
-    std::ofstream game(game_ini.c_str(), std::ios::binary | std::ios::trunc);
-    game << "show_fps=" << (fps_on ? 1 : 0) << "\r\n";
-    game << "show_pedals=" << (pedals_on ? 1 : 0) << "\r\n";
+    if(!g_settings_error.empty()) return false;
+    if(!SaveTextAtomically(IniPath(),PreserveUnmanagedIni(old_ini,ini.str(),true))) return false;
+    // This control owns only bit 37. Keep every other saved optimization bit.
+    const uint64_t mask=g_two_thread ? (saved_mask & ~(1ull<<37)) : (saved_mask | (1ull<<37));
+    if(!SaveTextAtomically(toggles,std::to_string(mask))) return false;
+    if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_fps",fps_on ? "1" : "0")) return false;
+    if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_pedals",pedals_on ? "1" : "0")) return false;
   }
-  std::ofstream out(SelectionPath().c_str(), std::ios::binary | std::ios::trunc);
+  std::ostringstream out;
   for (const auto& c : g_c) {
     if (IsWheelRow(c) || c.kind == Kind::Slider || c.kind == Kind::Button) continue;  // no patches
     if (g_blur_patch >= 0 && &c == &g_c[g_blur_patch] && BlurLocked()) continue;
@@ -1548,7 +1640,13 @@ void SaveSettings() {
   if (MemoryTier() == 1) out << "Memory for up to 1440p\n";
   if (MemoryTier() == 2) out << "Memory for up to 4K\n";
   if (MemoryTier() == 3) out << "Memory for up to 8K\n";
-  g_changed = false;
+  for(const auto& previous:old_patches) {
+    bool managed=previous=="Memory for up to 1440p" || previous=="Memory for up to 4K" || previous=="Memory for up to 8K";
+    for(const auto& c:g_c) for(const auto& patch:c.patches) if(!patch.empty() && patch[0]!='@' && patch==previous) managed=true;
+    if(!managed) out<<previous<<"\n";
+  }
+  if(!SaveTextAtomically(SelectionPath(),out.str())) return false;
+  g_changed = false;return true;
 }
 
 void ResetDefaults() {
@@ -2191,7 +2289,11 @@ std::wstring GameExe() {
   return Exists(bundled) ? bundled : g_home + L"\\..\\DriveClubGame.exe";
 }
 
+DWORD g_started_game_process_id = 0;
+std::wstring g_external_progress;
+void WriteExternalProgress(int percent, const std::wstring& text);
 void SetProgress(int percent, const std::wstring& text) {
+  WriteExternalProgress(percent, text);
   g_progress = percent;
   g_progress_text = text;
   if (g_hwnd) PostMessageW(g_hwnd, WM_APP + 1, 0, 0);
@@ -2408,14 +2510,6 @@ std::wstring Preflight() {
 
 std::wstring g_game_log;  // the log file of the game started last
 
-// Set on every start, including on -> off in the same launcher process.
-void SetCameraPatchEnvironment() {
-  bool on = false;
-  for (const Ctl& c : g_c)
-    if (c.patches[0] == "@camera_patch") on = c.sel != 0;
-  SetEnvironmentVariableW(L"BB_CAMERA_PATCH", on ? L"1" : L"0");
-}
-
 // Starts the game. With `process` the caller gets the game's process handle (and closes it).
 std::wstring StartGame(HANDLE* process = nullptr) {
   const std::wstring exe = GameExe();
@@ -2484,8 +2578,8 @@ std::wstring StartGame(HANDLE* process = nullptr) {
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
                      unlock_arg + graphics_arg + L" --stub-unresolved";
+  SetEnvironmentVariableW(L"BB_CAMERA_PATCH",g_c[g_camera_patch_row].sel ? L"1" : L"0");
   SetEnvironmentVariableW(L"BB_MOTION_BLUR_REFERENCE", MotionBlurReference());
-  SetCameraPatchEnvironment();
   SetEnvironmentVariableW(L"BB_GPU_USER_DIR", user.c_str());
   SetEnvironmentVariableW(L"BB_PREFLIGHT_NOTE", g_preflight_note.empty() ? nullptr : std::wstring(g_preflight_note.begin(), g_preflight_note.end()).c_str());
   SetEnvironmentVariableW(L"BB_CRASH_DIR", (g_home + L"\\logs").c_str());
@@ -2607,6 +2701,8 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     LauncherLog("CreateProcess failed, error " + std::to_string(GetLastError()));
     return L"Could not start the game.";
   }
+  g_started_game_process_id = pi.dwProcessId;
+  WriteExternalProgress(100, L"Loading DRIVECLUB...");
   CloseHandle(pi.hThread);
   if (process) *process = pi.hProcess;
   else CloseHandle(pi.hProcess);
@@ -2688,7 +2784,7 @@ void Play() {
     g_status_color = kBad;
     return;
   }
-  SaveSettings();
+  if(!SaveSettings()) { g_status=g_settings_error;g_status_color=kBad;return; }
   g_busy = true;
   g_status.clear();
   std::thread(PlayWorker).detach();
@@ -2864,7 +2960,7 @@ void RunBenchmark() {
     g_status_color = kBad;
     return;
   }
-  SaveSettings();
+  if(!SaveSettings()) { g_status=g_settings_error;g_status_color=kBad;return; }
   g_busy = true;
   g_bench_running = true;
   g_status.clear();
@@ -3336,6 +3432,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           // choices that show or hide other rows (RowHidden)
           const bool model_changed = (c == g_ffb_model || c == g_aa || c == g_up || c == g_fps) && ctl.sel != seg;
           ctl.sel = seg;
+          if (c == g_fps && model_changed) ApplyFrameModeCameraDefault();
           if (c == g_preset) ApplyPreset(seg);
           else if (c == g_outres || c == g_inres || c == g_wide) {
             // A widescreen size sets the render and output size itself: other sizes there crop the picture.
@@ -3379,9 +3476,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (b == 3) StartUpdate();
         else if (b == 0) ResetDefaults();
         else if (b == 1) {
-          SaveSettings();
-          g_status = L"Saved.";
-          g_status_color = kOk;
+          const bool saved=SaveSettings();
+          g_status=saved ? L"Saved." : g_settings_error;
+          g_status_color=saved ? kOk : kBad;
         } else if (b == 2) Play();
       }
       InvalidateRect(h, nullptr, FALSE);
@@ -3412,9 +3509,17 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return DefWindowProcW(h, m, w, l);
 }
 
+#include "launcher_wpf_bridge.inc"
+
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
+  {
+    int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const int deferred = argv ? Updater::RunDeferred(argc, argv) : -1;
+    if (argv) LocalFree(argv);
+    if (deferred >= 0) return deferred;
+  }
   if (wcsstr(GetCommandLineW(), L"--gpu-check")) {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -3435,6 +3540,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
   MakeDirs(g_data + L"\\user");
   LoadSettings();
   LoadBenchResult();
+  {
+    int argc=0; wchar_t** argv=CommandLineToArgvW(GetCommandLineW(), &argc);
+    const int result=RunWpfBridge(argc,argv); LocalFree(argv);
+    if(result>=0){CoUninitialize();return result;}
+  }
   StartLauncherLog();
   if (!g_skip_gpu_check) {
     g_gpu_problem = CheckCpu();
@@ -3456,7 +3566,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
       if (!g_skip_gpu_check) {
         if (const std::wstring gpu = CheckGpu(); !gpu.empty()) return gpu;
       }
-      SaveSettings();
+      if(!SaveSettings()) return g_settings_error;
       SetProgress(0, L"");
       std::wstring e = RunPrepare();
       return e.empty() ? StartGame() : e;

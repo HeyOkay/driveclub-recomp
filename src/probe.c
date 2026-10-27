@@ -1530,6 +1530,8 @@ int main(int argc, char **argv) {
         }
     }
     printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
+    extern void runtime_exit_initialize(void);
+    runtime_exit_initialize();
     entered_game=1;
     struct { uint64_t argc; const char *argv[3]; } params = {1, {"/app0/eboot.bin", NULL, NULL}};
     if ((params.argv[1]=runtime_benchmark_guest_arg())) params.argc=2;
