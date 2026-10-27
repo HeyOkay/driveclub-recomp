@@ -120,7 +120,7 @@ void ExitConfirmation(float scale) {
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !view.exiting) runtime_exit_click(i);
     }
     char hints[160];
-    std::snprintf(hints,sizeof(hints),"%s  Select       %s  Back",view.confirm,view.back);
+    std::snprintf(hints,sizeof(hints),"%s • Select       %s • Back",view.confirm,view.back);
     const char *footer=view.exiting ? "Exiting DRIVECLUB..." : hints;
     const ImVec2 footer_size=exit_body->CalcTextSizeA(15*scale,FLT_MAX,0,footer);
     draw->AddText(exit_body,15*scale,ImVec2(pos.x+(w-footer_size.x)*0.5f,pos.y+154*scale),
@@ -508,8 +508,9 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+    static const ImWchar exit_body_ranges[]={0x0020,0x00ff,0x2022,0x2022,0};
     exit_body=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_exit_body),
-        int(bb_exit_body_end-bb_exit_body),20.0f,&font_config);
+        int(bb_exit_body_end-bb_exit_body),20.0f,&font_config,exit_body_ranges);
     exit_heading=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_exit_heading),
         int(bb_exit_heading_end-bb_exit_heading),28.0f,&font_config);
 
