@@ -37,6 +37,33 @@
         <Button x:Name="SaveButton" Style="{StaticResource FieldButton}" Grid.Column="2" Margin="18,0,0,0" Content="Save settings" Height="40" Click="SaveClick" Padding="20,0" FontSize="13"/>
         <Button x:Name="FooterPlay" Grid.Column="4" Content="PLAY" Height="42" Margin="18,0,0,0" Click="PlayClick" Style="{StaticResource PlayButton}" FontSize="14"/>
       </Grid></Border>
+      <!-- External link, outside the numbered page navigation. -->
+      <Button x:Name="DiscordButton" Grid.Row="2" Width="196" Height="42" Margin="16,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Panel.ZIndex="1"
+              Click="DiscordClick" ToolTip="Join the DRIVECLUB Recomp community" AutomationProperties.AutomationId="DiscordCommunityLink" AutomationProperties.Name="Discord, opens in your browser" AutomationProperties.HelpText="Join the DRIVECLUB Recomp community">
+        <Button.ContextMenu><ContextMenu><MenuItem Header="Copy Discord link" Click="CopyDiscordClick"/></ContextMenu></Button.ContextMenu>
+        <Button.Style><Style TargetType="Button">
+          <Setter Property="Foreground" Value="#8B93A1"/><Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="14,0"/>
+          <Setter Property="HorizontalContentAlignment" Value="Left"/><Setter Property="FontFamily" Value="{DynamicResource HeadingFont}"/><Setter Property="FontSize" Value="15"/><Setter Property="Cursor" Value="Hand"/><Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+          <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+            <Grid><Border x:Name="CommunityFace" Background="{TemplateBinding Background}"/>
+              <StackPanel Orientation="Horizontal" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" HorizontalAlignment="Left" IsHitTestVisible="False">
+                <Viewbox Width="20" Height="20" Margin="0,0,12,0" Stretch="Uniform"><Canvas Width="24" Height="24">
+                  <!-- Discord mark from Simple Icons 13.21.0, as in the approved mockup. -->
+                  <Path x:Name="DiscordMark" Fill="{TemplateBinding Foreground}" Data="M20.317 4.3698a19.7913 19.7913 0 0 0 -4.8851-1.5152.0741.0741 0 0 0 -.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 0 0 -.0785-.037 19.7363 19.7363 0 0 0 -4.8852 1.515.0699.0699 0 0 0 -.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 0 0 .0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 0 0 .0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 0 0 -.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 0 1 -.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 0 1 .0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 0 1 .0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 0 1 -.0066.1276 12.2986 12.2986 0 0 1 -1.873.8914.0766.0766 0 0 0 -.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 0 0 .0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 0 0 .0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 0 0 -.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/>
+                </Canvas></Viewbox>
+                <TextBlock Text="Discord" FontFamily="{TemplateBinding FontFamily}" Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center" Margin="0,-2,0,0"/>
+                <local:DottedCaptionGlyph x:Name="ExternalArrow" Glyph="ExternalLink" Width="12.8" Height="12.8" Margin="8,0,0,0" Fill="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
+              </StackPanel>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="DiscordMark" Property="Fill" Value="#5865F2"/><Setter Property="Foreground" Value="#F2F2F4"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="CommunityFace" Property="Background" Value="#0BFFFFFF"/><Setter TargetName="DiscordMark" Property="Fill" Value="#5865F2"/><Setter Property="Foreground" Value="#F2F2F4"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="CommunityFace" Property="Background" Value="#18FFFFFF"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate></Setter.Value></Setter>
+        </Style></Button.Style>
+      </Button>
       <Grid x:Name="BusyOverlay" Grid.Row="0" Grid.RowSpan="3" Panel.ZIndex="5" Background="#101014" Visibility="Collapsed">
         <Image x:Name="BusyArt" Stretch="UniformToFill"/>
         <Rectangle x:Name="BusyDim" Fill="{StaticResource ArtworkDim}"/>

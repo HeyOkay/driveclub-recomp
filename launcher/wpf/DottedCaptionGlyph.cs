@@ -19,6 +19,19 @@ public sealed class DottedCaptionGlyph : FrameworkElement
     protected override void OnRender(DrawingContext dc)
     {
         base.OnRender(dc);
+        if (Glyph == "ExternalLink")
+        {
+            // Eight dots match the reference: three across the top, three
+            // down the right, and an uninterrupted diagonal to the corner.
+            // Keep the 16-DIP caption's pitch and diameter without scaling.
+            const double pitch = 16d / 5;
+            double externalDotRadius = pitch * .29;
+            Point[] dots = [new(1, 0), new(2, 0), new(3, 0), new(2, 1),
+                new(3, 1), new(1, 2), new(3, 2), new(0, 3)];
+            foreach (var p in dots)
+                dc.DrawEllipse(Fill, null, new Point(ActualWidth / 2 + (p.X - 1.5) * pitch, ActualHeight / 2 + (p.Y - 1.5) * pitch), externalDotRadius, externalDotRadius);
+            return;
+        }
         if (Glyph == "Search")
         {
             // Match the 16-DIP, five-column caption/arrow glyphs exactly.

@@ -57,6 +57,7 @@ public partial class MainWindow : Window
     private TimeSpan lastRender;
     private int refreshRate = 240;
     private string? releaseUrl;
+    private string baseStatusColour = "#A0A0AA";
     private async Task CheckForUpdates()
     {
         if (!state.Controls.Any(c => c.Tag == "@updatecheck" && c.IsOn)) return;
@@ -68,10 +69,7 @@ public partial class MainWindow : Window
             string tag = json.RootElement.GetProperty("tag_name").GetString() ?? "";
             if (System.Version.TryParse(tag.TrimStart('v'), out var latest) && latest > new System.Version(0,3,1))
             {
-                releaseUrl = "https://github.com/OverkillLabs3/driveclub-recomp/releases/tag/" + Uri.EscapeDataString(tag);
-                SetStatus($"Version {tag} is available. Click here to open the release.");
-                Status.Cursor = System.Windows.Input.Cursors.Hand;
-                Status.ToolTip = "Opens the release page. Updating the custom WPF launcher requires rebuilding it.";
+                ShowUpdateNotice(tag);
             }
         }
         catch (HttpRequestException) { } catch (TaskCanceledException) { } catch (JsonException) { }
@@ -106,7 +104,12 @@ public partial class MainWindow : Window
         LoadFonts();
         InitializeComponent();
         if (preview) Title = "DRIVECLUB Launcher - Preview";
-        Status.MouseLeftButtonUp += (_, _) => { if (releaseUrl != null) Process.Start(new ProcessStartInfo(releaseUrl) { UseShellExecute = true }); };
+        Status.MouseLeftButtonUp += (_, _) =>
+        {
+            if (releaseUrl == null || Status.Text != baseStatus) return;
+            try { Process.Start(new ProcessStartInfo(releaseUrl) { UseShellExecute = true }); }
+            catch (Exception ex) when (ex is Win32Exception or InvalidOperationException) { SetStatus("Could not open the release page in your browser.", true); }
+        };
         StateChanged += (_, _) => MaximizeGlyph.Glyph = WindowState == WindowState.Maximized ? "Restore" : "Maximize";
         TitleLogo.Source = Image("brand/logo-red.png");
         LoadOptionBrushes();
@@ -168,7 +171,40 @@ public partial class MainWindow : Window
     private TextBlock Text(string value, double size = 14, bool heading = false, string color = "#F2F2F4") => new()
     { Text = value, FontSize = size, FontFamily = (FontFamily)Application.Current.FindResource(heading ? "HeadingFont" : "BodyFont"), Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static SolidColorBrush Brush(string color) { var b = (SolidColorBrush)new BrushConverter().ConvertFromString(color)!; b.Freeze(); return b; }
-    private void SetStatus(string text, bool error = false) { baseStatus = text; Status.Text = text; Status.Foreground = Brush(error ? "#FF9A9F" : "#A0A0AA"); }
+    private void SetStatus(string text, bool error = false)
+    {
+        baseStatus = text; baseStatusColour = error ? "#FF9A9F" : "#A0A0AA";
+        releaseUrl = null; RestoreStatus();
+    }
+    private void RestoreStatus()
+    {
+        Status.Text = baseStatus; Status.Foreground = Brush(baseStatusColour);
+        Status.Cursor = releaseUrl == null ? Cursors.Arrow : Cursors.Hand;
+        Status.ToolTip = releaseUrl == null ? null : "Opens the release page. Updating the custom WPF launcher requires rebuilding it.";
+    }
+    private void ShowStatusHint(string text)
+    {
+        Status.Text = text; Status.Foreground = Brush("#A0A0AA");
+        Status.Cursor = Cursors.Arrow; Status.ToolTip = null;
+    }
+    private void ShowUpdateNotice(string tag)
+    {
+        SetStatus($"Version {tag} is available. Click here to open the release.");
+        releaseUrl = "https://github.com/OverkillLabs3/driveclub-recomp/releases/tag/" + Uri.EscapeDataString(tag);
+        baseStatusColour = "#5AC878"; RestoreStatus();
+    }
+    private void DiscordClick(object sender, RoutedEventArgs e)
+    {
+        var result = CommunityLink.Open();
+        if (result.NeedsNotice) new CommunityLinkDialog(result.Message) { Owner = this }.ShowDialog();
+        else SetStatus("Opening Discord in your browser...");
+    }
+    private void CopyDiscordClick(object sender, RoutedEventArgs e)
+    {
+        bool copied = CommunityLink.TryCopy();
+        if (copied) SetStatus("Discord link copied: " + CommunityLink.Url);
+        else new CommunityLinkDialog("Could not copy the link. Select it below and press Ctrl+C, or try Copy link again.") { Owner = this }.ShowDialog();
+    }
     private void LoadOptionBrushes()
     {
         Application.Current.Resources["OptionActive"] = FindResource("Accent");
@@ -582,7 +618,7 @@ public partial class MainWindow : Window
         if (!quick) Place(row, new Border { Background = Brush("#2E2E31") }, 0, height - 2, width, 1);
         field.IsEnabled = setting.Enabled;
         AutomationProperties.SetName(field, setting.Label); AutomationProperties.SetAutomationId(field, (quick ? "Quick" : "Setting") + setting.Id);
-        row.ToolTip = setting.Hint; row.MouseEnter += (_, _) => Status.Text = setting.Hint; row.MouseLeave += (_, _) => Status.Text = baseStatus;
+        row.ToolTip = setting.Hint; row.MouseEnter += (_, _) => ShowStatusHint(setting.Hint); row.MouseLeave += (_, _) => RestoreStatus();
         return row;
     }
     private (string[] Labels, string[] Values, double LabelWidth, double ValueOffset, double Width) MeasureGameStatus(double availableWidth)
