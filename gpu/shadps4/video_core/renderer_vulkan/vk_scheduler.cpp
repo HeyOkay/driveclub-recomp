@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -25,6 +26,10 @@
 
 extern "C" void bbgpu_print_recent_passes(void);
 extern "C" void bbgpu_note_device_lost(void);
+
+namespace VideoCore {
+bool FewerBarriers(); // texture_cache/image.cpp
+}
 
 namespace Vulkan {
 
@@ -84,11 +89,21 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
     }
 
     const auto& db = render_state.depth_stencil_attachment;
+    // bbport: BB_FEWER_BARRIERS: an aspect a read-only layout cannot write is not stored either (STORE writes even
+    // when no draw did), so the target's barriers can treat the pass as reads only.
+    const bool fewer = VideoCore::FewerBarriers();
+    const bool depth_read_only = fewer && !db.depth_clear &&
+                                 (db.image_layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
+                                  db.image_layout == vk::ImageLayout::eDepthReadOnlyOptimal ||
+                                  db.image_layout == vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal);
+    const bool stencil_read_only = fewer && !db.stencil_clear &&
+                                   (db.image_layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
+                                    db.image_layout == vk::ImageLayout::eStencilReadOnlyOptimal);
     const vk::RenderingAttachmentInfo depth_attachment = {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
         .loadOp = db.depth_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
-        .storeOp = vk::AttachmentStoreOp::eStore,
+        .storeOp = depth_read_only ? vk::AttachmentStoreOp::eNone : vk::AttachmentStoreOp::eStore,
         .clearValue =
             vk::ClearValue{.depthStencil = vk::ClearDepthStencilValue{.depth = std::bit_cast<float>(
                                                                           db.clear_value[0])}},
@@ -97,10 +112,34 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         .imageView = db.image_view,
         .imageLayout = db.image_layout,
         .loadOp = db.stencil_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad,
-        .storeOp = vk::AttachmentStoreOp::eStore,
+        .storeOp = stencil_read_only ? vk::AttachmentStoreOp::eNone : vk::AttachmentStoreOp::eStore,
         .clearValue = vk::ClearValue{.depthStencil =
                                          vk::ClearDepthStencilValue{.stencil = db.clear_value[1]}},
     };
+
+    // bbport: BB_FEWER_BARRIERS: a clearing pass can stay in the writable layout earlier instances wrote it in, so no
+    // image barrier orders its clear after their writes. One memory barrier where the instance
+    // begins covers every subresource whatever ended the previous instance.
+    if (fewer && ((db.has_depth && db.depth_clear) || (db.has_stencil && db.stencil_clear))) {
+        constexpr auto tests = vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                               vk::PipelineStageFlagBits2::eLateFragmentTests;
+        const vk::MemoryBarrier2 clear_barrier = {
+            .srcStageMask = tests,
+            .srcAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite,
+            .dstStageMask = tests,
+            .dstAccessMask = vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+                             vk::AccessFlagBits2::eDepthStencilAttachmentRead,
+        };
+        if (!recording_threaded) {
+            current_cmdbuf.pipelineBarrier2(
+                vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &clear_barrier});
+        } else {
+            Record([clear_barrier](vk::CommandBuffer cmdbuf) {
+                cmdbuf.pipelineBarrier2(
+                    vk::DependencyInfo{.memoryBarrierCount = 1, .pMemoryBarriers = &clear_barrier});
+            });
+        }
+    }
 
     const vk::RenderingInfo rendering_info = {
         .renderArea =
@@ -144,7 +183,7 @@ void Scheduler::EndRendering() {
 
 void Scheduler::TraceDirectRecording(void* caller) {
     static const bool enabled = [] {
-        const char* env = std::getenv("BB_RECORDER_TRACE");
+        const char* env = BB_DIAGNOSTIC_ENV("BB_RECORDER_TRACE");
         return env && env[0] == '1';
     }();
     if (!enabled) {
@@ -224,7 +263,7 @@ void Scheduler::WaitDeferredSignals() {
 void Scheduler::WaitHostCopies() {
     if (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
         BbStats::WaitTimer timer{BbStats::host_copies_wait_ns};
-        BbStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::host_copy_waits.fetch_add(1, std::memory_order_relaxed);
         KickRecording(true);
         while (host_copies_done.load(std::memory_order_acquire) < host_copies_issued) {
             std::this_thread::yield();
@@ -284,6 +323,7 @@ void Scheduler::SyncRecording() {
 void Scheduler::RecorderThread(std::stop_token stoken) {
     Common::SetCurrentThreadName("bb:VkRecorder");
     BbThreads::MakeImportant();
+    BbThreads::ReserveCoreForCurrentThread(BbThreads::kRecorderThread);
     while (true) {
         // Spin briefly before sleeping: the next chunk usually follows within microseconds,
         // and a sleeping recorder costs the GPU thread a wake-up syscall per kick. With few

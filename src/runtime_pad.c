@@ -1,3 +1,4 @@
+#include "../gpu/shim/bbport_diagnostics.h"
 /* libScePad on SDL3 gamepads, with a keyboard fallback. SDL events are pumped
  * by the window thread (gpu/shim/window.cpp); here state is only sampled.
  *
@@ -90,6 +91,26 @@ static void touch_click(PadData *d, int right) {
 #include "runtime_input.inc"
 #include "runtime_wheel.inc"
 #include "runtime_logiwheel.inc"
+
+/* The overlay's pedal display (F2): the throttle, brake and clutch the game read last, 0..1. Returns 3 for a wheel
+ * with a clutch axis, 2 for a wheel without one, 1 for a gamepad's triggers (R2 throttle, L2 brake), 0 before the
+ * game has read a pad. */
+static PadData pad_last_read;   /* the last read of any port, under lock */
+static bool pad_was_read;
+int runtime_pad_pedals(float *throttle, float *brake, float *clutch) {
+    pthread_mutex_lock(&lock);
+    WheelExtension w; memcpy(&w,wheel_last_read.extension,sizeof w);
+    const PadData p=pad_last_read;
+    const bool read=pad_was_read, has_clutch=wheel_axis[WAX_CLUTCH].axis>=0;
+    pthread_mutex_unlock(&lock);
+    if (w.magic==WHEEL_MAGIC) {
+        *throttle=(float)w.throttle/65535.0f; *brake=(float)w.brake/65535.0f; *clutch=(float)w.clutch/65535.0f;
+        return has_clutch ? 3 : 2;
+    }
+    if (!read) return 0;
+    *throttle=(float)p.r2/255.0f; *brake=(float)p.l2/255.0f; *clutch=0.0f;
+    return 1;
+}
 
 /* ---- motion -------------------------------------------------------------------------
  * Like shadPS4: the pad's sensors pass straight through. Acceleration is reported the way the
@@ -460,7 +481,7 @@ static uint64_t record_start;
 static PadSample record_last;
 static void record_sample(const PadData *d) {
     static const char *path; static int checked, f9_was_down;
-    if (!checked) { path=getenv("BB_PAD_RECORD"); checked=1; }
+    if (!checked) { path=BB_DIAGNOSTIC_ENV("BB_PAD_RECORD"); checked=1; }
     if (!path || !*path || !sdl_ready) return;
     const bool *k=SDL_GetKeyboardState(NULL);
     const int f9=k && k[SDL_SCANCODE_F9];
@@ -492,7 +513,7 @@ static void replay_sample(PadData *d) {
         static int loaded;
         if (!loaded) {
             loaded=1;
-            const char *path=getenv("BB_PAD_REPLAY");
+            const char *path=BB_DIAGNOSTIC_ENV("BB_PAD_REPLAY");
             FILE *f=path ? fopen(path,"r") : NULL;
             PadSample s; unsigned v[8]; size_t cap=0;
             while (f && fscanf(f,"%u %u %u %u %u %u %u %u",&v[0],&v[1],&v[2],&v[3],&v[4],&v[5],&v[6],&v[7])==8) {
@@ -776,8 +797,9 @@ static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     pthread_mutex_lock(&lock);
     sample(data); ++reads;
     if (is_wheel_port(handle)) { wheel_sample(data,bbgpu_overlay_captures_input()); wheel_last_read=*data; }
+    pad_last_read=*data; pad_was_read=true;
 #ifdef _WIN32
-    { static int armed; if (data->buttons && !armed && getenv("DR_WATCH")) { armed=1; watch_install(data); } }
+    { static int armed; if (data->buttons && !armed && BB_DIAGNOSTIC_ENV("DR_WATCH")) { armed=1; watch_install(data); } }
 #endif
     { static unsigned nz; if (data->buttons && nz++<40) printf("Runtime: game read buttons 0x%x at %p from +0x%llx\n",data->buttons,(void *)data,(unsigned long long)((uintptr_t)__builtin_return_address(0)-runtime_image_base)); }
     pthread_mutex_unlock(&lock);

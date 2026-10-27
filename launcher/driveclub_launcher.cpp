@@ -57,6 +57,20 @@ const Color kBg(255, 16, 18, 22), kCard(255, 24, 27, 33), kCardLine(255, 38, 42,
     kAccentHover(255, 240, 84, 58), kOff(255, 63, 69, 82), kWhite(255, 245, 246, 248), kOk(255, 90, 200, 120),
     kWarn(255, 240, 170, 60), kBad(255, 240, 96, 84);
 
+// The launcher's font: Segoe UI where there is one. Under Wine and Proton there often is not, and GDI+ then draws no text at
+// all, so the first of the others that exists is used.
+const FontFamily* UiFamily() {
+  static const FontFamily* family = []() -> const FontFamily* {
+    for (const wchar_t* name : {L"Segoe UI", L"Tahoma", L"Arial", L"Liberation Sans", L"DejaVu Sans", L"Verdana"}) {
+      auto* candidate = new FontFamily(name);
+      if (candidate->IsAvailable()) return candidate;
+      delete candidate;
+    }
+    return FontFamily::GenericSansSerif();
+  }();
+  return family;
+}
+
 constexpr float kMargin = 24.f, kGap = 18.f, kHeaderH = 92.f, kFooterH = 96.f, kPad = 22.f, kTitleH = 44.f;
 constexpr float kTabH = 46.f;  // the row of tabs under the header: one group of cards at a time
 constexpr float kWinW = 960.f;
@@ -137,6 +151,15 @@ const wchar_t* const kTabHint[kTabCount] = {
     L"Compatibility workarounds, community patches and advanced runtime options."};
 int g_tab = kTabGraphics;
 RectF g_tab_rect[kTabCount];
+// The Discord button in the header: where it was drawn (layout pixels, before scaling), and whether the pointer is on it.
+RectF g_discord_rect;
+bool g_hover_discord = false;
+const wchar_t* const kDiscordUrl = L"https://discord.gg/62b8jceumR";
+bool HitDiscord(float x, float y) {
+  const float m = 2.f * g_scale;
+  return g_discord_rect.Width > 0 && x >= g_discord_rect.X * g_scale - m && x <= (g_discord_rect.X + g_discord_rect.Width) * g_scale + m &&
+         y >= g_discord_rect.Y * g_scale - m && y <= (g_discord_rect.Y + g_discord_rect.Height) * g_scale + m;
+}
 // The Driving tab has tabs of its own, in a smaller row under the main one (HitTab gives them as kTabCount + n).
 enum { kSubAssists, kSubWheel, kSubCount };
 const wchar_t* const kSubName[kSubCount] = {L"Assists and view", L"Wheel and force feedback"};
@@ -675,6 +698,225 @@ void OpenWheelSetup() {
   g_status_color = kBad;
 }
 
+// ------------------------------------------------------------------------------------------
+// FFB gain + / - (force feedback card): two wheel buttons that make the force of the car being driven 5% stronger or
+// weaker during a race (default.ini: wheel_button = <n>, ffb_gain_up / ffb_gain_down; the game keeps each car's
+// percentage). A click waits for a button of the wheel the game reads (wheel_device). SDL3 is loaded at run time from
+// runtime\, as the game has it.
+// ------------------------------------------------------------------------------------------
+void LauncherLog(const std::string& text);
+struct SdlJoyApi {
+  HMODULE lib = nullptr;
+  bool (*InitSubSystem)(uint32_t) = nullptr;
+  uint32_t (*WasInit)(uint32_t) = nullptr;
+  uint32_t* (*GetJoysticks)(int*) = nullptr;
+  void* (*OpenJoystick)(uint32_t) = nullptr;
+  void (*CloseJoystick)(void*) = nullptr;
+  const char* (*GetJoystickName)(void*) = nullptr;
+  int (*GetNumJoystickButtons)(void*) = nullptr;
+  bool (*GetJoystickButton)(void*, int) = nullptr;
+  void (*UpdateJoysticks)() = nullptr;
+  void (*Free)(void*) = nullptr;
+};
+SdlJoyApi g_joy;
+bool LoadSdlJoysticks() {
+  static bool tried = false;
+  if (tried) return g_joy.lib != nullptr;
+  tried = true;
+  HMODULE lib = LoadLibraryExW((g_home + L"\\runtime\\SDL3.dll").c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (!lib) lib = LoadLibraryW(L"SDL3.dll");
+  if (!lib) return false;
+  auto get = [&](const char* name) { return reinterpret_cast<void*>(GetProcAddress(lib, name)); };
+  g_joy.InitSubSystem = reinterpret_cast<bool (*)(uint32_t)>(get("SDL_InitSubSystem"));
+  g_joy.WasInit = reinterpret_cast<uint32_t (*)(uint32_t)>(get("SDL_WasInit"));
+  g_joy.GetJoysticks = reinterpret_cast<uint32_t* (*)(int*)>(get("SDL_GetJoysticks"));
+  g_joy.OpenJoystick = reinterpret_cast<void* (*)(uint32_t)>(get("SDL_OpenJoystick"));
+  g_joy.CloseJoystick = reinterpret_cast<void (*)(void*)>(get("SDL_CloseJoystick"));
+  g_joy.GetJoystickName = reinterpret_cast<const char* (*)(void*)>(get("SDL_GetJoystickName"));
+  g_joy.GetNumJoystickButtons = reinterpret_cast<int (*)(void*)>(get("SDL_GetNumJoystickButtons"));
+  g_joy.GetJoystickButton = reinterpret_cast<bool (*)(void*, int)>(get("SDL_GetJoystickButton"));
+  g_joy.UpdateJoysticks = reinterpret_cast<void (*)()>(get("SDL_UpdateJoysticks"));
+  g_joy.Free = reinterpret_cast<void (*)(void*)>(get("SDL_free"));
+  if (!g_joy.InitSubSystem || !g_joy.WasInit || !g_joy.GetJoysticks || !g_joy.OpenJoystick || !g_joy.CloseJoystick ||
+      !g_joy.GetJoystickName || !g_joy.GetNumJoystickButtons || !g_joy.GetJoystickButton || !g_joy.UpdateJoysticks ||
+      !g_joy.Free) {
+    FreeLibrary(lib);
+    g_joy = SdlJoyApi{};
+    return false;
+  }
+  g_joy.lib = lib;
+  return true;
+}
+const char* const kFfbGainAction[2] = {"ffb_gain_up", "ffb_gain_down"};
+int g_ffb_gain_row[2] = {-1, -1};
+int g_ffb_gain_button[2] = {-1, -1};   // the wheel button of each, -1: none
+int g_ffb_capture = -1;                // the one waiting for a wheel button (0 +, 1 -), -1: none
+std::vector<void*> g_ffb_capture_joys;
+std::vector<std::vector<char>> g_ffb_capture_held;   // buttons held: a press counts once they are let go
+constexpr UINT_PTR kFfbCaptureTimer = 23;
+constexpr uint32_t kSdlInitJoystick = 0x00000200;
+
+void NameFfbGainRows() {
+  for (int k = 0; k < 2; ++k) {
+    if (g_ffb_gain_row[k] < 0) continue;
+    const std::wstring name = k ? L"FFB gain \x2212" : L"FFB gain +";
+    g_c[size_t(g_ffb_gain_row[k])].items[0] =
+        g_ffb_capture == k            ? L"Press the wheel button for " + name + L"   (Esc: cancel, Delete: none)"
+        : g_ffb_gain_button[k] >= 0 ? name + L":  wheel button " + std::to_wstring(g_ffb_gain_button[k])
+                                    : name + L":  not set (click, then press a wheel button)";
+  }
+}
+// wheel_button = <n>, ffb_gain_up / ffb_gain_down
+bool FfbGainLine(const std::string& line, int* button, int* which) {
+  int n = -1;
+  char what[32] = "";
+  if (sscanf(line.c_str(), " wheel_button = %d , %31s", &n, what) != 2 || n < 0) return false;
+  for (int k = 0; k < 2; ++k) {
+    if (_stricmp(what, kFfbGainAction[k]) == 0) {
+      *button = n;
+      *which = k;
+      return true;
+    }
+  }
+  return false;
+}
+void LoadFfbGainButtons() {
+  g_ffb_gain_button[0] = g_ffb_gain_button[1] = -1;
+  for (const auto& l : ReadLines(WheelIniPath())) {
+    int n, k;
+    if (FfbGainLine(l, &n, &k)) g_ffb_gain_button[k] = n;
+  }
+  NameFfbGainRows();
+}
+// The two lines in default.ini after its other wheel_button lines, as WheelSetup writes them.
+bool SaveFfbGainButtons() {
+  std::ifstream in(WheelIniPath().c_str(), std::ios::binary);
+  if (!in) return false;
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  in.close();
+  const std::string nl = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+  std::vector<std::string> lines;
+  int last_button = -1;
+  for (const auto& l : ReadLines(WheelIniPath())) {
+    int n, k;
+    if (FfbGainLine(l, &n, &k)) continue;
+    lines.push_back(l);
+    if (sscanf(l.c_str(), " wheel_button = %d", &n) == 1) last_button = int(lines.size()) - 1;
+  }
+  std::vector<std::string> add;
+  for (int k = 0; k < 2; ++k) {
+    if (g_ffb_gain_button[k] >= 0) add.push_back("wheel_button = " + std::to_string(g_ffb_gain_button[k]) + ", " + kFfbGainAction[k]);
+  }
+  lines.insert(last_button >= 0 ? lines.begin() + last_button + 1 : lines.end(), add.begin(), add.end());
+  CopyFileW(WheelIniPath().c_str(), (WheelIniPath() + L".launcher-backup").c_str(), FALSE);
+  std::ofstream out(WheelIniPath().c_str(), std::ios::binary | std::ios::trunc);
+  if (!out) return false;
+  for (const auto& l : lines) out << l << nl;
+  return bool(out);
+}
+// The wheel the game reads: wheel_device from default.ini without its " @..." part, lower case; empty for auto.
+std::string FfbWheelName() {
+  std::string name;
+  for (std::string l : ReadLines(WheelIniPath())) {
+    const size_t hash = l.find('#');
+    if (hash != std::string::npos) l.resize(hash);
+    const size_t s = l.find_first_not_of(" \t"), eq = l.find('=');
+    if (s == std::string::npos || eq == std::string::npos || l.compare(s, 12, "wheel_device") != 0) continue;
+    name = l.substr(eq + 1);
+  }
+  const size_t at = name.find(" @");
+  if (at != std::string::npos) name.resize(at);
+  name.erase(0, name.find_first_not_of(" \t"));
+  while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+  for (char& ch : name) ch = char(tolower((unsigned char)ch));
+  return name == "auto" ? std::string() : name;
+}
+void StopFfbCapture(HWND h) {
+  KillTimer(h, kFfbCaptureTimer);
+  for (void* j : g_ffb_capture_joys) g_joy.CloseJoystick(j);
+  g_ffb_capture_joys.clear();
+  g_ffb_capture_held.clear();
+  g_ffb_capture = -1;
+  NameFfbGainRows();
+}
+void StartFfbCapture(HWND h, int k) {
+  const bool again = g_ffb_capture == k;
+  if (g_ffb_capture >= 0) StopFfbCapture(h);
+  if (again) return;  // a second click cancels
+  g_status_sticky = true;
+  if (!WheelIniReady()) {
+    g_status = L"Start the game once with the wheel connected: it writes the wheel settings these buttons go into.";
+    g_status_color = kWarn;
+    return;
+  }
+  if (!LoadSdlJoysticks()) {
+    g_status = L"SDL3.dll was not found in the runtime folder, so the launcher cannot read the wheel.";
+    g_status_color = kBad;
+    return;
+  }
+  if (!(g_joy.WasInit(kSdlInitJoystick) & kSdlInitJoystick)) g_joy.InitSubSystem(kSdlInitJoystick);
+  const std::string want = FfbWheelName();
+  int count = 0;
+  uint32_t* ids = g_joy.GetJoysticks(&count);
+  for (int i = 0; i < count; ++i) {
+    void* j = g_joy.OpenJoystick(ids[i]);
+    if (!j) continue;
+    std::string name = g_joy.GetJoystickName(j) ? g_joy.GetJoystickName(j) : "";
+    for (char& ch : name) ch = char(tolower((unsigned char)ch));
+    if (!want.empty() && name.find(want) == std::string::npos) {
+      g_joy.CloseJoystick(j);  // the game reads the buttons of the wheel only
+      continue;
+    }
+    g_ffb_capture_joys.push_back(j);
+  }
+  if (ids) g_joy.Free(ids);
+  if (g_ffb_capture_joys.empty()) {
+    g_status = L"The wheel was not found: connect it, or choose it in Wheel Setup.";
+    g_status_color = kWarn;
+    return;
+  }
+  g_joy.UpdateJoysticks();
+  for (void* j : g_ffb_capture_joys) {
+    std::vector<char> held(size_t((std::max)(0, g_joy.GetNumJoystickButtons(j))));
+    for (size_t b = 0; b < held.size(); ++b) held[b] = g_joy.GetJoystickButton(j, int(b)) ? 1 : 0;
+    g_ffb_capture_held.push_back(std::move(held));
+  }
+  g_ffb_capture = k;
+  g_status.clear();
+  NameFfbGainRows();
+  SetTimer(h, kFfbCaptureTimer, 30, nullptr);
+  LauncherLog("FFB gain button: waiting on " + std::to_string(g_ffb_capture_joys.size()) + " controller(s) of the wheel");
+}
+void SetFfbGainButton(HWND h, int k, int button) {
+  g_ffb_gain_button[k] = button;
+  if (button >= 0 && g_ffb_gain_button[1 - k] == button) g_ffb_gain_button[1 - k] = -1;  // one action a button
+  const bool saved = SaveFfbGainButtons();
+  StopFfbCapture(h);
+  const std::wstring name = k ? L"FFB gain \x2212" : L"FFB gain +";
+  g_status = !saved      ? L"Could not save the wheel buttons to default.ini."
+             : button >= 0 ? name + L" is wheel button " + std::to_wstring(button) + L" (from the next start of the game)."
+                           : name + L" has no button now.";
+  g_status_color = saved ? kOk : kBad;
+  g_status_sticky = true;
+}
+void PollFfbCapture(HWND h) {
+  if (g_ffb_capture < 0) return;
+  g_joy.UpdateJoysticks();
+  for (size_t a = 0; a < g_ffb_capture_joys.size(); ++a) {
+    auto& held = g_ffb_capture_held[a];
+    for (size_t b = 0; b < held.size(); ++b) {
+      const bool down = g_joy.GetJoystickButton(g_ffb_capture_joys[a], int(b));
+      if (down && !held[b]) {
+        SetFfbGainButton(h, g_ffb_capture, int(b));
+        InvalidateRect(h, nullptr, FALSE);
+        return;
+      }
+      if (!down) held[b] = 0;
+    }
+  }
+}
+
 void BuildModel() {
   g_folder[0].label = L"Update folder (version 1.28)";
   g_folder[0].hint = L"The DriveClub v1.28 update dump: the folder that contains eboot.bin. If your dump is already 1.28, leave this empty and choose it below.";
@@ -823,6 +1065,10 @@ void BuildModel() {
     g_c.push_back(std::move(c));
   }
   const int showfps = toggle(L"Show FPS counter", L"Draws the frame rate in the top right corner while playing.", "@fps", false);
+  const int showpedals = toggle(L"Show pedal inputs",
+                                L"Draws how far the clutch, brake and throttle are pressed, in the bottom left corner while "
+                                L"playing, so you can see a pedal reach 100%. F2 turns it on and off in the game.",
+                                "@pedals", false);
   const int full = toggle(L"Fullscreen", L"Plays borderless fullscreen. Turn off for a window.", "@full", true);
   const int unlock = toggle(L"Unlock DLC content",
                             L"Unlocks the DLC content: add-on cars, bikes, tours and livery decals. Cars you earn by playing still unlock through normal progression. Built from your own game files; the game folders are not modified.",
@@ -910,8 +1156,8 @@ void BuildModel() {
   g_c.push_back(Ctl{L"Controls", L"Set up your wheel, pedals, handbrake and shifter. Click Map next to a control, then move it.",
                     Kind::Button, {L"Wheel Setup..."}, {"@wheelsetup"}, 0, 0});
   g_ffb_model = seg(L"Force feedback",
-                    L"How the wheel's force is made. Reworked Physics feels like a real car and a racing sim. Original Physics is the PS4 game's own feel.",
-                    {L"Reworked Physics", L"Original Physics"}, {"@ffb:wheel_ffb_model", ""}, 1);
+                    L"How the wheel's force is made. Reworked Physics comes from the car's tyres, like a racing sim, and is the one for wheels. Original Physics is the PS4 game's own feel, not recommended for wheels.",
+                    {L"Reworked Physics", L"Original (not recommended)"}, {"@ffb:wheel_ffb_model", ""}, 1);
   g_ffb_preset = seg(L"Preset", L"Ready-made settings for your type of wheel. You can fine-tune the sliders below afterwards.",
                      {L"Direct drive", L"Gear or belt"}, {"@wheelpreset", ""}, -1);
   g_c[g_ffb_preset].physics_only = true;
@@ -943,6 +1189,16 @@ void BuildModel() {
   g_ffb_wave = seg(L"Vibration wave", L"The feel of vibrations: Sine is smooth, Square is sharper.",
                    {L"Sine", L"Square"}, {"@ffb:wheel_ffb_vibration_wave", ""}, 1);
   const int ffb_invert = toggle(L"Invert forces", L"Turn on only if the wheel pulls away from the centre instead of towards it.", "@ffb:wheel_ffb_invert", false);
+  // FFB gain + / -: two wheel buttons (NameFfbGainRows writes their text)
+  for (int k = 0; k < 2; ++k) {
+    g_ffb_gain_row[k] = int(g_c.size());
+    Ctl c{k ? L"FFB gain \x2212" : L"FFB gain +",
+          L"A button on your wheel that makes the force of the car you are driving 5% stronger (or weaker) during a race. Each car keeps its own. Click, then press the button on the wheel.",
+          Kind::Button, {L""}, {k ? "@ffbgaindown" : "@ffbgainup"}, 0, 0};
+    c.physics_only = true;
+    g_c.push_back(std::move(c));
+  }
+  NameFfbGainRows();
   // The cards flow into as many columns as the window width allows (see LayoutPass), on the page of their tab.
   g_cards.push_back({L"FRAME RATE", {g_preset, fps, g_fps_cap}, 0, kTabGraphics});
   if (g_fgen >= 0) g_cards.back().ctls.push_back(g_fgen);
@@ -955,9 +1211,9 @@ void BuildModel() {
   g_cards.push_back({L"CAMERA EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail});
   g_cards.push_back({L"PLAYER", {pname, g_lang}, 0, kTabGameplay});
   g_cards.push_back({L"CONTENT", {unlock}, 0, kTabGameplay});
-  g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, overlays, autoplay, updatecheck}, 0, kTabGameplay});
+  g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
+                     L"F2: pedal inputs. F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game leaves the setting to the game's Options menu. Other choices are applied when the game starts."});
@@ -974,7 +1230,7 @@ void BuildModel() {
   // The details each (i) opens, after the row's hint.
   const struct { const wchar_t* label; const wchar_t* more; } kMore[] = {
       {L"Widescreen (render and output)", L"Leave Output resolution and Render resolution on Default when you use a widescreen size: the widescreen size sets both, and other sizes there crop the picture. Choosing a widescreen size puts them back on Default for you."},
-      {L"Force feedback", L"Reworked Physics is recommended for every wheel. The wheel gets heavier in fast corners, goes light when the front tyres lose grip (the car runs wide), and turns itself the right way when the back of the car slides, like in Assetto Corsa. It learns each car as you drive. Original Physics gives the forces the PS4 game made."},
+      {L"Force feedback", L"Reworked Physics is recommended for every wheel. The wheel gets heavier in fast corners, goes light when the front tyres lose grip (the car runs wide), and turns itself the right way when the back of the car slides, like in Assetto Corsa. It learns each car as you drive. Original Physics gives the forces the PS4 game made for Logitech wheels in 2014: a spring that follows the car, without the tyres' grip. It is not recommended for wheels."},
       {L"Preset", L"Direct drive: wheels with the motor on the steering shaft (for example Fanatec DD, Moza, Simagic, Simucube). Gear or belt: most Logitech, Thrustmaster and Fanatec CSL or ClubSport belt wheels. A preset only moves the sliders below."},
       {L"Gain", L"Too weak and the car feels vague; too strong and the wheel hits its limit in fast corners, where it feels flat and you lose the detail. Start at 100 on a strong wheel; weaker wheels may want 150 to 200."},
       {L"Filter", L"Leave it at 0. If the wheel feels grainy or rattles, try 10 to 20."},
@@ -1003,7 +1259,8 @@ void BuildModel() {
   g_cards.push_back({L"CONTROLS", {g_wheel_setup, ffb_invert}, 0, kTabDriving,
                      L"Wheel Setup shows every controller plugged in. Click Map next to a control (steering, pedals, handbrake, buttons, gears), then move it."});
   g_cards.back().sub = kSubWheel;
-  g_cards.push_back({L"FORCE FEEDBACK", {g_ffb_model, g_ffb_preset, g_ffb_slider[0], g_ffb_slider[1], g_ffb_slider[2], g_ffb_slider[6], g_ffb_softlock}, 0, kTabDriving});
+  g_cards.push_back({L"FORCE FEEDBACK", {g_ffb_model, g_ffb_preset, g_ffb_slider[0], g_ffb_slider[1], g_ffb_slider[2], g_ffb_slider[6], g_ffb_softlock,
+                                         g_ffb_gain_row[0], g_ffb_gain_row[1]}, 0, kTabDriving});
   g_cards.back().sub = kSubWheel;
   g_cards.push_back({L"EFFECTS", {g_ffb_slider[3], g_ffb_slider[4], g_ffb_slider[5], g_ffb_wave}, 0, kTabDriving});
   g_cards.back().sub = kSubWheel;
@@ -1027,7 +1284,7 @@ std::wstring BenchName(const BenchChoice* list, int count, const std::string& id
   return i >= 0 ? std::wstring(list[i].name) : Widen(id);
 }
 
-bool fps_counter = false, fast_render = false, full_screen = true, unlock_dlc = false;  // the settings that are not patches
+bool fps_counter = false, pedal_display = false, fast_render = false, full_screen = true, unlock_dlc = false;  // the settings that are not patches
 
 // Output / render choices per preset: indices into the "Output resolution" and "Render resolution" rows,
 // and the "Mirror and reflection updates" choice (slower presets update the mirrors less often).
@@ -1085,6 +1342,7 @@ void LoadSettings() {
     if (line.rfind("update=", 0) == 0) g_folder[0].path = Widen(line.substr(7));
     if (line.rfind("base=", 0) == 0) g_folder[1].path = Widen(line.substr(5));
     if (line.rfind("fps=", 0) == 0) fps_counter = line.substr(4) == "1";
+    if (line.rfind("pedals=", 0) == 0) pedal_display = line.substr(7) == "1";
     if (line.rfind("fast=", 0) == 0) fast_render = line.substr(5) == "1";
     if (line.rfind("name=", 0) == 0) g_name = Widen(line.substr(5));
     if (line.rfind("mirror=", 0) == 0) mirror_saved = atoi(line.substr(7).c_str());
@@ -1139,6 +1397,10 @@ void LoadSettings() {
   for (auto& c : g_c) {
     if (c.kind == Kind::Toggle && c.patches[0] == "@fps") {
       c.sel = fps_counter ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") {
+      c.sel = pedal_display ? 1 : 0;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@fast") {
@@ -1218,6 +1480,7 @@ void LoadSettings() {
   NameNativeUpscale();
   if(!g_camera_patch_saved)ApplyFrameModeCameraDefault();
   LoadWheel();
+  LoadFfbGainButtons();
   DeriveDrivePreset();
   if (g_fov >= 0) {
     for (const auto& line : ReadLines(CameraIniPath())) {
@@ -1307,7 +1570,7 @@ bool SaveIniValue(const std::wstring& path,const std::string& key,const std::str
 bool SaveSettings() {
   MakeDirs(g_data + L"\\user");
   g_settings_error.clear();
-  uint64_t saved_mask=2199023808512ull;
+  uint64_t saved_mask=2199023792128ull;
   const auto toggles=g_data+L"\\user\\toggles.txt";
   if(Exists(toggles) && !ReadOptimizationMask(saved_mask)) {
     g_settings_error=L"The existing optimization mask is invalid; settings were not changed.";return false;
@@ -1316,9 +1579,10 @@ bool SaveSettings() {
   const auto old_patches=ReadLines(SelectionPath());
   {
     std::ostringstream ini;
-    bool fps_on = false, fast_on = fast_render, full_on = true, unlock_on = false;
+    bool fps_on = false, pedals_on = false, fast_on = fast_render, full_on = true, unlock_on = false;
     for (const auto& c : g_c) {
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") pedals_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@full") full_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") unlock_on = c.sel != 0;
@@ -1332,6 +1596,7 @@ bool SaveSettings() {
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
+    ini << "pedals=" << (pedals_on ? 1 : 0) << "\r\n";
     ini << "camera_patch=" << (g_c[g_camera_patch_row].sel ? 1 : 0) << "\r\n";
     ini << "motion_blur=" << (g_c[g_motion_blur].sel == 1 ? "fast" : "slow") << "\r\n";
     ini << "bench_track=" << kBenchTracks[g_bench_track].id << "\r\nbench_car=" << kBenchCars[g_bench_car].id
@@ -1353,6 +1618,7 @@ bool SaveSettings() {
     const uint64_t mask=g_two_thread ? (saved_mask & ~(1ull<<37)) : (saved_mask | (1ull<<37));
     if(!SaveTextAtomically(toggles,std::to_string(mask))) return false;
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_fps",fps_on ? "1" : "0")) return false;
+    if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_pedals",pedals_on ? "1" : "0")) return false;
   }
   std::ostringstream out;
   for (const auto& c : g_c) {
@@ -1638,7 +1904,7 @@ void RowLabel(Graphics& g, Ctl& c, int i, const Font& f, const RectF& r) {
   const bool hot = g_hover_info == i || g_info_open == i;
   Pen pen(hot ? kWhite : kMuted, 1.2f * S);
   g.DrawEllipse(&pen, c.info);
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   Font fi(&fam, 10.5f * S, FontStyleBold, UnitPixel);
   Text(g, L"i", fi, RectF(c.info.X, c.info.Y + 0.5f * S, c.info.Width, c.info.Height), hot ? kWhite : kMuted, StringAlignmentCenter);
 }
@@ -1646,7 +1912,7 @@ void RowLabel(Graphics& g, Ctl& c, int i, const Font& f, const RectF& r) {
 // A rounded panel of wrapped text at (x, y) at most `width` wide, kept inside the window; returns its rectangle.
 RectF TextPanel(Graphics& g, const std::wstring& title, const std::wstring& body, float x, float y, float width, int w, int h, bool above) {
   const float S = g_scale, pad = 14 * S;
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   Font ft(&fam, 14 * S, FontStyleBold, UnitPixel), fb(&fam, 13 * S, FontStyleRegular, UnitPixel);
   StringFormat mf;
   RectF tb{}, bb{};
@@ -1691,7 +1957,7 @@ void Paint(HDC hdc, int w, int h) {
   g.SetSmoothingMode(SmoothingModeAntiAlias);
   g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
   g.Clear(kBg);
-  FontFamily fam(L"Segoe UI");
+  const FontFamily& fam = *UiFamily();
   const float S = g_scale;
   g_oy = ContentOy();
   for (auto& c : g_c) c.info = RectF();  // set again for the rows drawn below
@@ -1720,6 +1986,33 @@ void Paint(HDC hdc, int w, int h) {
     g.FillEllipse(&dot, cr.X + 13 * S, cr.Y + 11 * S, 8 * S, 8 * S);
     Text(g, chip, fSeg, RectF(cr.X + 30 * S, cr.Y, cr.Width - 30 * S, cr.Height), chip_ok ? kOk : kWarn,
          StringAlignmentNear, StringAlignmentCenter, false, false);
+
+    // The Discord button, left of the chip: the community server.
+    g_discord_rect = RectF(g_win_w - kMargin - cw - 12.f - 30.f, 32.f, 30.f, 30.f);
+    const RectF dr = Scaled(g_discord_rect);
+    SolidBrush blurple(g_hover_discord ? Color(255, 112, 125, 255) : Color(255, 88, 101, 242));
+    g.FillEllipse(&blurple, dr);
+    // The mark: the face of the logo on a 24 x 24 grid, drawn in white with the two eyes cut out.
+    const float u = dr.Width * 0.62f / 24.f, ox = dr.X + dr.Width * 0.19f, oy = dr.Y + dr.Height * 0.21f;
+    const auto P = [&](float px, float py) { return PointF(ox + px * u, oy + py * u); };
+    GraphicsPath mark;
+    mark.StartFigure();
+    mark.AddBezier(P(4.5f, 4.2f), P(7.0f, 2.9f), P(9.5f, 2.4f), P(12.0f, 2.4f));
+    mark.AddBezier(P(12.0f, 2.4f), P(14.5f, 2.4f), P(17.0f, 2.9f), P(19.5f, 4.2f));
+    mark.AddBezier(P(19.5f, 4.2f), P(21.4f, 7.2f), P(22.5f, 11.0f), P(22.2f, 16.0f));
+    mark.AddBezier(P(22.2f, 16.0f), P(20.5f, 17.5f), P(18.7f, 18.4f), P(16.8f, 19.0f));
+    mark.AddLine(P(16.8f, 19.0f), P(15.8f, 17.2f));
+    mark.AddBezier(P(15.8f, 17.2f), P(16.6f, 16.9f), P(17.3f, 16.6f), P(18.0f, 16.1f));
+    mark.AddBezier(P(18.0f, 16.1f), P(15.0f, 17.5f), P(9.0f, 17.5f), P(6.0f, 16.1f));
+    mark.AddBezier(P(6.0f, 16.1f), P(6.7f, 16.6f), P(7.4f, 16.9f), P(8.2f, 17.2f));
+    mark.AddLine(P(8.2f, 17.2f), P(7.2f, 19.0f));
+    mark.AddBezier(P(7.2f, 19.0f), P(5.3f, 18.4f), P(3.5f, 17.5f), P(1.8f, 16.0f));
+    mark.AddBezier(P(1.8f, 16.0f), P(1.5f, 11.0f), P(2.6f, 7.2f), P(4.5f, 4.2f));
+    mark.CloseFigure();
+    SolidBrush white(Color(255, 255, 255, 255));
+    g.FillPath(&white, &mark);
+    g.FillEllipse(&blurple, ox + 5.9f * u, oy + 8.4f * u, 4.4f * u, 4.8f * u);
+    g.FillEllipse(&blurple, ox + 13.7f * u, oy + 8.4f * u, 4.4f * u, 4.8f * u);
   }
 
   // tabs: one page of cards at a time
@@ -1903,6 +2196,9 @@ void Paint(HDC hdc, int w, int h) {
   } else if (g_hover_browse >= 0) {
     msg = g_folder[g_hover_browse].hint;
     mc = kMuted;
+  } else if (g_hover_discord) {
+    msg = L"Join the DriveClub Recomp community on Discord.";
+    mc = kMuted;
   } else if (g_hover_tab >= 0) {
     msg = g_hover_tab < kTabCount ? kTabHint[g_hover_tab] : kSubHint[g_hover_tab - kTabCount];
     mc = kMuted;
@@ -1979,6 +2275,11 @@ std::wstring PatchXmlPath() {
 }
 
 std::wstring GameExe() {
+  wchar_t diagnostic[64] = {};
+  const DWORD length = GetEnvironmentVariableW(L"BB_DIAGNOSTIC_RUNTIME", diagnostic, 64);
+  if (length > 0 && length < 64 &&
+      std::wstring(diagnostic) == L"DriveClubGame.diagnostics.exe")
+    return g_runtime + L"\\DriveClubGame.diagnostics.exe";
   const std::wstring bundled = g_runtime + L"\\DriveClubGame.exe";
   return Exists(bundled) ? bundled : g_home + L"\\..\\DriveClubGame.exe";
 }
@@ -2837,7 +3138,26 @@ void UpdateMotionBlurTooltip(HWND window) {
 
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   switch (m) {
+    case WM_TIMER: {
+      if (w == kFfbCaptureTimer) {
+        PollFfbCapture(h);
+        return 0;
+      }
+      break;
+    }
     case WM_KEYDOWN: {
+      if (g_ffb_capture >= 0 && (w == VK_ESCAPE || w == VK_DELETE || w == VK_BACK)) {  // FFB gain + / - waits
+        if (w == VK_ESCAPE) {
+          StopFfbCapture(h);
+          g_status = L"Wheel button unchanged.";
+          g_status_color = kMuted;
+          g_status_sticky = true;
+        } else {
+          SetFfbGainButton(h, g_ffb_capture, -1);
+        }
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+      }
       if (w == VK_ESCAPE && g_info_open >= 0) {
         g_info_open = -1;
         InvalidateRect(h, nullptr, FALSE);
@@ -2964,6 +3284,10 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g_hover_tab = tab;
         InvalidateRect(h, nullptr, FALSE);
       }
+      if (const bool on_discord = HitDiscord(x, y); on_discord != g_hover_discord) {
+        g_hover_discord = on_discord;
+        InvalidateRect(h, nullptr, FALSE);
+      }
       UpdateMotionBlurTooltip(h);
       TRACKMOUSEEVENT t{sizeof(t), TME_LEAVE, h, 0};
       TrackMouseEvent(&t);
@@ -2972,12 +3296,47 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_MOUSELEAVE:
       g_hover_ctl = g_hover_seg = g_hover_btn = g_hover_browse = g_hover_tab = -1;
       g_hover_info = -1;
+      g_hover_discord = false;
       g_bench_ran_hover = false;
       InvalidateRect(h, nullptr, FALSE);
       return 0;
+    case WM_SETCURSOR:
+      if (g_hover_discord && LOWORD(l) == HTCLIENT) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+      }
+      break;
     case WM_LBUTTONDOWN: {
       const float x = float(GET_X_LPARAM(l)), y = float(GET_Y_LPARAM(l));
       if (g_busy) return 0;
+      if (HitDiscord(x, y)) {
+        // Where no browser can be opened the link goes to the clipboard. Under Wine and Proton ShellExecute reports success even
+        // when xdg-open is missing and nothing opens, so there the link is copied and shown every time.
+        const bool opened = reinterpret_cast<INT_PTR>(ShellExecuteW(h, L"open", kDiscordUrl, nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+        const bool wine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+        if (!opened || wine) {
+          bool copied = false;
+          if (OpenClipboard(h)) {
+            const size_t bytes = (wcslen(kDiscordUrl) + 1) * sizeof(wchar_t);
+            if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+              if (void* p = GlobalLock(mem)) {
+                memcpy(p, kDiscordUrl, bytes);
+                GlobalUnlock(mem);
+                EmptyClipboard();
+                copied = SetClipboardData(CF_UNICODETEXT, mem) != nullptr;
+              }
+              if (!copied) GlobalFree(mem);
+            }
+            CloseClipboard();
+          }
+          const wchar_t* lead = opened ? L"Discord opens in your browser. The link is also " : L"The browser could not be opened. The link is ";
+          g_status = std::wstring(lead) + (copied ? L"copied: " : L"here: ") + kDiscordUrl;
+          g_status_color = copied || opened ? kOk : kWarn;
+          g_status_sticky = true;
+          InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+      }
       CommitName();
       g_status_sticky = false;
       // the details panel: a click anywhere closes it; a click on an (i) opens it
@@ -3042,6 +3401,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (ctl.kind == Kind::Button) {
           const RectF ct = Scaled(ctl.ctl);
           if (c == g_wheel_setup && y >= ct.Y && y <= ct.Y + ct.Height) OpenWheelSetup();
+          for (int k = 0; k < 2; ++k)
+            if (c == g_ffb_gain_row[k] && y >= ct.Y && y <= ct.Y + ct.Height) StartFfbCapture(h, k);
           InvalidateRect(h, nullptr, FALSE);
           return 0;
         }
@@ -3084,6 +3445,11 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           }
           else if (c == g_ffb_preset) ApplyWheelPreset(seg);
           else if (c == g_drive_preset) ApplyDrivePreset(seg);
+          if (c == g_ffb_model && seg == 1) {
+            g_status = L"Original Physics is not recommended for wheels: it is the PS4 game's spring for 2014 Logitech wheels, without the tyres' grip. Reworked Physics gives the feel of a racing sim.";
+            g_status_color = kWarn;
+            g_status_sticky = true;
+          }
           if (IsDriveRow(ctl)) DeriveDrivePreset();
           if (c == g_aa) NameNativeUpscale();
           g_changed = true;

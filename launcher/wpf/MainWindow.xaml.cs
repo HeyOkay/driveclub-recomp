@@ -529,7 +529,26 @@ public partial class MainWindow : Window
         {
             Label(quick ? 0 : 6, labelSize.Height);
             var button = new Button { Content = setting.Options.FirstOrDefault() ?? setting.Label, Padding = new(12,0,12,0) };
-            button.Click += async (_, _) => { try { await backend.Call("wheelsetup", state); } catch (Exception ex) { SetStatus(ex.Message, true); } };
+            button.Click += async (_, _) =>
+            {
+                bool gain = setting.Tag is "@ffbgainup" or "@ffbgaindown";
+                try
+                {
+                    button.IsEnabled = false;
+                    if (gain) { busy = true; SetStatus("Press a new button on your wheel within 15 seconds."); }
+                    var response = await backend.Call(gain ? setting.Tag[1..] : "wheelsetup", state);
+                    if (gain)
+                    {
+                        // Keep pending settings; only the independently saved button labels changed.
+                        foreach (var changed in response.Controls.Where(c => c.Tag is "@ffbgainup" or "@ffbgaindown"))
+                            state.Controls.Single(c => c.Tag == changed.Tag).Options = changed.Options;
+                        pages.Remove(currentPage); ShowPage(currentPage, false);
+                        SetStatus("Wheel button saved. Takes effect on the next game launch.");
+                    }
+                }
+                catch (Exception ex) { SetStatus(ex.Message, true); }
+                finally { busy = false; button.IsEnabled = true; }
+            };
             field = button; Place(row, field, 0, fieldTop, width, 38);
         }
         else if (setting.Kind == "Slider")

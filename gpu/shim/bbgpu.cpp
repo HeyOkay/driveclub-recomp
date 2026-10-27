@@ -1,3 +1,4 @@
+#include "bbport_diagnostics.h"
 #include "bbport_recent.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "bbport_write_log.h"
@@ -33,6 +34,7 @@
 #include "core/signals.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/buffer_cache/buffer.h"
 
 extern "C" {
 // runtime_memory.c
@@ -40,6 +42,7 @@ void BbStartSampler();
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
 int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
+void runtime_memory_read_sparse(uintptr_t address, void* data, uint64_t size);
 uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
 int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
 void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
@@ -111,6 +114,16 @@ u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
     return runtime_memory_clamp(virtual_addr, size);
 }
 static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    // bbport: one region lookup per part, in the runtime. BB_SPARSE_COPY=0: the region lookup here, then the
+    // backing copy's own lookup of the same region.
+    static const bool one_lookup = [] {
+        const char* env = std::getenv("BB_SPARSE_COPY");
+        return !(env && env[0] == '0');
+    }();
+    if (one_lookup) {
+        runtime_memory_read_sparse(source, dest, size);
+        return;
+    }
     while (size) {
         uintptr_t start = 0, end = 0;
         int mapped = 0;
@@ -144,11 +157,11 @@ bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
 void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
     BbStats::Timer timer{BbStats::t_protect};
     const u64 pages = (size + 4095) / 4096;
-    BbStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
-    BbStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
     if (!True(perms & MemoryPermission::Write)) {
-        BbStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
-        BbStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
     }
     runtime_memory_gpu_protect(virtual_addr, size, True(perms & MemoryPermission::Read),
                                True(perms & MemoryPermission::Write));
@@ -242,6 +255,7 @@ extern "C" int bbgpu_init(const BbGpuConfig* config) {
     StartProfileWriter();
 #endif
     g_sdk_version = config->sdk_version;
+    VideoCore::SetStreamPlacementRenderHeight(config->render_height);
 #ifdef _WIN32
     if (config->user_dir && !std::getenv("BB_GPU_USER_DIR")) _putenv_s("BB_GPU_USER_DIR", config->user_dir);
 #else

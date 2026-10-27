@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
 
@@ -30,6 +31,7 @@ struct PushConstants {
     std::array<float, 2> jitter;
     std::array<float, 2> previous_jitter;
     u32 mode;
+    float use_highlight;
 };
 
 /// a * b for 3x4 affine matrices (rows [R | t]).
@@ -52,14 +54,14 @@ std::array<float, 12> Multiply(const std::array<float, 12>& a, const std::array<
 CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
                            VideoCore::TextureCache& texture_cache_, Runtime& runtime_)
     : instance{instance_}, scheduler{scheduler_}, texture_cache{texture_cache_}, runtime{runtime_} {
-    const char* env = std::getenv("BB_DEBUG_MOTION");
+    const char* env = BB_DIAGNOSTIC_ENV("BB_DEBUG_MOTION");
     debug_overlay = env && env[0] == '1';
-    // The upscaler can be switched on from the menu at any time: the camera is always tracked
-    // unless BB_UPSCALER=none.
-    for_upscaler = BbSettings::UpscalerOptIn();
+    // The temporal upscaler can be switched on from the menu at any time. DriveAA's DLSS path
+    // also needs these vectors, even though its launcher option is BB_AA=dlss.
+    for_upscaler = BbSettings::MotionVectorsOptIn();
     const auto device = instance.GetDevice();
     if (for_upscaler) {
-        const std::array<vk::DescriptorSetLayoutBinding, 3> motion_bindings = {{
+        const std::array<vk::DescriptorSetLayoutBinding, 4> motion_bindings = {{
             {.binding = 0,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .descriptorCount = 1,
@@ -69,6 +71,10 @@ CameraMotion::CameraMotion(const Instance& instance_, Scheduler& scheduler_,
              .descriptorCount = 1,
              .stageFlags = vk::ShaderStageFlagBits::eCompute},
             {.binding = 2,
+             .descriptorType = vk::DescriptorType::eSampledImage,
+             .descriptorCount = 1,
+             .stageFlags = vk::ShaderStageFlagBits::eCompute},
+            {.binding = 3,
              .descriptorType = vk::DescriptorType::eSampledImage,
              .descriptorCount = 1,
              .stageFlags = vk::ShaderStageFlagBits::eCompute},
@@ -176,8 +182,24 @@ vk::Image CameraMotion::ObjectMotionImage(u32 width, u32 height) const noexcept 
                                                       : vk::Image{};
 }
 
+vk::ImageView CameraMotion::PrepareObjectMotion(vk::CommandBuffer cmdbuf, u32 width, u32 height,
+                                                bool& valid) {
+    if (!object_motion || !object_motion->Enabled()) {
+        valid = false;
+        return {};
+    }
+    return object_motion->PrepareRead(cmdbuf, width, height, valid);
+}
+
+void CameraMotion::AdvanceObjectMotionFrame() {
+    if (object_motion && object_motion->Enabled()) {
+        object_motion->OnFrameStart();
+    }
+}
+
 void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_view,
-                                vk::ImageView motion_view, u32 width, u32 height) {
+                                vk::ImageView motion_view, u32 width, u32 height,
+                                vk::ImageView color_view) {
     bool object_valid = false;
     const vk::ImageView object_view = object_motion && object_motion->Enabled()
         ? object_motion->PrepareRead(cmdbuf, width, height, object_valid) : depth_view;
@@ -189,6 +211,7 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
         .jitter = jitter,
         .previous_jitter = previous_jitter,
         .mode = object_valid ? 1u : 0u,
+        .use_highlight = object_valid && color_view ? 1.0f : 0.0f,
     };
     const vk::DescriptorImageInfo depth_info{.imageView = depth_view,
                                              .imageLayout = vk::ImageLayout::eGeneral};
@@ -196,7 +219,10 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
                                               .imageLayout = vk::ImageLayout::eGeneral};
     const vk::DescriptorImageInfo object_info{.imageView = object_view,
                                               .imageLayout = vk::ImageLayout::eGeneral};
-    const std::array<vk::WriteDescriptorSet, 3> writes = {{
+    const vk::DescriptorImageInfo color_info{
+        .imageView = color_view ? color_view : depth_view,
+        .imageLayout = vk::ImageLayout::eGeneral};
+    const std::array<vk::WriteDescriptorSet, 4> writes = {{
         {.dstBinding = 0,
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
@@ -209,6 +235,10 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
          .descriptorCount = 1,
          .descriptorType = vk::DescriptorType::eSampledImage,
          .pImageInfo = &object_info},
+        {.dstBinding = 3,
+         .descriptorCount = 1,
+         .descriptorType = vk::DescriptorType::eSampledImage,
+         .pImageInfo = &color_info},
     }};
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, *motion_pipeline);
     cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *motion_pipeline_layout, 0,
@@ -219,13 +249,16 @@ void CameraMotion::RecordMotion(vk::CommandBuffer cmdbuf, vk::ImageView depth_vi
 }
 
 void CameraMotion::OnConstants(const float* data) {
+    // The first one of a frame is the main camera. Checked before reading: data is in the constant ring, which can
+    // be VRAM read through the BAR (BB_RING_MEMORY=device), where every read is an uncached PCIe round trip; reading
+    // it for each g-buffer draw cost the recording stage ~2 ms a frame.
+    if (frame_has_camera) {
+        return;
+    }
     // Scene constants: far plane 3000, 1/far, and the render size.
     if (data[0] != 3000.0f || data[4] < 64.0f || data[5] < 64.0f ||
         std::abs(data[1] * data[0] - 1.0f) > 1e-3f) {
         return;
-    }
-    if (frame_has_camera) {
-        return; // the first one of a frame is the main camera
     }
     previous = current;
     std::memcpy(current.view.data(), data + 8, 12 * sizeof(float));
@@ -250,7 +283,6 @@ void CameraMotion::OnDisplayPass(VideoCore::ImageId frame) {
     }
     if (!frame_has_camera) InvalidateHistory();
     frame_has_camera = false;
-    depth_id = {};
 }
 
 void CameraMotion::Overlay(VideoCore::ImageId frame) {

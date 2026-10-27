@@ -1,3 +1,4 @@
+#include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -334,10 +335,10 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto new_info = requested_info;
         new_info.resources = std::max(requested_info.resources, cache_image.info.resources);
         new_info.UpdateSize();
-        BbStats::image_creates[0].fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::image_creates[0].fetch_add(1, std::memory_order_relaxed);
         if (new_info.size.width == 768 && new_info.size.height == 512) {
-            BbStats::mirror_img_created[0].fetch_add(1, std::memory_order_relaxed);
-            BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(new_info.guest_address), std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created[0].fetch_add(1, std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(new_info.guest_address), std::memory_order_relaxed);
         }
         ImageId new_image_id;
         // bbport: DriveClub switches a few images between the two forms twice per frame (a depth
@@ -710,10 +711,10 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 ImageId TextureCache::ExpandImage(const ImageInfo& info_ref, ImageId image_id) {
     // `info_ref` may live inside a slot image: inserting can move the storage, so work on a copy.
     const ImageInfo info = info_ref;
-    BbStats::image_creates[1].fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::image_creates[1].fetch_add(1, std::memory_order_relaxed);
     if (info.size.width == 768 && info.size.height == 512) {
-        BbStats::mirror_img_created[1].fetch_add(1, std::memory_order_relaxed);
-        BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(info.guest_address), std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created[1].fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(info.guest_address), std::memory_order_relaxed);
     }
     const auto new_image_id = slot_images.insert(instance, runtime, slot_image_views, info);
     RegisterImage(new_image_id);
@@ -840,10 +841,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     // Create and register a new image
     if (!image_id) {
-        BbStats::image_creates[2].fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::image_creates[2].fetch_add(1, std::memory_order_relaxed);
         if (info.size.width == 768 && info.size.height == 512) {
-            BbStats::mirror_img_created[2].fetch_add(1, std::memory_order_relaxed);
-            BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(info.guest_address), std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created[2].fetch_add(1, std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_created_stale.fetch_add(BbStats::MirrorStale(info.guest_address), std::memory_order_relaxed);
         }
         image_id = slot_images.insert(instance, runtime, slot_image_views, info);
         RegisterImage(image_id);
@@ -881,15 +882,21 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
 ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure_valid) {
     ImageIds image_ids;
-    ForEachImageInRegion(address, size, [&](ImageId image_id, Image& image) {
-        if (image.info.guest_address != address) {
-            return;
+    // bbport (upstream shadPS4 #5240): only images that start at `address` qualify, and an image is registered on
+    // every page it covers, its first one included: that page alone holds all of them. Walking every page of a
+    // large texel buffer range cost tens of microseconds per bind (inFAMOUS: 23.2 -> 30.7 FPS).
+    if (const auto it = page_table.find(address >> Traits::PageBits); it != nullptr) {
+        for (const ImageId image_id : *it) {
+            Image& image = slot_images[image_id];
+            if (image.info.guest_address != address) {
+                continue;
+            }
+            if (ensure_valid && !image.SafeToDownload()) {
+                continue;
+            }
+            image_ids.push_back(image_id);
         }
-        if (ensure_valid && !image.SafeToDownload()) {
-            return;
-        }
-        image_ids.push_back(image_id);
-    });
+    }
     if (image_ids.size() == 1) {
         // Sometimes image size might not exactly match with requested buffer size
         // If we only found 1 candidate image use it without too many questions.
@@ -993,7 +1000,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             info.guest_address = desc.info.stencil_addr;
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
-            BbStats::image_creates[3].fetch_add(1, std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::image_creates[3].fetch_add(1, std::memory_order_relaxed);
             stencil_id = slot_images.insert(instance, runtime, slot_image_views, info);
             RegisterImage(stencil_id);
         }
@@ -1016,7 +1023,7 @@ void TextureCache::RefreshImage(Image& image) {
     if (BbStats::mirror_skipping.load(std::memory_order_relaxed) &&
         True(image.flags & ImageFlagBits::GpuModified) && image.info.size.width == 768 &&
         image.info.size.height == 512 && BbStats::IsMirrorTarget(image.info.guest_address)) {
-        BbStats::mirror_refresh_blocked.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::mirror_refresh_blocked.fetch_add(1, std::memory_order_relaxed);
         image.flags &= ~ImageFlagBits::Dirty;
         return;
     }
@@ -1050,7 +1057,7 @@ void TextureCache::RefreshImage(Image& image) {
     const bool is_gpu_modified = True(image.flags & ImageFlagBits::GpuModified);
     const bool is_gpu_dirty = True(image.flags & ImageFlagBits::GpuDirty);
 
-    BbStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::image_upload_bytes.fetch_add(image.info.guest_size, std::memory_order_relaxed);
     boost::container::small_vector<vk::BufferImageCopy, 14> image_copies;
     for (u32 m = 0; m < num_mips; m++) {
         const u32 width = std::max(image.info.size.width >> m, 1u);
@@ -1105,14 +1112,15 @@ void TextureCache::RefreshImage(Image& image) {
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
                                      AmdGpu::BorderColorBuffer border_color_base,
-                                     const bool is_depth, float extra_lod_bias) {
-    // Compare and plain uses of one S# need separate samplers; so do extra LOD biases.
-    const u64 hash = HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
-                                 u64(std::bit_cast<u32>(extra_lod_bias)));
+                                     const bool is_depth, float extra_lod_bias, bool isotropic) {
+    // Compare and plain uses of one S# need separate samplers; so do extra LOD biases and isotropic ones.
+    const u64 hash = HashCombine(HashCombine(HashCombine(XXH3_64bits(&sampler, sizeof(sampler)), is_depth),
+                                             u64(std::bit_cast<u32>(extra_lod_bias))),
+                                 u64(isotropic));
 
     std::scoped_lock lock{samplers_mutex};
     const auto [it, new_sampler] = samplers.try_emplace(hash, instance, sampler, border_color_base,
-                                                        is_depth, extra_lod_bias);
+                                                        is_depth, extra_lod_bias, isotropic);
     if (new_sampler) {
         samplers.at(hash).lru_id = sampler_lru_cache.Insert(hash, gc_tick);
     } else {
@@ -1123,7 +1131,7 @@ vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
 }
 
 void TextureCache::RegisterImage(ImageId image_id) {
-    BbStats::images_registered.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::images_registered.fetch_add(1, std::memory_order_relaxed);
     Image& image = slot_images[image_id];
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered),
                "Trying to register an already registered image");
@@ -1163,7 +1171,7 @@ void TextureCache::UnregisterImage(ImageId image_id) {
 }
 
 void TextureCache::TrackImage(ImageId image_id) {
-    BbStats::image_tracking[0].fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::image_tracking[0].fetch_add(1, std::memory_order_relaxed);
     auto& image = slot_images[image_id];
     if (!(image.flags & ImageFlagBits::Registered)) {
         return;
@@ -1221,7 +1229,7 @@ void TextureCache::TrackImageTail(ImageId image_id) {
 }
 
 void TextureCache::UntrackImage(ImageId image_id) {
-    BbStats::image_tracking[1].fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::image_tracking[1].fetch_add(1, std::memory_order_relaxed);
     auto& image = slot_images[image_id];
     if (!image.IsTracked()) {
         return;
@@ -1362,7 +1370,7 @@ void TextureCache::GarbageCollectImages() {
             ++gc_downloads;
         }
         ++gc_evictions;
-        BbTrace::evictions.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbTrace::evictions.fetch_add(1, std::memory_order_relaxed);
         FreeImage(image_id);
         if (total_used_memory < critical_gc_memory) {
             if (aggresive) {
@@ -1468,8 +1476,8 @@ void TextureCache::DeleteImage(ImageId image_id) {
     {
         const auto& freed = slot_images[image_id].info;
         if (freed.size.width == 768 && freed.size.height == 512) {
-            BbStats::mirror_img_freed.fetch_add(1, std::memory_order_relaxed);
-            BbStats::mirror_img_freed_stale.fetch_add(BbStats::MirrorStale(freed.guest_address), std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_freed.fetch_add(1, std::memory_order_relaxed);
+            if constexpr (BB_DIAGNOSTICS) BbStats::mirror_img_freed_stale.fetch_add(BbStats::MirrorStale(freed.guest_address), std::memory_order_relaxed);
         }
     }
     Image& image = slot_images[image_id];

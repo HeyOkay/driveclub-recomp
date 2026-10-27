@@ -121,6 +121,17 @@ int RunWpfBridge(int argc,wchar_t** argv) {
       else if(command==L"--ui-drive-preset"){if(g_c[g_drive_preset].sel>=0)ApplyDrivePreset(g_c[g_drive_preset].sel);}
       else if(command==L"--ui-wheel-preset"){if(g_c[g_ffb_preset].sel>=0)ApplyWheelPreset(g_c[g_ffb_preset].sel);}
       else if(command==L"--ui-wheelsetup"){OpenWheelSetup();}
+      else if(command==L"--ui-ffbgainup" || command==L"--ui-ffbgaindown"){
+        // Reuse the native wheel capture without opening the native launcher.
+        HWND capture=CreateWindowExW(0,L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
+        if(!capture)throw std::runtime_error("Cannot start wheel button capture");
+        StartFfbCapture(capture,command==L"--ui-ffbgainup"?0:1);
+        const auto until=GetTickCount64()+15000;
+        while(g_ffb_capture>=0 && GetTickCount64()<until){PollFfbCapture(capture);Sleep(30);}
+        if(g_ffb_capture>=0){StopFfbCapture(capture);g_status=L"No new wheel button pressed within 15 seconds.";g_status_color=kWarn;}
+        DestroyWindow(capture);
+        if(g_status_color.GetValue()!=kOk.GetValue())throw std::runtime_error(Narrow(g_status));
+      }
       else if(command==L"--ui-apply"||command==L"--ui-run"||command==L"--ui-benchmark"){
         DerivePreset();DeriveDrivePreset();DeriveWheelPreset();
         if(!SaveSettings()) throw std::runtime_error(Narrow(g_settings_error));

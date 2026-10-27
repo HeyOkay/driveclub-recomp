@@ -24,6 +24,13 @@ The native card model is the single source of category membership and reset
 scopes. Controls omitted by the native release are not exposed by the shell.
 Resolution presets and the existing settings/patch formats are retained.
 
+The current main's pedal input overlay is available under General (F2 while
+playing). Its per-car FFB gain button assignments remain under Driving / Wheel
+and force feedback. These buttons use the native wheel capture and save only
+their assignments; other pending settings are retained. Capture times out after
+15 seconds without a new wheel button. Physical wheel capture needs hardware
+validation; the prerequisite and settings-preservation paths are covered offline.
+
 ### PS4 preset
 
 Quick Settings offers **PS4**: 30 FPS, native 1080p output/render, original game
