@@ -26,7 +26,8 @@ Check (!(Get-SetupRuntimeState -Directory $app -Roots @($runtime)).Available) 'D
 Fixture (Join-Path $runtime 'shared\Microsoft.NETCore.App\8.0.32\coreclr.dll')
 Check ((Get-SetupRuntimeState -Directory $app -Roots @($runtime)).Available) 'compatible newer Core patch is accepted'
 Fixture (Join-Path $app 'coreclr.dll');Fixture (Join-Path $app 'PresentationNative_cor3.dll')
-[IO.File]::WriteAllText((Join-Path $app 'DriveClub.runtimeconfig.json'),'{"runtimeOptions":{"includedFrameworks":[{"name":"Microsoft.WindowsDesktop.App","version":"8.0.31"}]}}')
+Fixture (Join-Path $app 'hostfxr.dll');Fixture (Join-Path $app 'hostpolicy.dll')
+[IO.File]::WriteAllText((Join-Path $app 'DriveClub.Launcher.runtimeconfig.json'),'{"runtimeOptions":{"includedFrameworks":[{"name":"Microsoft.WindowsDesktop.App","version":"8.0.31"}]}}')
 Check ((Get-SetupRuntimeState -Directory $app -Roots @()).Bundled) 'self-contained package needs no system install'
 foreach ($url in @('http://builds.dotnet.microsoft.com/a.exe','https://example.com/a.exe','https://builds.dotnet.microsoft.com:444/a.exe','https://user@builds.dotnet.microsoft.com/a.exe','file:///C:/test.exe')) {
     Reject { Assert-MicrosoftDownload $url } ('untrusted URL rejected: '+$url)

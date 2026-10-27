@@ -1,9 +1,10 @@
 # DRIVECLUB WPF launcher
 
-Windows .NET 8 WPF shell over the native launcher backend. `DriveClub.exe` is the
-shell; `DriveClub.Backend.exe` owns settings, patch selection, game preparation,
-launch and benchmarks. A one-shot runtime notification coordinates the splash
-handoff; rendering algorithms and game logic are unchanged.
+Windows .NET 8 WPF shell over the native launcher backend. `DriveClub.exe` is a
+small native bootstrapper. It opens `DriveClub.Launcher.exe` on Windows, or
+`DriveClub.Native.exe` under Wine/Proton. `DriveClub.Backend.exe` owns settings,
+preparation, launch and benchmarks. The runtime provides the first-frame splash
+signal and the root-menu exit confirmation; rendering algorithms are unchanged.
 
 ## Settings
 
@@ -61,8 +62,9 @@ Reset and profile selection do not save; Save settings and Play persist changes.
 ## Build and review
 
 Building requires Windows, MSYS2 CLANG64 and .NET SDK 8+ with Windows desktop
-targeting. The default package includes `Setup.exe`, which checks for .NET 8
-Desktop x64 and offers to install it from Microsoft only when missing.
+targeting. The default package starts with a native `DriveClub.exe`, which checks
+for .NET 8 Desktop x64 and offers to install it from Microsoft only when missing.
+There is no separate Setup.exe. The native interface is included automatically.
 
 ```powershell
 ./launcher/build-wpf.ps1 -OutputDirectory C:\path\to\separate\preview
@@ -128,28 +130,49 @@ launcher without starting a game. Add `--capture-benchmark-splash` to exercise
 the Benchmark preview path. `DriveClub.exe --benchmark` opens the Benchmark page
 and starts the configured run; it does not select or overwrite a performance preset.
 
-## First-run setup
+## Startup and .NET prerequisites
 
-Extract the complete launcher package and run `Setup.exe`. It runs the supplied
-`Install-Launcher.ps1` with Windows PowerShell, which is available independently
-of .NET 8. If a compatible x64 Core and Desktop runtime is already present, Setup
-opens `DriveClub.exe` without a download or runtime installation. It also detects
-a self-contained package. Running `DriveClub.exe` directly still works when its
-runtime is available.
+Run `DriveClub.exe`. On Windows it checks compatible x64 Core and Desktop 8
+runtimes directly, without PowerShell or a download when they are present. It
+also recognizes a self-contained package. The WPF shell is
+`DriveClub.Launcher.exe`; keep its matching DLL/deps/runtimeconfig files beside it.
+The bootstrapper forwards arguments, working directory and child exit status.
 
-If missing, Setup asks before downloading the newest stable .NET 8 Desktop x64
-installer from Microsoft's HTTPS release metadata. It checks the SHA-512 and a
-valid Microsoft Corporation Authenticode signature before requesting elevation
-for the official installer. The installer is run with `/install /quiet /norestart`;
-cancellation/errors do not launch the WPF shell. A requested Windows restart is
-reported rather than performed automatically. Downloads are process-local
-temporary files and are removed on completion. Setup does not copy, reset or
-rewrite launcher preferences, patches or game data. This is prerequisite setup
-for the portable launcher, not an installer for the game files.
+If .NET is missing, the supplied `Install-Launcher.ps1` asks permission before
+using Microsoft's HTTPS release metadata to download the Desktop x64 installer.
+It validates SHA-512 and the trusted Microsoft signature, then requests elevation
+for the official installer. Downloads are temporary, cancellation stops startup,
+and Windows is never restarted automatically. After installation the bootstrapper
+rechecks availability and starts WPF with the original arguments. No preferences
+or game data are rewritten by the prerequisite check/installation.
 
-`Setup.exe --check-only` and `Install-Launcher.ps1 -CheckOnly` only report runtime
-availability; they never download, install or open the launcher. Offline logic
-checks: `powershell -NoProfile -File launcher/tests/setup/verify.ps1 -OutputDirectory C:\path\to\fixtures`.
+Under Wine/Proton the bootstrapper selects `DriveClub.Native.exe` immediately,
+without .NET detection, PowerShell or installation. On Windows, use
+`DriveClub.exe --native` or open `DriveClub.Native.exe` directly for the same
+fallback. Actual Wine/Proton execution still requires testing; the route and
+argument forwarding are covered by Windows tests.
+
+`DriveClub.exe --check-only` launches nothing: exit 0 means the selected interface
+is available; exit 2 means .NET is missing on the WPF route. A missing program
+file returns 1. `DriveClub.exe --native --check-only` checks only the native route.
+`Install-Launcher.ps1 -CheckOnly` prints the runtime state without installation.
+
+Native runtime-detection/routing tests are in `launcher/tests/setup/`:
+`bootstrap_test.cpp`, `bootstrap_fixture.cpp`, `bootstrap_integration.py`, and
+`updater_fallback_test.cpp`. The existing offline installer checks remain:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File launcher/tests/setup/verify.ps1 -OutputDirectory C:\path\to\fixtures
+```
+
+## In-game exit confirmation
+
+Esc or mapped Back opens a modal confirmation only on the root main-menu screen.
+Cancel is selected by default. Mouse, keyboard and mapped controller actions are
+supported; held input cannot leak through into the menu. Exit waits for writable
+save mounts and uses the game's normal Quit/CRT shutdown. The dialog is rendered
+inside the game and intentionally has no logo. See
+[implementation and regression checks](../../docs/in-game-exit.md).
 
 ## Visual design and assets
 

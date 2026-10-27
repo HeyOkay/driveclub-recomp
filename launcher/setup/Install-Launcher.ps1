@@ -1,4 +1,4 @@
-param([switch]$CheckOnly, [switch]$LibraryOnly)
+param([switch]$CheckOnly, [switch]$LibraryOnly, [switch]$InstallOnly)
 $ErrorActionPreference = 'Stop'
 function Test-X64Image([string]$Path) {
     if (!(Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -34,13 +34,15 @@ function Get-StableEight([string]$Path, [string]$NativeFile) {
     } | Sort-Object -Descending
 }
 function Get-SetupRuntimeState([string]$Directory = $PSScriptRoot, [string[]]$Roots = (Get-RuntimeRoots)) {
-    $config = Join-Path $Directory 'DriveClub.runtimeconfig.json'
+    $config = Join-Path $Directory 'DriveClub.Launcher.runtimeconfig.json'
     if (Test-Path -LiteralPath $config) {
         try {
             $included = @((Get-Content -LiteralPath $config -Raw | ConvertFrom-Json).runtimeOptions.includedFrameworks)
             if (@($included | Where-Object { $_.name -eq 'Microsoft.WindowsDesktop.App' -and $_.version -match '^8\.' }).Count -gt 0 -and
                 (Test-X64Image (Join-Path $Directory 'coreclr.dll')) -and
-                (Test-X64Image (Join-Path $Directory 'PresentationNative_cor3.dll'))) {
+                (Test-X64Image (Join-Path $Directory 'PresentationNative_cor3.dll')) -and
+                (Test-X64Image (Join-Path $Directory 'hostfxr.dll')) -and
+                (Test-X64Image (Join-Path $Directory 'hostpolicy.dll'))) {
                 return [pscustomobject]@{ Available=$true; Bundled=$true; Root=$Directory }
             }
         } catch {}
@@ -101,7 +103,7 @@ function Receive-SetupFile([string]$Url, [string]$Path, $Form, $Label, $Progress
                 break
             }
             if ($script:SetupCancelled) { $client.CancelAsync(); throw 'Setup cancelled.' }
-            if ($watch.Elapsed.TotalMinutes -gt 5) { $client.CancelAsync(); throw 'Download timed out. Please try Setup again.' }
+            if ($watch.Elapsed.TotalMinutes -gt 5) { $client.CancelAsync(); throw 'Download timed out. Please start DriveClub.exe again.' }
             if ($Form) { [Windows.Forms.Application]::DoEvents() }
             Start-Sleep -Milliseconds 50
         }
@@ -113,7 +115,7 @@ function Receive-SetupFile([string]$Url, [string]$Path, $Form, $Label, $Progress
 }
 function Start-ConfiguredLauncher($State) {
     if (!$State.Bundled) { $env:DOTNET_ROOT_X64=$State.Root; $env:DOTNET_ROOT=$State.Root }
-    Start-Process -FilePath (Join-Path $PSScriptRoot 'DriveClub.exe') -WorkingDirectory $PSScriptRoot
+    Start-Process -FilePath (Join-Path $PSScriptRoot 'DriveClub.Launcher.exe') -WorkingDirectory $PSScriptRoot
 }
 if ($LibraryOnly) { return }
 try {
@@ -122,8 +124,8 @@ try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
-    if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'DriveClub.exe'))) { throw 'Extract the complete launcher package before running Setup.exe.' }
-    if ($state.Available) { Start-ConfiguredLauncher $state; exit 0 }
+    if (!(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'DriveClub.Launcher.exe'))) { throw 'Extract the complete launcher package before running DriveClub.exe.' }
+    if ($state.Available) { if (!$InstallOnly) { Start-ConfiguredLauncher $state }; exit 0 }
     $answer = [Windows.Forms.MessageBox]::Show(
         'The launcher needs .NET 8 Desktop Runtime (x64). Download and install it from Microsoft now? Windows may ask for administrator permission.',
         'DRIVECLUB Launcher Setup', 'YesNo', 'Question')
@@ -155,8 +157,9 @@ try {
         $state=Get-SetupRuntimeState
         if ($process.ExitCode -eq 3010) {
             $null=[Windows.Forms.MessageBox]::Show('Setup completed. Windows requested a restart; restart and then open DriveClub.exe.','DRIVECLUB Launcher Setup','OK','Information')
-        } elseif (!$state.Available) { throw '.NET installation finished but the x64 Desktop runtime could not be found. Restart Windows and try Setup again.' }
-        else { Start-ConfiguredLauncher $state }
+            exit 3010
+        } elseif (!$state.Available) { throw '.NET installation finished but the x64 Desktop runtime could not be found. Restart Windows and open DriveClub.exe again.' }
+        elseif (!$InstallOnly) { Start-ConfiguredLauncher $state }
     } finally {
         if ($form) { $form.Dispose() }
         foreach ($file in @($metadata,$installer)) { if ($file -and (Test-Path -LiteralPath $file)) { Remove-Item -LiteralPath $file -Force } }

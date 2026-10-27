@@ -7,7 +7,7 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>DriveClub</AssemblyName>
+    <AssemblyName>DriveClub.Launcher</AssemblyName>
     <Version>0.3.1</Version>
     <InformationalVersion>0.3.1-wpf.79fc2fe</InformationalVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>

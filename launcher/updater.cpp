@@ -322,13 +322,21 @@ bool CopyWithRetries(const std::wstring& from, const std::wstring& to) {
 
 // Copies the new files over the program files. The launcher's own exe goes last and is first renamed aside, which a
 // running program allows; the first start of the new launcher deletes it.
-bool Apply(const std::wstring& root, const std::wstring& home, std::wstring& error) {
+std::wstring RunningLauncherName() {
+  wchar_t path[32768];
+  const DWORD n = GetModuleFileNameW(nullptr, path, 32768);
+  if (!n || n >= 32768) return L"DriveClub.exe";
+  const std::wstring full(path, n);
+  return full.substr(full.find_last_of(L"\\/") + 1);
+}
+bool Apply(const std::wstring& root, const std::wstring& home, std::wstring& error,
+           const std::wstring& running = RunningLauncherName()) {
   std::vector<std::wstring> files;
   ListFiles(root, L"", files);
   std::sort(files.begin(), files.end());
   const std::wstring self = L"DriveClub.exe";
   for (const auto& rel : files) {
-    if (IsPlayersOwn(rel) || EqualsNoCase(rel, self.c_str())) continue;
+    if (IsPlayersOwn(rel) || EqualsNoCase(rel, self.c_str()) || EqualsNoCase(rel, running.c_str())) continue;
     const std::wstring to = home + L"\\" + rel;
     MakeDirs(to.substr(0, to.find_last_of(L'\\')));
     if (!CopyWithRetries(root + L"\\" + rel, to)) {
@@ -336,19 +344,26 @@ bool Apply(const std::wstring& root, const std::wstring& home, std::wstring& err
       return false;
     }
   }
-  const std::wstring exe = home + L"\\" + self, old_exe = exe + L".old";
-  bool moved = false;
-  if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
-    moved = MoveFileExW(exe.c_str(), old_exe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
-    if (!moved) {
-      error = L"The launcher could not be replaced.";
+  // A native fallback can be running alongside its bootstrap parent. Rename
+  // both executables aside, rather than trying to overwrite a mapped image.
+  std::vector<std::wstring> own{self};
+  if (!EqualsNoCase(running, self.c_str())) own.push_back(running);
+  for (const auto& name : own) {
+    if (GetFileAttributesW((root + L"\\" + name).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+    const std::wstring exe = home + L"\\" + name, old_exe = exe + L".old";
+    bool moved = false;
+    if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      moved = MoveFileExW(exe.c_str(), old_exe.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+      if (!moved) {
+        error = L"The launcher could not be replaced.";
+        return false;
+      }
+    }
+    if (!CopyWithRetries(root + L"\\" + name, exe)) {
+      if (moved) MoveFileExW(old_exe.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);
+      error = L"The new launcher could not be written. Nothing of the launcher was changed.";
       return false;
     }
-  }
-  if (!CopyWithRetries(root + L"\\" + self, exe)) {
-    if (moved) MoveFileExW(old_exe.c_str(), exe.c_str(), MOVEFILE_REPLACE_EXISTING);
-    error = L"The new launcher could not be written. Nothing of the launcher was changed.";
-    return false;
   }
   return true;
 }
@@ -482,6 +497,7 @@ bool Install(const Release& release, const std::wstring& home, const std::functi
 
 void CleanUp(const std::wstring& home) {
   DeleteFileW((home + L"\\DriveClub.exe.old").c_str());
+  DeleteFileW((home + L"\\" + RunningLauncherName() + L".old").c_str());
   for (const wchar_t* name : {kStaging, kOldStaging}) {
     const std::wstring dir = home + name;
     if (OnlyOwnFiles(dir)) RemoveTree(dir);
