@@ -20,6 +20,8 @@
 #include "bbport_settings.h"
 #include "imgui.h"
 #include "bbport_scene_debug.h"
+#include "../../src/runtime_exit.h"
+#include "../../src/exit_dialog.h"
 #include "imgui_impl_vulkan.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -49,6 +51,20 @@ asm(".section .rodata\n"
 extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
+#ifdef _WIN32
+#define BB_EXIT_FONT_SECTION ".section .rdata,\"dr\"\n"
+#define BB_EXIT_FONT_END ".text\n"
+#else
+#define BB_EXIT_FONT_SECTION ".section .rodata\n"
+#define BB_EXIT_FONT_END ".previous\n"
+#endif
+asm(BB_EXIT_FONT_SECTION
+    ".balign 16\n.global bb_exit_body\nbb_exit_body:\n.incbin \"" BB_EXIT_BODY_FONT_PATH "\"\n"
+    ".global bb_exit_body_end\nbb_exit_body_end:\n"
+    ".balign 16\n.global bb_exit_heading\nbb_exit_heading:\n.incbin \"" BB_EXIT_HEADING_FONT_PATH "\"\n"
+    ".global bb_exit_heading_end\nbb_exit_heading_end:\n" BB_EXIT_FONT_END);
+extern "C" const unsigned char bb_exit_body[],bb_exit_body_end[],bb_exit_heading[],bb_exit_heading_end[];
+
 
 static bool g_aa_used = false;
 static bool g_fg_used = false;
@@ -64,13 +80,50 @@ bool initialized = false;
 // The launcher sets everything up; there is no in-game menu.
 constexpr bool menu_open = false;
 // The game's text dialog (SetTextEntry), guarded by imgui_mutex.
-bool text_entry_active = false;
+std::atomic<bool> text_entry_active{false};
 std::string text_entry_prompt, text_entry_text;
 // A hotkey's note (Note), guarded by imgui_mutex: shown until note_until.
 std::string note_text;
 std::chrono::steady_clock::time_point note_until{};
 std::atomic<bool> note_active{false};
 float base_scale = 1.0f;
+ImFont *exit_body=nullptr,*exit_heading=nullptr;
+std::atomic<bool> mouse_capture_requested{false};
+
+void ExitConfirmation(float scale) {
+    const auto view=runtime_exit_view();
+    static bool was_open=false;
+    if (!view.open) { was_open=false; return; }
+    const bool just_opened=!was_open;
+    was_open=true;
+    ImGuiIO& io=ImGui::GetIO();
+    auto *draw=ImGui::GetForegroundDrawList();
+    const ImU32 red=IM_COL32(237,43,56,255), white=IM_COL32(242,242,244,255);
+    draw->AddRectFilled(ImVec2(0,0),io.DisplaySize,IM_COL32(0,0,0,175));
+    const float w=540*scale,h=202*scale;
+    const ImVec2 pos((io.DisplaySize.x-w)*0.5f,(io.DisplaySize.y-h)*0.5f);
+    draw->AddRectFilled(pos,ImVec2(pos.x+w,pos.y+h),IM_COL32(16,16,16,255));
+    draw->AddRectFilled(pos,ImVec2(pos.x+3*scale,pos.y+h),red);
+    const char *question="Exit DRIVECLUB?";
+    const auto question_size=exit_heading->CalcTextSizeA(28*scale,FLT_MAX,0,question);
+    draw->AddText(exit_heading,28*scale,ImVec2(pos.x+(w-question_size.x)*0.5f,pos.y+30*scale),white,question);
+    const float bw=225*scale,bh=44*scale,by=pos.y+88*scale;
+    for (int i=0;i<2;++i) {
+        ImVec2 a(pos.x+(36+i*243)*scale,by),b(a.x+bw,a.y+bh);
+        const bool hovered=io.MousePos.x>=a.x && io.MousePos.x<b.x && io.MousePos.y>=a.y && io.MousePos.y<b.y;
+        if (!just_opened && hovered && (io.MouseDelta.x || io.MouseDelta.y)) runtime_exit_hover(i);
+        const bool selected=(view.selected_exit!=0)==(i!=0);
+        draw->AddRectFilled(a,b,selected ? red : hovered ? IM_COL32(49,49,53,255) : IM_COL32(32,32,36,255));
+        const char *label=i ? "Exit" : "Cancel";
+        const ImVec2 size=exit_body->CalcTextSizeA(20*scale,FLT_MAX,0,label);
+        draw->AddText(exit_body,20*scale,ImVec2(a.x+(bw-size.x)*0.5f,a.y+(bh-size.y)*0.5f),white,label);
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !view.exiting) runtime_exit_click(i);
+    }
+    char hints[160];
+    std::snprintf(hints,sizeof(hints),"%s  Select       %s  Back",view.confirm,view.back);
+    draw->AddText(exit_body,15*scale,ImVec2(pos.x+36*scale,pos.y+154*scale),IM_COL32(155,155,160,255),
+                  view.exiting ? "Exiting DRIVECLUB..." : hints);
+}
 
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
@@ -453,6 +506,10 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     font_config.FontDataOwnedByAtlas = false;
     io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_font_ttf),
                                    int(bb_font_ttf_end - bb_font_ttf), 18.0f, &font_config);
+    exit_body=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_exit_body),
+        int(bb_exit_body_end-bb_exit_body),20.0f,&font_config);
+    exit_heading=io.Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(bb_exit_heading),
+        int(bb_exit_heading_end-bb_exit_heading),28.0f,&font_config);
 
     const vk::Instance vk_instance = instance.GetInstance();
     ImGui_ImplVulkan_LoadFunctions(
@@ -489,6 +546,15 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     std::printf("Overlay: menu ready (Insert or L3+R3)\n");
 }
 
+void Shutdown() {
+    std::scoped_lock lock{imgui_mutex};
+    if(!initialized) return;
+    initialized=false;
+    ImGui_ImplVulkan_Shutdown();
+    ImGui::DestroyContext();
+    exit_body=exit_heading=nullptr;
+}
+
 void UpdateTextInput(SDL_Window* window) {
     bool want = false;
     {
@@ -504,20 +570,61 @@ void UpdateTextInput(SDL_Window* window) {
     }
 }
 
+void RequestMouseCapture(bool capture) { mouse_capture_requested=capture; }
+
+void UpdateMouseCapture(SDL_Window* window) {
+    // SDL cursor and relative-mode changes belong to the window thread. The
+    // input sampler requests its usual mouse-stick mode; a modal overrides it.
+    const bool modal=CapturesInput();
+    const bool relative=mouse_capture_requested && !modal && SDL_GetKeyboardFocus()==window;
+    if (SDL_GetWindowRelativeMouseMode(window)!=relative) {
+        SDL_SetWindowRelativeMouseMode(window,relative);
+        SDL_GetRelativeMouseState(nullptr,nullptr); // discard capture/release warp deltas
+    }
+    static bool was_modal=false,previous_cursor_visible=true;
+    if (modal && !was_modal) { previous_cursor_visible=SDL_CursorVisible(); SDL_ShowCursor(); }
+    if (!modal && was_modal && !previous_cursor_visible) SDL_HideCursor();
+    was_modal=modal;
+}
+
 bool HandleEvent(const SDL_Event& event) {
     std::scoped_lock lock{imgui_mutex};
     if (!initialized) {
         return false;
     }
     ImGuiIO& io = ImGui::GetIO();
-    const bool is_open = menu_open;
+    const bool exit_capture=runtime_exit_captures()!=0;
+    if (event.type==SDL_EVENT_KEY_DOWN || event.type==SDL_EVENT_KEY_UP) {
+        if (event.type==SDL_EVENT_KEY_DOWN && !event.key.repeat) runtime_exit_mouse_activity();
+        unsigned action=0;
+        switch(event.key.key) {
+        case SDLK_ESCAPE: action=EXIT_BACK; break;
+        case SDLK_RETURN: case SDLK_KP_ENTER: action=EXIT_CONFIRM; break;
+        case SDLK_LEFT: case SDLK_UP: action=EXIT_PREVIOUS; break;
+        case SDLK_RIGHT: case SDLK_DOWN: action=EXIT_NEXT; break;
+        default: break;
+        }
+        if (action) runtime_exit_key(action,event.type==SDL_EVENT_KEY_DOWN,event.key.repeat);
+    }
+    if (exit_capture && (event.type==SDL_EVENT_MOUSE_BUTTON_DOWN ||
+        (event.type==SDL_EVENT_MOUSE_MOTION && (event.motion.xrel!=0 || event.motion.yrel!=0))))
+        runtime_exit_mouse_activity();
+    const bool is_open = menu_open || exit_capture;
     switch (event.type) {
+    case SDL_EVENT_WINDOW_FOCUS_LOST:
+        runtime_exit_release_keys();
+        io.AddFocusEvent(false);
+        return false;
+    case SDL_EVENT_WINDOW_FOCUS_GAINED:
+        io.AddFocusEvent(true);
+        return false;
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         const bool down = event.type == SDL_EVENT_KEY_DOWN;
         if (!is_open) {
             return false;
         }
+        if (exit_capture) return true; // Logical navigation is sampled once by runtime_pad.
         io.AddKeyEvent(ImGuiMod_Ctrl, (event.key.mod & SDL_KMOD_CTRL) != 0);
         io.AddKeyEvent(ImGuiMod_Shift, (event.key.mod & SDL_KMOD_SHIFT) != 0);
         io.AddKeyEvent(ImGuiMod_Alt, (event.key.mod & SDL_KMOD_ALT) != 0);
@@ -533,6 +640,7 @@ bool HandleEvent(const SDL_Event& event) {
         if (!is_open) {
             return false;
         }
+        if (exit_capture) return true; // Respect pad_remap; don't also navigate via physical SDL buttons.
         if (const ImGuiKey key = KeyFromGamepad(button); key != ImGuiKey_None) {
             io.AddKeyEvent(key, down);
         }
@@ -575,13 +683,18 @@ bool HandleEvent(const SDL_Event& event) {
         }
         io.AddMouseWheelEvent(event.wheel.x, event.wheel.y);
         return true;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_DOWN:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_MOTION:
+    case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:
+        return exit_capture;
     default:
         return false;
     }
 }
 
 bool Visible() {
-    return initialized && (menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
+    return initialized && (runtime_exit_captures() || menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
                            BbSettings::Get().show_pedals);
 }
 
@@ -593,7 +706,11 @@ void Note(const std::string& text) {
 }
 
 bool CapturesInput() {
-    return menu_open || text_entry_active;
+    return runtime_exit_captures() || menu_open || text_entry_active;
+}
+bool ExitDialogAvailable() {
+    std::scoped_lock lock{imgui_mutex};
+    return initialized && !text_entry_active && !menu_open;
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {
@@ -658,6 +775,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
             note_active = false;
         }
     }
+    ExitConfirmation(scale);
     ImGui::Render();
 
     const vk::RenderingAttachmentInfo attachment{

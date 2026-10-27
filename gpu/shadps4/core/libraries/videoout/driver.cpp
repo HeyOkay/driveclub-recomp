@@ -110,7 +110,21 @@ void VideoOutDriver::SwapThread(std::stop_token token) {
     }
 }
 
-VideoOutDriver::~VideoOutDriver() = default;
+void VideoOutDriver::StopPresenting() {
+    if (present_thread.joinable()) {
+        present_thread.request_stop();
+        request_cv.notify_all();
+        present_thread.join();
+    }
+    // No new presenter work can be enqueued after the vblank thread stops.
+    // The swap thread drains queued work before leaving its stop-aware wait.
+    if (swap_thread.joinable()) {
+        swap_thread.request_stop();
+        swap_cv.notify_all();
+        swap_thread.join();
+    }
+}
+VideoOutDriver::~VideoOutDriver() { StopPresenting(); }
 
 int VideoOutDriver::Open(const ServiceThreadParams* params) {
     if (main_port.is_open) {
