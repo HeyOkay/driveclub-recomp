@@ -1035,7 +1035,7 @@ public partial class MainWindow : Window
                 .Select(label =>
                 {
                     var measured = Text(label.Text, label.FontSize); measured.Measure(new Size(label.ActualWidth, double.PositiveInfinity));
-                    var field = row.Children.OfType<Control>().Single();
+                    var field = row.Children.OfType<Control>().Single(c => !AutomationProperties.GetAutomationId(c).StartsWith("SettingHelp"));
                     var value = row.Children.OfType<TextBlock>().FirstOrDefault(t => AutomationProperties.GetAutomationId(t).StartsWith("SettingValue"));
                     return (object)new { Label = label.Text, Width = row.ActualWidth, Height = row.ActualHeight,
                         LabelHeight = label.ActualHeight, RequiredLabelHeight = measured.DesiredSize.Height,
