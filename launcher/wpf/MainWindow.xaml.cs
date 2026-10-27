@@ -1,9 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Net.Http;
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -48,13 +46,9 @@ public partial class MainWindow : Window
     private LaunchSession? launchSession;
     private string baseStatus = "Loading your settings...";
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
-    private readonly bool capture = Environment.GetCommandLineArgs().Contains("--capture");
-    private readonly bool perf = Environment.GetCommandLineArgs().Contains("--perf");
     private DispatcherTimer? spinnerTimer;
     private int spinnerIndex;
     private readonly List<BitmapSource> spinnerFrames = [];
-    private readonly List<double> renderIntervals = [];
-    private TimeSpan lastRender;
     private int refreshRate = 240;
     private string? releaseUrl;
     private string baseStatusColour = "#A0A0AA";
@@ -119,16 +113,12 @@ public partial class MainWindow : Window
         {
             try
             {
-                if (Environment.GetCommandLineArgs().Contains("--compact")) { Width = MinWidth; Height = MinHeight; }
-                if (Environment.GetCommandLineArgs().Contains("--maximized")) WindowState = WindowState.Maximized;
                 Adopt(await backend.Call("state"));
                 OperationStatus(state.FoldersOk ? "" : "Choose the game folders on Play.");
                 if (Environment.GetCommandLineArgs().Contains("--mod-manager")) ShowPage(ModsPage, false);
-                if (capture) await CapturePages();
-                else if (perf) await MeasureAnimations();
-                else if (!preview && Environment.GetCommandLineArgs().Contains("--benchmark")) { ShowPage(6, false); await Launch(true); }
+                if (!preview && Environment.GetCommandLineArgs().Contains("--benchmark")) { ShowPage(6, false); await Launch(true); }
                 else if (!preview && (Environment.GetCommandLineArgs().Contains("--play") || (File.Exists(Path.Combine(root, "launcher.ini")) && File.ReadLines(Path.Combine(root, "launcher.ini")).Any(x => x.Trim() == "auto_play=1")))) await Launch(false);
-                if (!preview && !capture && !perf && !busy) _ = CheckForUpdates();
+                if (!preview && !busy && IsVisible) _ = CheckForUpdates();
             }
             catch (Exception ex) { SetStatus(ex.Message, true); }
         };
@@ -245,7 +235,7 @@ public partial class MainWindow : Window
         // Sidebar, window border, page margins, two panels, gap and scrollbar.
         MinWidth = Math.Ceiling(228 + 2 + 72 + 2 * MeasureGameStatus(double.PositiveInfinity).Width + 24 + 10);
         foreach (var c in state.Controls) c.PropertyChanged += SettingChanged;
-        pages.Clear(); ShowPage(currentPage, initial && !capture && !perf); suppress = false;
+        pages.Clear(); ShowPage(currentPage, initial); suppress = false;
         FooterPlay.IsEnabled = preview || (state.FoldersOk && string.IsNullOrEmpty(state.HardwareProblem));
         FooterPlay.ToolTip = string.IsNullOrEmpty(state.HardwareProblem) ? "Save and start the game." : state.HardwareProblem;
     }
@@ -410,7 +400,7 @@ public partial class MainWindow : Window
                 int columns = available >= 850 ? 4 : 2;
                 double qw = Math.Min(MeasureGameStatus(available).Width, (available - (columns - 1) * 16) / columns);
                 double start = PanelGroupLeft(width, columns * qw + (columns - 1) * 16) - 36;
-                Caption(quick, "QUICK SETTINGS", start, 0, columns * qw + (columns - 1) * 16, 27, 16, true, "#F5F6F8", center: true).Tag = "PageHeading";
+                Caption(quick, "QUICK SETTINGS", start, 0, columns * qw + (columns - 1) * 16, 27, 16, true, "#F5F6F8", center: true);
                 double qy = 36;
                 var controls = state.QuickControls.Select(id => state.Controls.Single(c => c.Id == id)).ToArray();
                 for (int k = 0; k < controls.Length; k += columns)
@@ -434,7 +424,6 @@ public partial class MainWindow : Window
         return scroll;
     }
     private const double SectionHeaderHeight = 38;
-    private sealed record PanelMeasure(string Title, double Width);
     private double PanelGroupLeft(double pageWidth, double groupWidth)
     {
         // Page coordinates begin after the 228-DIP sidebar. Keep the whole
@@ -444,7 +433,7 @@ public partial class MainWindow : Window
     }
     private void RulePanel(Canvas canvas, double x, double y, double width, double height, string title)
     {
-        Place(canvas, new Border { Background = Brush("#ED2B38"), Tag = new PanelMeasure(title, width) }, x, y, 3, SectionHeaderHeight);
+        Place(canvas, new Border { Background = Brush("#ED2B38") }, x, y, 3, SectionHeaderHeight);
         Caption(canvas, title, x + 20, y, width - 40, SectionHeaderHeight, 15, true, "#D7D7D9");
     }
     private double SliderValueWidth(Setting setting)
@@ -498,8 +487,8 @@ public partial class MainWindow : Window
         int columns = Math.Max(1, Math.Min(cards.Length, (int)Math.Floor((width + 18) / (cardWidth + 18))));
         double groupLeft = PanelGroupLeft(availableWidth, columns * cardWidth + (columns - 1) * 18);
         double groupWidth = columns * cardWidth + (columns - 1) * 18;
-        Caption(canvas, names[index].ToUpperInvariant(), groupLeft, 46, groupWidth, 46, 32, true, "#F5F6F8", center: true).Tag = "PageHeading";
-        Caption(canvas, hints[index], groupLeft, 99, groupWidth, 24, 15, false, "#8B93A1", center: true).Tag = "PageHeading";
+        Caption(canvas, names[index].ToUpperInvariant(), groupLeft, 46, groupWidth, 46, 32, true, "#F5F6F8", center: true);
+        Caption(canvas, hints[index], groupLeft, 99, groupWidth, 24, 15, false, "#8B93A1", center: true);
         double[] cy = Enumerable.Repeat(y, columns).ToArray();
         foreach (var card in cards)
         {
@@ -616,10 +605,10 @@ public partial class MainWindow : Window
         double groupWidth = besideStatus ? sw + 24 + actualFoldersWidth : sw;
         left = PanelGroupLeft(canvas.Width, groupWidth);
         double logoLeft = left + (groupWidth - 500) / 2;
-        Place(canvas, new Border { Background = Brush("#454547"), OpacityMask = new ImageBrush(Image("brand/logo-red.png")) { Stretch = Stretch.Fill }, Tag = "PageHeading" }, logoLeft, 62, 500, 73);
+        Place(canvas, new Border { Background = Brush("#454547"), OpacityMask = new ImageBrush(Image("brand/logo-red.png")) { Stretch = Stretch.Fill } }, logoLeft, 62, 500, 73);
         // Match the visible logo edge, excluding its 8-pixel transparent inset.
         double logoInset = 500 * 8d / 880;
-        Caption(canvas, "NEVER DRIVE ALONE", logoLeft + logoInset, 151, 500 - logoInset, 29, 22, true, "#F5F6F8").Tag = "PageHeading";
+        Caption(canvas, "NEVER DRIVE ALONE", logoLeft + logoInset, 151, 500 - logoInset, 29, 22, true, "#F5F6F8");
         double statusShift = 48 - SectionHeaderHeight - 12;
         RulePanel(canvas, left, 230, sw, 198 - statusShift, "GAME STATUS");
         for (int k = 0; k < 4; ++k)
@@ -667,7 +656,6 @@ public partial class MainWindow : Window
         var toggle = new Button { Content = headerContent, Padding = new(20,0,20,0), Background = Brushes.Transparent, BorderThickness = new(0), ToolTip = foldersExpanded ? "Hide game folders" : "Show or change game folders" };
         AutomationProperties.SetName(toggle, foldersExpanded ? "Hide game folders" : "Show game folders");
         AutomationProperties.SetAutomationId(toggle, "GameFoldersToggle");
-        toggle.Tag = new PanelMeasure("GAME FILES", width);
         int animationRevision = 0;
         void AnimateBody(bool expand)
         {
@@ -960,285 +948,12 @@ public partial class MainWindow : Window
         stampAlpha.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromSeconds(1.2))));
         Add(Stamp, new PropertyPath(OpacityProperty), stampAlpha);
         // Preserve the original plate travel (0.3 to 0.6 s); move the stamp landing to match it.
-        intro.Begin(this, HandoffBehavior.SnapshotAndReplace, Environment.GetCommandLineArgs().Contains("--capture-loading-frames"));
+        intro.Begin(this, HandoffBehavior.SnapshotAndReplace, false);
         if (spinnerFrames.Count == 0) return intro;
         spinnerIndex = 0; Spinner.Source = spinnerFrames[0];
         spinnerTimer?.Stop(); spinnerTimer = new DispatcherTimer(DispatcherPriority.Render) { Interval = TimeSpan.FromMilliseconds(33) };
         spinnerTimer.Tick += (_, _) => { Spinner.Source = spinnerFrames[++spinnerIndex % spinnerFrames.Count]; }; spinnerTimer.Start();
         return intro;
-    }
-    private async Task CapturePages()
-    {
-        string[] args = Environment.GetCommandLineArgs(); int at = Array.IndexOf(args, "--capture");
-        string directory = args[at + 1]; Directory.CreateDirectory(directory);
-        var details = new Canvas { Width = 430, Height = 130, Background = Brush("#202024"), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-        Place(details, new DottedCaptionGlyph { Glyph = "Search", Fill = Brushes.White }, 16, 15, 20, 20);
-        Place(details, new DottedCaptionGlyph { Glyph = "ChevronDown", Fill = Brushes.White }, 64, 17, 16, 16);
-        Place(details, new DottedCaptionGlyph { Glyph = "Minimize", Fill = Brushes.White }, 112, 17, 16, 16);
-        Place(details, new DottedCaptionGlyph { Glyph = "Close", Fill = Brushes.White }, 160, 17, 16, 16);
-        var sampleField = new ComboBox { Width = 303, Height = 38 };
-        AutomationProperties.SetAutomationId(sampleField, "GrainSample");
-        Place(details, sampleField, 16, 62, 303, 38);
-        Grid.SetRowSpan(details, 3); Panel.SetZIndex(details, 30); Root.Children.Add(details); Root.UpdateLayout();
-        var sampleToggle = (ToggleButton)sampleField.Template.FindName("DropToggle", sampleField);
-        var sampleGrain = (FilmGrainOverlay)sampleToggle.Template.FindName("DropGrain", sampleToggle);
-        // RenderTargetBitmap includes a Canvas child's layout offset.
-        Canvas.SetLeft(sampleField, 0); Canvas.SetTop(sampleField, 0); Root.UpdateLayout();
-        double sampleGrainOpacity = sampleGrain.Opacity;
-        sampleGrain.Opacity = 0; SaveVisual(Path.Combine(directory, "field-base.png"), sampleField);
-        sampleGrain.Opacity = sampleGrainOpacity; SaveVisual(Path.Combine(directory, "field-grain.png"), sampleField);
-        sampleField.IsDropDownOpen = true; Root.UpdateLayout();
-        double grainWhileOpen = sampleGrain.Opacity;
-        sampleField.IsDropDownOpen = false; Root.UpdateLayout();
-        SaveVisual(Path.Combine(directory, "field-after-interaction.png"), sampleField);
-        details.Children.Remove(sampleField);
-        sampleField = new ComboBox { Width = 303, Height = 38 };
-        AutomationProperties.SetAutomationId(sampleField, "GrainSample");
-        Place(details, sampleField, 0, 0, 303, 38); Root.UpdateLayout();
-        SaveVisual(Path.Combine(directory, "field-recreated.png"), sampleField);
-        sampleToggle = (ToggleButton)sampleField.Template.FindName("DropToggle", sampleField);
-        sampleGrain = (FilmGrainOverlay)sampleToggle.Template.FindName("DropGrain", sampleToggle);
-        Canvas.SetLeft(sampleField, 16); Canvas.SetTop(sampleField, 62); Root.UpdateLayout();
-        SaveVisual(Path.Combine(directory, "control-details.png"), details);
-        var optionBrush = (ImageBrush)FindResource("OptionInactive");
-        await File.WriteAllTextAsync(Path.Combine(directory, "field-style.json"), JsonSerializer.Serialize(new
-        {
-            SpriteViewbox = new { optionBrush.Viewbox.X, optionBrush.Viewbox.Y, optionBrush.Viewbox.Width, optionBrush.Viewbox.Height },
-            SampleFocusVisualIsNull = sampleField.FocusVisualStyle == null,
-            GrainDevicePixels = true, GrainOpacity = sampleGrainOpacity, GrainWhileOpen = grainWhileOpen,
-            StablePattern = sampleGrain.StablePattern, DpiScale = VisualTreeHelper.GetDpi(sampleField).DpiScaleX,
-            SearchSize = 20, DotSpacing = 16d / 5, DotRadius = 16d / 5 * .29, HandleDots = 2
-        }, Backend.JsonOptions));
-        Root.Children.Remove(details);
-        // Exercise the actual slider template at both endpoints without changing
-        // any bound game settings or invoking the backend.
-        var sliderBounds = new List<object>();
-        foreach (double number in new[] { 0d, 50d, 100d })
-        {
-            var probe = new Slider { Minimum = 0, Maximum = 100, Value = number, Width = 303, Height = 38, Style = (Style)FindResource("SettingSlider") };
-            probe.Measure(new Size(303, 38)); probe.Arrange(new Rect(0, 0, 303, 38)); probe.UpdateLayout();
-            var rail = (Border)probe.Template.FindName("TrackRail", probe);
-            var track = (Track)probe.Template.FindName("PART_Track", probe);
-            var railBounds = rail.TransformToAncestor(probe).TransformBounds(new Rect(rail.RenderSize));
-            double thumbCenter = track.Thumb.TranslatePoint(new Point(track.Thumb.ActualWidth / 2, track.Thumb.ActualHeight / 2), probe).X;
-            sliderBounds.Add(new { Value = number, Width = probe.ActualWidth, RailLeft = railBounds.Left, RailRight = railBounds.Right, ThumbCenter = thumbCenter, Clipped = probe.ClipToBounds });
-            SaveVisual(Path.Combine(directory, $"slider-{number:0}.png"), probe);
-        }
-        await File.WriteAllTextAsync(Path.Combine(directory, "slider-bounds.json"), JsonSerializer.Serialize(sliderBounds, Backend.JsonOptions));
-        var panelWidths = new List<object>();
-        object LayoutReport(string pageName, Canvas canvas, Canvas? quick = null)
-        {
-            var panels = canvas.Children.OfType<FrameworkElement>().Where(c => c.Tag is PanelMeasure).ToArray();
-            double leftEdge = panels.Min(Canvas.GetLeft), rightEdge = panels.Max(c => Canvas.GetLeft(c) + ((PanelMeasure)c.Tag).Width);
-            object[] Rows(Canvas parent) => parent.Children.OfType<Canvas>().SelectMany(row => row.Children.OfType<TextBlock>()
-                .Where(t => AutomationProperties.GetAutomationId(t).StartsWith("SettingLabel"))
-                .Select(label =>
-                {
-                    var measured = Text(label.Text, label.FontSize); measured.Measure(new Size(label.ActualWidth, double.PositiveInfinity));
-                    var field = row.Children.OfType<Control>().Single(c => !AutomationProperties.GetAutomationId(c).StartsWith("SettingHelp"));
-                    var value = row.Children.OfType<TextBlock>().FirstOrDefault(t => AutomationProperties.GetAutomationId(t).StartsWith("SettingValue"));
-                    return (object)new { Label = label.Text, Width = row.ActualWidth, Height = row.ActualHeight,
-                        LabelHeight = label.ActualHeight, RequiredLabelHeight = measured.DesiredSize.Height,
-                        FieldTop = Canvas.GetTop(field), LabelBottom = Canvas.GetTop(label) + label.ActualHeight,
-                        SideBySide = field is CheckBox,
-                        ValueGap = value == null ? (double?)null : Canvas.GetLeft(value) - (Canvas.GetLeft(label) + label.ActualWidth),
-                        FieldBottom = Canvas.GetTop(field) + field.ActualHeight,
-                        TextWrapping = label.TextWrapping.ToString(), Trimming = label.TextTrimming.ToString() };
-                })).ToArray();
-            var quickRows = quick?.Children.OfType<Canvas>().ToArray() ?? [];
-            object[] Headings(Canvas parent, double targetCenter) => parent.Children.OfType<FrameworkElement>()
-                .Where(c => Equals(c.Tag, "PageHeading"))
-                .Select(c => (object)new { Text = c is Border { Child: TextBlock t } ? t.Text : "Home logo",
-                    X = Canvas.GetLeft(c), Y = Canvas.GetTop(c), Width = c.ActualWidth, Height = c.ActualHeight,
-                    CenterDelta = Canvas.GetLeft(c) + c.ActualWidth / 2 - targetCenter,
-                    Alignment = c is Border { Child: TextBlock label } ? label.TextAlignment.ToString() : "Centered image" }).ToArray();
-            return new { Page = pageName, Maximum = MeasureGameStatus(double.PositiveInfinity).Width,
-                Panels = panels.Select(c => new { ((PanelMeasure)c.Tag).Title, Width = ((PanelMeasure)c.Tag).Width, X = Canvas.GetLeft(c) }).ToArray(),
-                CenterDelta = (leftEdge + rightEdge - canvas.Width) / 2,
-                WindowCenterDelta = canvas.TranslatePoint(new Point((leftEdge + rightEdge) / 2, 0), Root).X - Root.ActualWidth / 2,
-                WindowCenteredLeft = Root.ActualWidth / 2 - 228 - (rightEdge - leftEdge) / 2,
-                ActualGroupLeft = leftEdge,
-                ExpectedGroupLeft = PanelGroupLeft(canvas.Width, rightEdge - leftEdge),
-                Headings = Headings(canvas, (leftEdge + rightEdge) / 2),
-                QuickHeadings = quickRows.Length == 0 ? [] : Headings(quick!, (quickRows.Min(Canvas.GetLeft) + quickRows.Max(c => Canvas.GetLeft(c) + c.ActualWidth)) / 2),
-                Rows = Rows(canvas), QuickRows = quick == null ? [] : Rows(quick),
-                QuickCenterDelta = quickRows.Length == 0 ? 0 : (quickRows.Min(Canvas.GetLeft) + quickRows.Max(c => Canvas.GetLeft(c) + c.ActualWidth) - quick!.Width) / 2,
-                QuickWindowCenterDelta = quickRows.Length == 0 ? 0 : quick!.TranslatePoint(new Point((quickRows.Min(Canvas.GetLeft) + quickRows.Max(c => Canvas.GetLeft(c) + c.ActualWidth)) / 2, 0), Root).X - Root.ActualWidth / 2,
-                MinimumWindowWidth = MinWidth, ViewportWidth = canvas.Width };
-        }
-        for (int i = 0; i < names.Length; ++i)
-        {
-            ShowPage(i, false); await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle); await Task.Delay(100);
-            SaveVisual(Path.Combine(directory, names[i].ToLowerInvariant() + ".png"));
-            if (i == ModsPage) continue;
-            var canvas = i == 0 ? ((Grid)((ScrollViewer)pages[i]).Content).Children.OfType<Canvas>().Single() : (Canvas)((ScrollViewer)pages[i]).Content;
-            var quick = i == 0 ? (Canvas)((Grid)((ScrollViewer)pages[i]).Content).Children.OfType<Border>().Single().Child : null;
-            panelWidths.Add(LayoutReport(names[i], canvas, quick));
-            if (i != 0) SaveVisual(Path.Combine(directory, names[i].ToLowerInvariant() + "-settings.png"), canvas);
-        }
-        await File.WriteAllTextAsync(Path.Combine(directory, "panel-widths.json"), JsonSerializer.Serialize(panelWidths, Backend.JsonOptions));
-        ShowPage(Array.IndexOf(names, "Driving"), false); Root.UpdateLayout();
-        var drivingCanvas = (Canvas)((ScrollViewer)pages[Array.IndexOf(names, "Driving")]).Content;
-        var presetCombo = drivingCanvas.Children.OfType<Canvas>().SelectMany(row => row.Children.OfType<ComboBox>()).Single(c => AutomationProperties.GetName(c) == "Driving preset");
-        presetCombo.Focus(); Root.UpdateLayout(); SaveVisual(Path.Combine(directory, "driving-focused.png"));
-        var focusControls = drivingCanvas.Children.OfType<Canvas>().SelectMany(row => row.Children.OfType<Control>()).Concat([SaveButton, ResetButton, MinimizeButton, MaximizeButton, CloseButton]);
-        await File.WriteAllTextAsync(Path.Combine(directory, "focus-styles.json"), JsonSerializer.Serialize(focusControls.Select(c => new { Type = c.GetType().Name, Name = AutomationProperties.GetName(c), FocusVisualIsNull = c.FocusVisualStyle == null }).ToArray(), Backend.JsonOptions));
-        presetCombo.IsDropDownOpen = true; await Task.Delay(100);
-        SaveVisual(Path.Combine(directory, "driving-dropdown-open.png"));
-        SaveVisual(Path.Combine(directory, "driving-dropdown.png"), (FrameworkElement)((Popup)presetCombo.Template.FindName("PART_Popup", presetCombo)).Child);
-        presetCombo.IsDropDownOpen = false;
-        if (state.FoldersOk)
-        {
-            ShowPage(0, false); Root.UpdateLayout();
-            Canvas HomeCanvas() => ((Grid)((ScrollViewer)pages[0]).Content).Children.OfType<Canvas>().Single();
-            Canvas FolderBody() => HomeCanvas().Children.OfType<Canvas>().Single(c => AutomationProperties.GetAutomationId(c) == "GameFoldersBody");
-            int FolderRows() => FolderBody().Visibility == Visibility.Visible && FolderBody().Height > 0 ? FolderBody().Children.OfType<TextBox>().Count() : 0;
-            void ClickFolders() => HomeCanvas().Children.OfType<Button>().Single(c => AutomationProperties.GetAutomationId(c) == "GameFoldersToggle").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            int initialRows = FolderRows(); ClickFolders();
-            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle); await Task.Delay(45);
-            var openingSample = new { Height = FolderBody().Height, Opacity = FolderBody().Opacity };
-            SaveVisual(Path.Combine(directory, "play-folders-opening.png")); await Task.Delay(350);
-            int expandedRows = FolderRows(); SaveVisual(Path.Combine(directory, "play-folders-open.png"));
-            var browseButtons = FolderBody().Children.OfType<Button>().Select(button => new
-            {
-                Id = AutomationProperties.GetAutomationId(button), Width = button.ActualWidth, Height = button.ActualHeight,
-                ToolTip = button.ToolTip?.ToString(), Background = button.Background.ToString(),
-                Glyph = ((DottedCaptionGlyph)button.Content).Glyph, Fill = ((DottedCaptionGlyph)button.Content).Fill.ToString()
-            }).ToArray();
-            await File.WriteAllTextAsync(Path.Combine(directory, "browse-buttons.json"), JsonSerializer.Serialize(new { SaveBackground = SaveButton.Background.ToString(), Buttons = browseButtons }, Backend.JsonOptions));
-            ClickFolders(); await Task.Delay(45);
-            var closingSample = new { Height = FolderBody().Height, Opacity = FolderBody().Opacity };
-            SaveVisual(Path.Combine(directory, "play-folders-closing.png")); await Task.Delay(350);
-            int collapsedRows = FolderRows();
-            ClickFolders(); await Task.Delay(80); ClickFolders(); await Task.Delay(60); ClickFolders(); await Task.Delay(400);
-            int reversedRows = FolderRows(); ClickFolders(); await Task.Delay(400);
-            var original = state;
-            var invalid = JsonSerializer.Deserialize<LauncherState>(JsonSerializer.Serialize(state, Backend.JsonOptions), Backend.JsonOptions)!;
-            invalid.FoldersOk = false; invalid.FolderProblem = "Choose valid game folders.";
-            Adopt(invalid); Root.UpdateLayout(); int invalidRows = FolderRows();
-            Adopt(original); Root.UpdateLayout(); int validAgainRows = FolderRows();
-            await File.WriteAllTextAsync(Path.Combine(directory, "game-folders-collapse.json"), JsonSerializer.Serialize(new { InitialRows = initialRows, ExpandedRows = expandedRows, CollapsedRows = collapsedRows, InvalidPathsRows = invalidRows, ValidAgainRows = validAgainRows, ReversedRows = reversedRows, OpeningSample = openingSample, ClosingSample = closingSample, DurationMs = 120, HeightAnimation = false, InlineLayout = true }, Backend.JsonOptions));
-        }
-        int driving = Array.IndexOf(names, "Driving");
-        drivingSubpage = 1; pages.Remove(driving); ShowPage(driving, false);
-        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle); await Task.Delay(100);
-        SaveVisual(Path.Combine(directory, "driving-wheel.png"));
-        panelWidths.Add(LayoutReport("Driving wheel", (Canvas)((ScrollViewer)pages[driving]).Content));
-        await File.WriteAllTextAsync(Path.Combine(directory, "panel-widths.json"), JsonSerializer.Serialize(panelWidths, Backend.JsonOptions));
-        drivingSubpage = 0; pages.Remove(driving);
-        ShowPage(0, false); Root.UpdateLayout();
-        double menuCenter = Navigation.PointToScreen(new Point(0, Navigation.ActualHeight / 2)).Y;
-        double sidebarCenter = SidebarMenuHost.PointToScreen(new Point(0, SidebarMenuHost.ActualHeight / 2)).Y;
-        await File.WriteAllTextAsync(Path.Combine(directory, "menu-style.json"), JsonSerializer.Serialize(new
-        {
-            HeadingFont = ((FontFamily)FindResource("HeadingFont")).Source,
-            LeftInset = Navigation.TranslatePoint(new Point(), SidebarMenuHost).X,
-            Items = navButtons.Select(button => new
-            {
-                Text = ((TextBlock)((Grid)button.Content).Children[1]).Text,
-                Font = ((TextBlock)((Grid)button.Content).Children[1]).FontFamily.Source,
-                Size = ((TextBlock)((Grid)button.Content).Children[1]).FontSize,
-                Height = button.Height, BottomGap = button.Margin.Bottom, PaddingLeft = button.Padding.Left
-            }).ToArray(),
-            MainDim = ((Border)((Grid)BackgroundHolder.Children[^1]).Children[1]).Background.ToString(),
-            LoadingDim = BusyDim.Fill.ToString()
-        }, Backend.JsonOptions));
-        await File.WriteAllTextAsync(Path.Combine(directory, "sidebar-menu-layout.json"), JsonSerializer.Serialize(new { MenuCenterPixels = menuCenter, SidebarCenterPixels = sidebarCenter, CenterDifferencePixels = menuCenter - sidebarCenter }, Backend.JsonOptions));
-        var dock = ((Grid)((ScrollViewer)pages[0]).Content).Children.OfType<Border>().Single(x => Equals(x.Tag, "QuickSettingsDock"));
-        var dockBottom = dock.PointToScreen(new Point(0, dock.ActualHeight)).Y;
-        var footerTop = FooterFrame.PointToScreen(new Point(0, 0)).Y;
-        var homeUpper = ((Grid)((ScrollViewer)pages[0]).Content).Children.OfType<Canvas>().Single();
-        await File.WriteAllTextAsync(Path.Combine(directory, "quick-settings-layout.json"), JsonSerializer.Serialize(new { DockedToBottomWhenRoomAvailable = true, GapAboveFooterPixels = footerTop - dockBottom, ExpectedGapPixels = 24 * VisualTreeHelper.GetDpi(this).DpiScaleY, ScrollsWithUpperPage = true, UpperContentPushesQuickSettings = true, QuickTopDip = ((Grid)((ScrollViewer)pages[0]).Content).RowDefinitions[0].ActualHeight, UpperContentHeightDip = homeUpper.Height, ScrollableHeightDip = ((ScrollViewer)pages[0]).ScrollableHeight }, Backend.JsonOptions));
-        await File.WriteAllTextAsync(Path.Combine(directory, "game-folders-layout.json"), JsonSerializer.Serialize(new { Page = "Play", Rows = homeUpper.Children.OfType<FrameworkElement>().Where(c => AutomationProperties.GetAutomationId(c).StartsWith("GameFolder")).Select(c => new { Id = AutomationProperties.GetAutomationId(c), X = Canvas.GetLeft(c), Y = Canvas.GetTop(c), Width = c.ActualWidth, Height = c.ActualHeight }), UpperHeight = homeUpper.Height }, Backend.JsonOptions));
-        var handle = new WindowInteropHelper(this).Handle;
-        var monitor = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
-        GetMonitorInfo(MonitorFromWindow(handle, 2), ref monitor); GetWindowRect(handle, out var windowRect);
-        var footerBottom = FooterFrame.PointToScreen(new Point(0, FooterFrame.ActualHeight));
-        await File.WriteAllTextAsync(Path.Combine(directory, "window-geometry.json"), JsonSerializer.Serialize(new { Maximized = WindowState == WindowState.Maximized, WorkArea = new { monitor.Work.Left, monitor.Work.Top, monitor.Work.Right, monitor.Work.Bottom }, Window = new { windowRect.Left, windowRect.Top, windowRect.Right, windowRect.Bottom }, FooterBottom = footerBottom.Y, FooterInsideWorkArea = footerBottom.Y <= monitor.Work.Bottom }, Backend.JsonOptions));
-        ShowPage(0, false); SetStatus("WPF screenshots exported.");
-        if (args.Contains("--capture-menu-motion"))
-        {
-            double[] LabelPositions() => navButtons.Select(button => ((Grid)button.Content).Children[1].TranslatePoint(new Point(), Navigation).Y).ToArray();
-            var labelPositions = LabelPositions();
-            double start = NavigationSelectionTransform.Y;
-            ShowPage(names.Length - 1); await Task.Delay(65);
-            double early = NavigationSelectionTransform.Y;
-            SaveVisual(Path.Combine(directory, "menu-motion-early.png"));
-            await Task.Delay(60); double later = NavigationSelectionTransform.Y;
-            SaveVisual(Path.Combine(directory, "menu-motion-later.png"));
-            double beforeRetarget = NavigationSelectionTransform.Y;
-            ShowPage(1); await Task.Delay(12);
-            double afterRetarget = NavigationSelectionTransform.Y;
-            ShowPage(3); await Task.Delay(350);
-            double final = NavigationSelectionTransform.Y;
-            double target = navButtons[3].TranslatePoint(new Point(), Navigation).Y;
-            SaveVisual(Path.Combine(directory, "menu-motion-final.png"));
-            await File.WriteAllTextAsync(Path.Combine(directory, "menu-motion.json"), JsonSerializer.Serialize(new
-            {
-                Start = start, Early = early, Later = later, BeforeRetarget = beforeRetarget, AfterRetarget = afterRetarget,
-                Final = final, Target = target, LabelPositionsBefore = labelPositions, LabelPositionsAfter = LabelPositions(),
-                DurationMs = NavigationSelectionSeconds * 1000, Curve = "Cubic EaseInOut"
-            }, Backend.JsonOptions));
-            ShowPage(0, false);
-        }
-        if (args.Contains("--capture-loading") || args.Contains("--capture-loading-frames"))
-        {
-            BusyOverlay.Visibility = Visibility.Visible;
-            ProgressText.Text = "Original loading animation. No game is being prepared or launched.";
-            Progress.Value = 45; PercentText.Text = "45%";
-            Root.UpdateLayout(); var loading = StartLoadingAnimation();
-            if (args.Contains("--capture-loading-frames")) await CaptureStartupFrames(directory, loading);
-            else
-            {
-                await Task.Delay(450); SaveVisual(Path.Combine(directory, "loading-slide.png"));
-                await Task.Delay(200); SaveVisual(Path.Combine(directory, "loading-intro.png"));
-                await Task.Delay(1050); SaveVisual(Path.Combine(directory, "loading.png"));
-            }
-            spinnerTimer?.Stop(); BusyOverlay.Visibility = Visibility.Collapsed;
-        }
-        if (args.Contains("--capture-splash"))
-        {
-            var previewLaunch = Launch(args.Contains("--capture-benchmark-splash"));
-            await Task.Delay(700);
-            if (launchSplash == null || !launchSplash.IsVisible || IsVisible)
-                throw new InvalidOperationException("The loading view is not a separate visible splash.");
-            SaveVisual(Path.Combine(directory, "launch-splash.png"), BusyOverlay);
-            var splashInfo = new { Title = launchSplash.Title, launchSplash.Topmost,
-                launchSplash.ShowInTaskbar, Width = launchSplash.ActualWidth,
-                Height = launchSplash.ActualHeight, MainHidden = !IsVisible };
-            await previewLaunch;
-            if (launchSplash != null || !IsVisible || busy)
-                throw new InvalidOperationException("Preview splash did not restore the launcher.");
-            File.WriteAllText(Path.Combine(directory, "launch-splash.json"),
-                JsonSerializer.Serialize(new { Splash = splashInfo, Restored = true, GameStarted = false }, Backend.JsonOptions));
-        }
-        if (args.Contains("--exit")) { allowClose = true; Close(); }
-    }
-    private void SaveVisual(string file, FrameworkElement? target = null)
-    {
-        target ??= Root; target.UpdateLayout(); var dpi = VisualTreeHelper.GetDpi(target);
-        var bitmap = new RenderTargetBitmap((int)(target.ActualWidth * dpi.DpiScaleX), (int)(target.ActualHeight * dpi.DpiScaleY), 96 * dpi.DpiScaleX, 96 * dpi.DpiScaleY, PixelFormats.Pbgra32);
-        bitmap.Render(target); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using var stream = File.Create(file); encoder.Save(stream);
-    }
-    private void Rendered(object? sender, EventArgs args)
-    {
-        var time = ((RenderingEventArgs)args).RenderingTime;
-        if (lastRender != default && time != lastRender) renderIntervals.Add((time - lastRender).TotalMilliseconds);
-        lastRender = time;
-    }
-    private async Task MeasureAnimations()
-    {
-        // Warm both visual caches before measuring animation-only frames.
-        ShowPage(2, false); await Task.Delay(200); ShowPage(0, false); await Task.Delay(200);
-        CompositionTarget.Rendering += Rendered;
-        for (int i = 0; i < 24; ++i) { ShowPage(i % 2 == 0 ? 2 : 0); await Task.Delay(350); }
-        CompositionTarget.Rendering -= Rendered;
-        var sorted = renderIntervals.Where(x => x > 0).Order().ToArray();
-        double p(double percentile) => sorted.Length == 0 ? 0 : sorted[Math.Min(sorted.Length - 1, (int)(sorted.Length * percentile))];
-        var result = new { Framework = ".NET 8 WPF", HardwareTier = RenderCapability.Tier >> 16, MonitorHz = refreshRate, Samples = sorted.Length, CallbackMedianMs = p(.5), CallbackP95Ms = p(.95), CallbackP99Ms = p(.99), Intervals = renderIntervals, Measurement = "WPF CompositionTarget.Rendering callback intervals; not hardware presentation timestamps", Caption = "Integrated WindowChrome; opaque HWND; square corners", Animation = "280 ms cubic ease-in-out slide: page enter +32 to 0, exit 0 to -12; smoothstep opacity; backgrounds fade without translation" };
-        await File.WriteAllTextAsync(Path.Combine(root, "wpf-performance.json"), JsonSerializer.Serialize(result, Backend.JsonOptions));
-        ShowPage(0); SetStatus($"WPF tier {result.HardwareTier} / {refreshRate} Hz / callbacks median {p(.5):F2} ms, p95 {p(.95):F2} ms");
-        if (Environment.GetCommandLineArgs().Contains("--exit")) { allowClose = true; Close(); }
     }
 }
 

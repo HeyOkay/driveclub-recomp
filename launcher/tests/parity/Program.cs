@@ -7,7 +7,6 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DriveClub.Launcher;
 
@@ -24,7 +23,6 @@ public static class Program
     static async Task Idle(){await Application.Current.Dispatcher.InvokeAsync(()=>{},DispatcherPriority.ApplicationIdle);await Task.Delay(100);}
     static IEnumerable<DependencyObject> Desc(DependencyObject o){yield return o;for(int i=0;i<VisualTreeHelper.GetChildrenCount(o);i++)foreach(var x in Desc(VisualTreeHelper.GetChild(o,i)))yield return x;}
     static T Id<T>(MainWindow w,string id) where T:DependencyObject=>Desc((FrameworkElement)w.FindName("Root")).OfType<T>().Single(x=>AutomationProperties.GetAutomationId(x)==id);
-    static void Save(FrameworkElement e,string name){e.UpdateLayout();var b=new RenderTargetBitmap((int)Math.Ceiling(e.ActualWidth),(int)Math.Ceiling(e.ActualHeight),96,96,PixelFormats.Pbgra32);var drawing=new DrawingVisual();using(var context=drawing.RenderOpen())context.DrawRectangle(new VisualBrush(e),null,new Rect(0,0,e.ActualWidth,e.ActualHeight));b.Render(drawing);var png=new PngBitmapEncoder();png.Frames.Add(BitmapFrame.Create(b));using var f=File.Create(Path.Combine(Out,name));png.Save(f);}
     static async Task Modal(MainWindow w,string title,Action<Window> check,Action open)
     {
         Exception? failure=null;
@@ -86,24 +84,24 @@ public static class Program
                 Check(baseRow.TranslatePoint(new Point(),body).Y<updateRow.TranslatePoint(new Point(),body).Y,"Game Files shows Base game above Update 1.28 with original IDs");
                 var folderOrder=Desc(body).OfType<TextBox>().Select(AutomationProperties.GetAutomationId).Where(x=>x.StartsWith("GameFolder")).ToArray();
                 Check(folderOrder.SequenceEqual(new[]{"GameFolder1","GameFolder0"}),"Game Files keyboard/tree order matches visual order");
-                Save(body,"play-base-first.png");
+
                 Check(state.Controls.Count(c=>c.Details.Length>0)==19,"all expanded native explanations available in frontend model");
                 state=JsonSerializer.Deserialize<LauncherState>(JsonSerializer.Serialize(state,Backend.JsonOptions),Backend.JsonOptions)!;
                 var physics=state.Controls.Single(c=>c.Tag=="@ffb:wheel_ffb_model");physics.Selected=0;
                 var response=await new Backend().Call("validate",state);Invoke(window,"Adopt",response);Invoke(window,"ShowPage",4,false);Set(window,"drivingSubpage",1);Invoke(window,"ShowPage",4,false);Invoke(window,"Adopt",response);await Idle();
                 var setting=response.Controls.Single(c=>c.Label=="Force feedback");var help=Id<Button>(window,"SettingHelp"+setting.Id);
-                await Modal(window,setting.Label,d=>{var text=Desc((FrameworkElement)d.Content).OfType<TextBox>().Single();Check(text.IsReadOnly&&text.Text.Contains(setting.Details),"details button opens full selectable native explanation");Check(text.ActualHeight>120&&!Desc(text).OfType<FilmGrainOverlay>().Any(),"reading pane expands and has no input-field grain");Save((FrameworkElement)d.Content,"ffb-details.png");},()=>help.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
-                Save(body,"driving-help.png");
+                await Modal(window,setting.Label,d=>{var text=Desc((FrameworkElement)d.Content).OfType<TextBox>().Single();Check(text.IsReadOnly&&text.Text.Contains(setting.Details),"details button opens full selectable native explanation");Check(text.ActualHeight>120&&!Desc(text).OfType<FilmGrainOverlay>().Any(),"reading pane expands and has no input-field grain");},()=>help.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
                 Invoke(window,"ShowPage",6,false);await Idle();
                 var runDetails=Id<Button>(window,"BenchmarkRunDetails");
-                await Modal(window,"WHAT THE GAME RAN WITH",d=>{var text=Desc((FrameworkElement)d.Content).OfType<TextBox>().Single();Check(text.Text.Contains("2560x1440")&&text.Text.Contains("3840x2160"),"benchmark details dialog displays actual render and output");Save((FrameworkElement)d.Content,"benchmark-run-details.png");},()=>runDetails.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
-                Save(body,"benchmark.png");
+                await Modal(window,"WHAT THE GAME RAN WITH",d=>{var text=Desc((FrameworkElement)d.Content).OfType<TextBox>().Single();Check(text.Text.Contains("2560x1440")&&text.Text.Contains("3840x2160"),"benchmark details dialog displays actual render and output");},()=>runDetails.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)));
+
                 Set(window,"preview",false);response.HardwareProblem="Fixture: processor lacks a required instruction.";Invoke(window,"Adopt",response);Invoke(window,"ShowPage",0,false);await Idle();
                 var play=(Button)window.FindName("FooterPlay");Check(!play.IsEnabled&&play.ToolTip?.ToString()==response.HardwareProblem,"disabled Play explains exact hardware block");
                 Invoke(window,"OperationStatus","");Check(((TextBlock)window.FindName("Status")).Text==response.HardwareProblem,"hardware failure appears in persistent status");
                 Set(window,"preview",true);response.HardwareProblem="";Invoke(window,"Adopt",response);
                 Set(window,"availableUpdate","9.9.9");var updater=Field<Button>(window,"updateButton");updater.Content="Update to 9.9.9";updater.Visibility=Visibility.Visible;
-                Invoke(window,"ShowUpdateNotice","9.9.9");await Idle();Check(updater.IsVisible&&updater.IsEnabled,"install-update action visible separately from release link");Save(body,"update-action.png");updater.Visibility=Visibility.Collapsed;
+                Invoke(window,"ShowUpdateNotice","9.9.9");await Idle();Check(updater.IsVisible&&updater.IsEnabled,"install-update action visible separately from release link");updater.Visibility=Visibility.Collapsed;
                 var gain=response.Controls.Single(c=>c.Tag=="@ffbgainup");var captureButton=new Button{Content="Map"};
                 string config=Path.Combine(Root,"data/user/input_config/default.ini");
                 File.WriteAllText(config,"# DriveClub racing layout\nwheel_button = 4, ffb_gain_up\nwheel_button = 5, ffb_gain_down\n");string initial=File.ReadAllText(config);
@@ -118,7 +116,7 @@ public static class Program
                 window.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,PresentationSource.FromVisual(window),0,Key.Delete){RoutedEvent=Keyboard.PreviewKeyDownEvent});await capture.WaitAsync(TimeSpan.FromSeconds(5));
                 Check(!File.ReadAllText(config).Contains("ffb_gain_up")&&File.ReadAllText(config).Contains("ffb_gain_down"),"Delete clears requested mapping through live IPC");
                 await PlayArgument(response);
-                window.Width=window.MinWidth;window.Height=window.MinHeight;Invoke(window,"ShowPage",0,false);await Idle();Save(body,"minimum.png");
+                window.Width=window.MinWidth;window.Height=window.MinHeight;Invoke(window,"ShowPage",0,false);await Idle();
                 var discord=(Button)window.FindName("DiscordButton");Check(discord.IsVisible&&discord.TranslatePoint(new Point(),body).Y+discord.ActualHeight<=body.ActualHeight,"approved Discord button remains anchored at minimum window");
                 File.WriteAllText(Path.Combine(Out,"checks.json"),JsonSerializer.Serialize(new{passed=Checks.Count,checks=Checks,game_launched=false},Backend.JsonOptions));app.Shutdown();
             }

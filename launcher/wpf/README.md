@@ -114,10 +114,7 @@ system-wide. The default compact package is framework-dependent.
 
 `DriveClub.exe --preview` prevents auto-play and previews the loading sequence
 when Play/Benchmark is pressed; no game is prepared or launched. Settings remain
-editable in this executable's own directory. `--preview --capture ABSOLUTE_PATH
---exit` exports actual WPF pages, full settings canvases and layout diagnostics.
-`--compact` and `--maximized` exercise window bounds. `--perf --exit` reports WPF
-render callback intervals; they are not GPU presentation timestamps.
+editable in this executable's own directory.
 
 ## Startup splash
 
@@ -151,11 +148,8 @@ clang++ -std=c++20 tools/launcher_ready_test.cpp -o C:\path\to\launcher_ready_te
 C:\path\to\launcher_ready_test.exe
 ```
 
-`DriveClub.exe --preview --capture ABSOLUTE_PATH --capture-splash --exit` also
-exports `launch-splash.png` and checks that a separate window hides/restores the
-launcher without starting a game. Add `--capture-benchmark-splash` to exercise
-the Benchmark preview path. `DriveClub.exe --benchmark` opens the Benchmark page
-and starts the configured run; it does not select or overwrite a performance preset.
+`DriveClub.exe --benchmark` opens the Benchmark page and starts the configured
+run; it does not select or overwrite a performance preset.
 
 ## Startup and .NET prerequisites
 

@@ -49,8 +49,8 @@ public partial class MainWindow
         canvas.Children.Clear(); canvas.Width = width;
         double panelWidth = MeasureGameStatus(width - 72).Width, gap = 18;
         double groupWidth = panelWidth * 2 + gap, left = PanelGroupLeft(width, groupWidth);
-        Caption(canvas, "MOD MANAGER", left, 46, groupWidth, 46, 32, true, "#F5F6F8", center: true).Tag = "PageHeading";
-        Caption(canvas, "Local loose-file mods. Higher in the list takes priority.", left, 99, groupWidth, 24, 15, false, "#8B93A1", center: true).Tag = "PageHeading";
+        Caption(canvas, "MOD MANAGER", left, 46, groupWidth, 46, 32, true, "#F5F6F8", center: true);
+        Caption(canvas, "Local loose-file mods. Higher in the list takes priority.", left, 99, groupWidth, 24, 15, false, "#8B93A1", center: true);
         RulePanel(canvas, left, 145, panelWidth, 38, "INSTALLED MODS");
         double inner = panelWidth - 44, x = left + 22, y = 195;
         double half = (inner - 12) / 2;
