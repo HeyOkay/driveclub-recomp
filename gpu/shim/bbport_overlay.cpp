@@ -121,8 +121,10 @@ void ExitConfirmation(float scale) {
     }
     char hints[160];
     std::snprintf(hints,sizeof(hints),"%s  Select       %s  Back",view.confirm,view.back);
-    draw->AddText(exit_body,15*scale,ImVec2(pos.x+36*scale,pos.y+154*scale),IM_COL32(155,155,160,255),
-                  view.exiting ? "Exiting DRIVECLUB..." : hints);
+    const char *footer=view.exiting ? "Exiting DRIVECLUB..." : hints;
+    const ImVec2 footer_size=exit_body->CalcTextSizeA(15*scale,FLT_MAX,0,footer);
+    draw->AddText(exit_body,15*scale,ImVec2(pos.x+(w-footer_size.x)*0.5f,pos.y+154*scale),
+                  IM_COL32(155,155,160,255),footer);
 }
 
 // Present rate for the FPS counter.

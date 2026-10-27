@@ -152,6 +152,10 @@ without .NET detection, PowerShell or installation. On Windows, use
 fallback. Actual Wine/Proton execution still requires testing; the route and
 argument forwarding are covered by Windows tests.
 
+To try the new interface under Wine, run `DriveClub.Launcher.exe` directly with
+.NET 8 Desktop x64 installed in the same Wine prefix. This bypasses automatic
+native-interface selection; WPF compatibility under Wine remains unverified.
+
 `DriveClub.exe --check-only` launches nothing: exit 0 means the selected interface
 is available; exit 2 means .NET is missing on the WPF route. A missing program
 file returns 1. `DriveClub.exe --native --check-only` checks only the native route.
