@@ -689,7 +689,12 @@ std::string SaveWheel() {
 void OpenWheelSetup() {
   for (const std::wstring& p : {g_home + L"\\WheelSetup.exe", g_home + L"\\..\\WheelSetup.exe", g_home + L"\\..\\tools\\WheelSetup.exe"}) {
     if (!Exists(p)) continue;
-    ShellExecuteW(g_hwnd, L"open", p.c_str(), nullptr, Dir(p).c_str(), SW_SHOWNORMAL);
+    const auto opened = reinterpret_cast<INT_PTR>(ShellExecuteW(g_hwnd, L"open", p.c_str(), nullptr, Dir(p).c_str(), SW_SHOWNORMAL));
+    if (opened <= 32) {
+      g_status = L"Wheel Setup could not be started (Windows error " + std::to_wstring(opened) + L").";
+      g_status_color = kBad;
+      return;
+    }
     g_status = L"Wheel Setup is open: map the wheel, pedals, handbrake and shifter there, then press Save in its window.";
     g_status_color = kMuted;
     return;
@@ -3509,6 +3514,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show) {
+  {
+    int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const int deferred = argv ? Updater::RunDeferred(argc, argv) : -1;
+    if (argv) LocalFree(argv);
+    if (deferred >= 0) return deferred;
+  }
   if (wcsstr(GetCommandLineW(), L"--gpu-check")) {
     int argc = 0;
     wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);

@@ -11,6 +11,7 @@ public sealed class Setting : INotifyPropertyChanged
     public int Id { get; set; }
     public string Label { get; set; } = "";
     public string Hint { get; set; } = "";
+    public string Details { get; set; } = "";
     public string Kind { get; set; } = "";
     public string Tag { get; set; } = "";
     public int Minimum { get; set; }
@@ -57,12 +58,22 @@ public sealed class LauncherState
     public string BenchmarkFps { get; set; } = "";
     public string BenchmarkLows { get; set; } = "";
     public string BenchmarkAbout { get; set; } = "";
+    public string BenchmarkRanSummary { get; set; } = "";
+    public List<string> BenchmarkRanDetails { get; set; } = [];
+    public string Message { get; set; } = "";
+    public bool CaptureCancelled { get; set; }
+    public bool CaptureClear { get; set; }
+    public string InstalledVersion { get; set; } = "";
+    public string UpdateVersion { get; set; } = "";
+    public string UpdateNote { get; set; } = "";
+    public uint ShellProcessId { get; set; }
+    public bool RestartRequired { get; set; }
 }
 public sealed class Backend
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     public static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true, PropertyNameCaseInsensitive = true };
-    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null, string? launchReadyEvent = null, IProgress<int>? gameStarted = null)
+    public async Task<LauncherState> Call(string action, LauncherState? request = null, IProgress<(int Percent, string Text)>? progress = null, string? launchReadyEvent = null, IProgress<int>? gameStarted = null, Func<string?>? captureCommand = null)
     {
         await gate.WaitAsync();
         string folder = Path.Combine(AppContext.BaseDirectory, "data", "ui");
@@ -80,8 +91,15 @@ public sealed class Backend
             using var process = Process.Start(start) ?? throw new IOException("The native backend could not be started.");
             var completion = process.WaitForExitAsync();
             int reportedGameId = 0;
+            string? sentCommand = null;
             while (!completion.IsCompleted)
             {
+                string? command = captureCommand?.Invoke();
+                if (command is "cancel" or "clear" && command != sentCommand)
+                {
+                    await File.WriteAllTextAsync(output + ".control", command + "\n");
+                    sentCommand = command;
+                }
                 if (progress != null && File.Exists(output + ".progress"))
                 {
                     try
@@ -103,7 +121,7 @@ public sealed class Backend
         }
         finally
         {
-            foreach (var file in new[] { input, output, output + ".progress" }) try { File.Delete(file); } catch (IOException) { }
+            foreach (var file in new[] { input, output, output + ".progress", output + ".control" }) try { File.Delete(file); } catch (IOException) { }
             gate.Release();
         }
     }

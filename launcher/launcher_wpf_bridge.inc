@@ -35,6 +35,26 @@ const RuntimeFeatures& GetRuntimeFeatures() {
   return features;
 }
 bool CameraPatchAvailable() { return GetRuntimeFeatures().camera; }
+std::wstring UiInstalledVersion() {
+  const auto lines = ReadLines(g_home + L"\\version.txt");
+  if (lines.empty()) return {};
+  auto value = Widen(lines[0]);
+  while (!value.empty() && iswspace(value.back())) value.pop_back();
+  const auto first = value.find_first_not_of(L" \t\r\n");
+  return first == std::wstring::npos ? L"" : value.substr(first);
+}
+bool UiReleaseVersion(std::wstring value) {
+  if (!value.empty() && (value[0] == L'v' || value[0] == L'V')) value.erase(0, 1);
+  int parts = 0, digits = 0;
+  for (wchar_t c : value) {
+    if (c >= L'0' && c <= L'9') { if (++digits > 8) return false; }
+    else if (c == L'.' && digits) { ++parts; digits = 0; }
+    else return false;
+  }
+  return digits && parts >= 1 && parts <= 3;
+}
+std::wstring g_ui_update_version, g_ui_update_note;
+bool g_ui_capture_cancelled = false, g_ui_restart_required = false;
 Json UiState(const std::wstring& error=L"") {
   Json controls=Json::array(),cards=Json::array();
   for(size_t i=0;i<g_c.size();++i){
@@ -47,7 +67,8 @@ Json UiState(const std::wstring& error=L"") {
     const bool listed=std::any_of(g_cards.begin(),g_cards.end(),[&](const Card& card){return std::find(card.ctls.begin(),card.ctls.end(),int(i))!=card.ctls.end();});
     controls.push_back({{"Id",i},{"Label",Narrow(c.label)},{"Hint",Narrow(int(i)==g_camera_patch_row && !CameraPatchAvailable() ? L"This runtime does not expose the temporary camera/replay workaround. It may be unnecessary if native timing is already corrected." : int(i)==g_motion_blur ? MotionBlurHint(c.sel) : c.hint)},{"Kind",kind},{"Tag",c.patches[0]},
       {"Minimum",c.min},{"Maximum",c.max},{"Unit",Narrow(c.unit)},{"Hidden",!listed || RowHidden(c)},{"Enabled",!BlurRowLocked(c) && (int(i)!=g_camera_patch_row || CameraPatchAvailable())},
-      {"Options",options},{"Selected",selected},{"Text",c.patches[0]=="@name"?Narrow(g_name):""}});
+      {"Options",options},{"Selected",selected},{"Text",c.patches[0]=="@name"?Narrow(g_name):""},
+      {"Details",c.more?Narrow(c.more):""}});
   }
   // The native model owns category/card membership, reset scopes and Driving subpages.
   for(const auto& c:g_cards) {
@@ -59,7 +80,11 @@ Json UiState(const std::wstring& error=L"") {
     {"FoldersOk",FoldersOk()},{"FolderProblem",Narrow(!FolderProblem(0).empty()?FolderProblem(0):FolderProblem(1))},
     {"HardwareProblem",Narrow(g_gpu_problem)},{"RuntimeAvailable",Exists(GameExe())},{"StartupSignalSupported",GetRuntimeFeatures().startup},{"Error",Narrow(error)},
     {"QuickControls",{g_preset,g_fps,g_outres,g_aa}},{"PresetId",g_preset},
-    {"BenchmarkFps",Narrow(g_bench_result.fps)},{"BenchmarkLows",Narrow(g_bench_result.lows)},{"BenchmarkAbout",Narrow(g_bench_result.about)}};
+    {"BenchmarkFps",Narrow(g_bench_result.fps)},{"BenchmarkLows",Narrow(g_bench_result.lows)},{"BenchmarkAbout",Narrow(g_bench_result.about)},
+    {"BenchmarkRanSummary",Narrow(g_bench_ran_short)},{"BenchmarkRanDetails",[&]{Json lines=Json::array();for(const auto& line:g_bench_ran_lines)lines.push_back(Narrow(line));return lines;}()},
+    {"Message",Narrow(g_status)},{"CaptureCancelled",g_ui_capture_cancelled},
+    {"InstalledVersion",Narrow(UiInstalledVersion())},{"UpdateVersion",Narrow(g_ui_update_version)},
+    {"UpdateNote",Narrow(g_ui_update_note)},{"RestartRequired",g_ui_restart_required}};
 }
 void ImportUiState(const Json& input) {
   g_folder[0].path=Widen(input.value("UpdatePath",Narrow(g_folder[0].path)));
@@ -80,6 +105,9 @@ void ImportUiState(const Json& input) {
     if(c.patches[0]=="@skipgpu")g_skip_gpu_check=c.sel!=0;
   }
   NameNativeUpscale();ShowBenchChoices();CheckFolders();
+  // Preserve the displayed check result across short-lived IPC workers. Launch
+  // always performs its own hardware check, never trusting this UI-only value.
+  g_gpu_problem = g_skip_gpu_check ? L"" : Widen(input.value("HardwareProblem",std::string()));
 }
 int RunWpfBridge(int argc,wchar_t** argv) {
   if(argc<3||wcsncmp(argv[1],L"--ui-",5)!=0)return -1;
@@ -116,21 +144,64 @@ int RunWpfBridge(int argc,wchar_t** argv) {
         if(changed==g_fps)ApplyFrameModeCameraDefault();
         if(changed==g_wide && g_c[g_wide].sel>0)g_c[g_outres].sel=g_c[g_inres].sel=0;
         DerivePreset();DeriveDrivePreset();DeriveWheelPreset();
+        if(changed>=0 && changed<int(g_c.size()) && g_c[changed].patches[0]=="@skipgpu") {
+          g_gpu_problem=g_skip_gpu_check?L"":CheckCpu();
+          if(!g_skip_gpu_check && g_gpu_problem.empty())g_gpu_problem=CheckGpu();
+        }
       }
       else if(command==L"--ui-preset")ApplyPreset(g_c[g_preset].sel);
       else if(command==L"--ui-drive-preset"){if(g_c[g_drive_preset].sel>=0)ApplyDrivePreset(g_c[g_drive_preset].sel);}
       else if(command==L"--ui-wheel-preset"){if(g_c[g_ffb_preset].sel>=0)ApplyWheelPreset(g_c[g_ffb_preset].sel);}
-      else if(command==L"--ui-wheelsetup"){OpenWheelSetup();}
+      else if(command==L"--ui-wheelsetup"){
+        OpenWheelSetup();
+        if(g_status_color.GetValue()==kBad.GetValue())throw std::runtime_error(Narrow(g_status));
+      }
+      else if(command==L"--ui-check-update" || command==L"--ui-install-update") {
+        const auto current=UiInstalledVersion();
+        const bool enabled=std::any_of(g_c.begin(),g_c.end(),[](const Ctl& c){return c.patches[0]=="@updatecheck" && c.sel!=0;});
+        if(command==L"--ui-check-update")Updater::CleanUp(g_home);
+        if(!UiReleaseVersion(current)) {
+          g_ui_update_note=current.empty()?L"The installed version is unknown; automatic release updates are unavailable.":
+            L"Development build ("+current+L"). Automatic replacement with a release is disabled.";
+          if(command==L"--ui-install-update")throw std::runtime_error(Narrow(g_ui_update_note));
+        } else if(enabled || command==L"--ui-install-update") {
+          Updater::Release release;std::string why;
+          const auto stable=current[0]==L'v'||current[0]==L'V'?current.substr(1):current;
+          if(Updater::CheckNewer(stable,release,why)) {
+            g_ui_update_version=release.version;
+            if(command==L"--ui-install-update") {
+              if(request.value("UpdateVersion",std::string())!=Narrow(release.version))throw std::runtime_error("The available release changed. Check for updates again.");
+              const auto pid=request.value("ShellProcessId",0ul);
+              g_external_progress=output+L".progress";
+              std::wstring error;
+              if(!Updater::InstallForShell(release,g_home,pid,[](int p){SetProgress(p,L"Downloading and verifying update...");},error))throw std::runtime_error(Narrow(error));
+              g_ui_restart_required=true;
+            }
+          } else {
+            g_ui_update_note=Widen(why);
+            if(command==L"--ui-install-update")throw std::runtime_error(why.empty()?"No newer release is available.":why);
+          }
+        }
+      }
       else if(command==L"--ui-ffbgainup" || command==L"--ui-ffbgaindown"){
         // Reuse the native wheel capture without opening the native launcher.
         HWND capture=CreateWindowExW(0,L"STATIC",L"",0,0,0,0,0,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
         if(!capture)throw std::runtime_error("Cannot start wheel button capture");
-        StartFfbCapture(capture,command==L"--ui-ffbgainup"?0:1);
+        const int which=command==L"--ui-ffbgainup"?0:1;
+        if(request.value("CaptureClear",false))SetFfbGainButton(capture,which,-1);
+        else StartFfbCapture(capture,which);
         const auto until=GetTickCount64()+15000;
-        while(g_ffb_capture>=0 && GetTickCount64()<until){PollFfbCapture(capture);Sleep(30);}
+        while(g_ffb_capture>=0 && GetTickCount64()<until){
+          const auto commands=ReadLines(output+L".control");
+          if(!commands.empty() && commands[0]=="cancel") {
+            StopFfbCapture(capture);g_ui_capture_cancelled=true;g_status=L"Wheel button unchanged.";break;
+          }
+          if(!commands.empty() && commands[0]=="clear") {SetFfbGainButton(capture,which,-1);break;}
+          PollFfbCapture(capture);Sleep(30);
+        }
         if(g_ffb_capture>=0){StopFfbCapture(capture);g_status=L"No new wheel button pressed within 15 seconds.";g_status_color=kWarn;}
         DestroyWindow(capture);
-        if(g_status_color.GetValue()!=kOk.GetValue())throw std::runtime_error(Narrow(g_status));
+        if(!g_ui_capture_cancelled && g_status_color.GetValue()!=kOk.GetValue())throw std::runtime_error(Narrow(g_status));
       }
       else if(command==L"--ui-apply"||command==L"--ui-run"||command==L"--ui-benchmark"){
         DerivePreset();DeriveDrivePreset();DeriveWheelPreset();

@@ -58,22 +58,7 @@ public partial class MainWindow : Window
     private int refreshRate = 240;
     private string? releaseUrl;
     private string baseStatusColour = "#A0A0AA";
-    private async Task CheckForUpdates()
-    {
-        if (!state.Controls.Any(c => c.Tag == "@updatecheck" && c.IsOn)) return;
-        try
-        {
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
-            client.DefaultRequestHeaders.UserAgent.ParseAdd("DriveClub-WPF/0.3.1");
-            using var json = JsonDocument.Parse(await client.GetStringAsync("https://api.github.com/repos/OverkillLabs3/driveclub-recomp/releases/latest"));
-            string tag = json.RootElement.GetProperty("tag_name").GetString() ?? "";
-            if (System.Version.TryParse(tag.TrimStart('v'), out var latest) && latest > new System.Version(0,3,1))
-            {
-                ShowUpdateNotice(tag);
-            }
-        }
-        catch (HttpRequestException) { } catch (TaskCanceledException) { } catch (JsonException) { }
-    }
+    private Task CheckForUpdates() => CheckNativeUpdates();
 
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hwnd);
@@ -103,6 +88,7 @@ public partial class MainWindow : Window
     {
         LoadFonts();
         InitializeComponent();
+        InitializeParity();
         if (preview) Title = "DRIVECLUB Launcher - Preview";
         Status.MouseLeftButtonUp += (_, _) =>
         {
@@ -136,12 +122,12 @@ public partial class MainWindow : Window
                 if (Environment.GetCommandLineArgs().Contains("--compact")) { Width = MinWidth; Height = MinHeight; }
                 if (Environment.GetCommandLineArgs().Contains("--maximized")) WindowState = WindowState.Maximized;
                 Adopt(await backend.Call("state"));
-                SetStatus(state.FoldersOk ? "" : "Choose the game folders on Play.");
+                OperationStatus(state.FoldersOk ? "" : "Choose the game folders on Play.");
                 if (Environment.GetCommandLineArgs().Contains("--mod-manager")) ShowPage(ModsPage, false);
                 if (capture) await CapturePages();
                 else if (perf) await MeasureAnimations();
                 else if (!preview && Environment.GetCommandLineArgs().Contains("--benchmark")) { ShowPage(6, false); await Launch(true); }
-                else if (!preview && File.Exists(Path.Combine(root, "launcher.ini")) && File.ReadLines(Path.Combine(root, "launcher.ini")).Any(x => x.Trim() == "auto_play=1")) await Launch(false);
+                else if (!preview && (Environment.GetCommandLineArgs().Contains("--play") || (File.Exists(Path.Combine(root, "launcher.ini")) && File.ReadLines(Path.Combine(root, "launcher.ini")).Any(x => x.Trim() == "auto_play=1")))) await Launch(false);
                 if (!preview && !capture && !perf && !busy) _ = CheckForUpdates();
             }
             catch (Exception ex) { SetStatus(ex.Message, true); }
@@ -180,7 +166,7 @@ public partial class MainWindow : Window
     {
         Status.Text = baseStatus; Status.Foreground = Brush(baseStatusColour);
         Status.Cursor = releaseUrl == null ? Cursors.Arrow : Cursors.Hand;
-        Status.ToolTip = releaseUrl == null ? null : "Opens the release page. Updating the custom WPF launcher requires rebuilding it.";
+        Status.ToolTip = releaseUrl == null ? null : "Opens the release page. Use the Update button to download and install it.";
     }
     private void ShowStatusHint(string text)
     {
@@ -189,7 +175,7 @@ public partial class MainWindow : Window
     }
     private void ShowUpdateNotice(string tag)
     {
-        SetStatus($"Version {tag} is available. Click here to open the release.");
+        SetStatus($"Version {tag} is available. Use Update to install it, or click here for release details.");
         releaseUrl = "https://github.com/OverkillLabs3/driveclub-recomp/releases/tag/" + Uri.EscapeDataString(tag);
         baseStatusColour = "#5AC878"; RestoreStatus();
     }
@@ -261,6 +247,7 @@ public partial class MainWindow : Window
         foreach (var c in state.Controls) c.PropertyChanged += SettingChanged;
         pages.Clear(); ShowPage(currentPage, initial && !capture && !perf); suppress = false;
         FooterPlay.IsEnabled = preview || (state.FoldersOk && string.IsNullOrEmpty(state.HardwareProblem));
+        FooterPlay.ToolTip = string.IsNullOrEmpty(state.HardwareProblem) ? "Save and start the game." : state.HardwareProblem;
     }
     private async void SettingChanged(object? sender, PropertyChangedEventArgs args)
     {
@@ -270,7 +257,7 @@ public partial class MainWindow : Window
         if (args.PropertyName == "Selected")
         {
             string action = setting.Id == state.PresetId ? "preset" : setting.Tag == "@drive_preset" ? "drive-preset" : setting.Tag == "@wheelpreset" ? "wheel-preset" : "validate";
-            try { var result = await backend.Call(action, state); if (changed == revision) { Adopt(result); SetStatus("Unsaved changes"); } }
+            try { var result = await backend.Call(action, state); if (changed == revision) { Adopt(result); OperationStatus("Unsaved changes"); } }
             catch (Exception ex) { SetStatus(ex.Message, true); }
         }
     }
@@ -472,14 +459,14 @@ public partial class MainWindow : Window
     }
     private (double Width, double Height) SettingLabelSize(Setting setting, double width, bool quick)
     {
-        double labelWidth = width - (setting.Kind == "Toggle" ? 42 : setting.Kind == "Slider" ? SliderValueWidth(setting) + 12 : 0);
+        double labelWidth = width - (setting.Kind == "Toggle" ? 42 : setting.Kind == "Slider" ? SliderValueWidth(setting) + 12 : 0) - (setting.Details.Length == 0 ? 0 : 26);
         var label = Text(setting.Label, quick ? 14 : 15);
         label.Measure(new Size(Math.Max(1, labelWidth), double.PositiveInfinity));
         return (labelWidth, Math.Max(quick ? 24 : 20, Math.Ceiling(label.DesiredSize.Height)));
     }
     private double RowHeight(Setting setting, double width, bool quick = false)
     {
-        if (setting.Kind == "Action") return 242;
+        if (setting.Kind == "Action") return state.BenchmarkRanDetails.Count > 0 ? 288 : 242;
         double labelHeight = SettingLabelSize(setting, width, quick).Height;
         if (setting.Kind == "Toggle") return Math.Max(52, labelHeight + 12);
         return Math.Max(quick ? 76 : 82, labelHeight + (quick ? 52 : 62));
@@ -539,6 +526,7 @@ public partial class MainWindow : Window
             label.TextTrimming = TextTrimming.None;
             AutomationProperties.SetAutomationId(label, "SettingLabel" + setting.Id);
             Place(row, label, 0, top, labelSize.Width, boxHeight);
+            if (setting.Details.Length > 0) Place(row, SettingHelp(setting), labelSize.Width + 4, top + Math.Max(0, (boxHeight - 20) / 2), 20, 20);
         }
         FrameworkElement field;
         if (setting.Kind == "Toggle")
@@ -560,31 +548,13 @@ public partial class MainWindow : Window
                 Caption(row, state.BenchmarkAbout, 0, 178, width, 50, 13, false, "#8B93A1", true);
             }
             else Caption(row, "Run an event to measure average FPS and frame-time lows.", 0, 104, width, 70, 16, false, "#8B93A1", true);
+            AddBenchmarkDetails(row, width);
         }
         else if (setting.Kind == "Button")
         {
             Label(quick ? 0 : 6, labelSize.Height);
             var button = new Button { Content = setting.Options.FirstOrDefault() ?? setting.Label, Padding = new(12,0,12,0) };
-            button.Click += async (_, _) =>
-            {
-                bool gain = setting.Tag is "@ffbgainup" or "@ffbgaindown";
-                try
-                {
-                    button.IsEnabled = false;
-                    if (gain) { busy = true; SetStatus("Press a new button on your wheel within 15 seconds."); }
-                    var response = await backend.Call(gain ? setting.Tag[1..] : "wheelsetup", state);
-                    if (gain)
-                    {
-                        // Keep pending settings; only the independently saved button labels changed.
-                        foreach (var changed in response.Controls.Where(c => c.Tag is "@ffbgainup" or "@ffbgaindown"))
-                            state.Controls.Single(c => c.Tag == changed.Tag).Options = changed.Options;
-                        pages.Remove(currentPage); ShowPage(currentPage, false);
-                        SetStatus("Wheel button saved. Takes effect on the next game launch.");
-                    }
-                }
-                catch (Exception ex) { SetStatus(ex.Message, true); }
-                finally { busy = false; button.IsEnabled = true; }
-            };
+            ConfigureNativeButton(button, setting);
             field = button; Place(row, field, 0, fieldTop, width, 38);
         }
         else if (setting.Kind == "Slider")
@@ -655,7 +625,13 @@ public partial class MainWindow : Window
         for (int k = 0; k < 4; ++k)
         {
             Caption(canvas, labels[k], left + 22, 278 - statusShift + k * 35, labelWidth, 29, 14, false, "#8B93A1");
-            Caption(canvas, values[k], left + valueOffset, 278 - statusShift + k * 35, sw - valueOffset - 22, 29, 14, false, k == 0 && state.FoldersOk ? "#5AC878" : "#E8EAED");
+            var statusValue = Caption(canvas, values[k], left + valueOffset, 278 - statusShift + k * 35, sw - valueOffset - 22, 29, 14, false, k == 0 && state.FoldersOk ? "#5AC878" : "#E8EAED");
+            if (k == 2 && !string.IsNullOrEmpty(state.HardwareProblem))
+            {
+                statusValue.ToolTip = state.HardwareProblem; statusValue.Cursor = Cursors.Hand;
+                statusValue.MouseLeftButtonUp += (_, _) => ShowDetails("HARDWARE CHECK", state.HardwareProblem);
+                AutomationProperties.SetName(statusValue, state.HardwareProblem);
+            }
             if (k == 0 && state.FoldersOk)
             {
                 var verified = new DottedCaptionGlyph { Glyph = "Checkmark", Fill = Brush("#5AC878"), ToolTip = "Game files verified" };
@@ -665,7 +641,7 @@ public partial class MainWindow : Window
             }
             if (k < 3) Place(canvas, new Border { Background = Brush("#313134") }, left + 22, 310 - statusShift + k * 35, sw - 44, 1);
         }
-        var play = new Button { Content = preview ? "PREVIEW LAUNCH" : "PLAY", Style = (Style)FindResource("PlayButton"), FontSize = 23, Padding = new(0), BorderThickness = new(0), Background = Brush("#ED2B38"), IsEnabled = preview || (state.FoldersOk && string.IsNullOrEmpty(state.HardwareProblem)) };
+        var play = new Button { Content = preview ? "PREVIEW LAUNCH" : "PLAY", Style = (Style)FindResource("PlayButton"), FontSize = 23, Padding = new(0), BorderThickness = new(0), Background = Brush("#ED2B38"), IsEnabled = preview || (state.FoldersOk && string.IsNullOrEmpty(state.HardwareProblem)), ToolTip = string.IsNullOrEmpty(state.HardwareProblem) ? "Save and start the game." : state.HardwareProblem };
         play.Click += PlayClick; AutomationProperties.SetAutomationId(play, "HomePlay"); Place(canvas, play, left, 452 - statusShift, sw, 44);
         Caption(canvas, preview ? "Interface preview only. No game will be started." : "Your settings are saved when you start the game.", left, 524 - statusShift, sw, 24, 13, false, "#8B93A1");
         // Paths share the status row on wide windows and flow below it on narrow ones.
@@ -725,9 +701,10 @@ public partial class MainWindow : Window
         };
         Place(canvas, toggle, left, y, width, SectionHeaderHeight);
         Place(canvas, new Border { Background = Brush("#ED2B38"), IsHitTestVisible = false }, left, y, 3, SectionHeaderHeight);
-        for (int i = 0; i < 2; ++i)
+        for (int visualRow = 0; visualRow < 2; ++visualRow)
         {
-            int which = i; double fy = 12 + i * 48, rw = width - 44;
+            int i = 1 - visualRow;
+            int which = i; double fy = 12 + visualRow * 48, rw = width - 44;
             Caption(body, i == 0 ? "Update 1.28" : "Base game", 22, fy, 96, 38, 14);
             string selectedPath = i == 0 ? state.UpdatePath : state.BasePath;
             var path = new TextBox { Text = selectedPath, ToolTip = selectedPath, IsReadOnly = true, FontSize = 14, BorderThickness = new(0) };
@@ -754,7 +731,7 @@ public partial class MainWindow : Window
     private async void SaveClick(object? sender, RoutedEventArgs e)
     {
         if (busy) return;
-        try { SaveButton.IsEnabled = false; Adopt(await backend.Call("apply", state)); SetStatus("Saved."); }
+        try { SaveButton.IsEnabled = false; Adopt(await backend.Call("apply", state)); OperationStatus("Saved."); }
         catch (Exception ex) { SetStatus(ex.Message, true); }
         finally { SaveButton.IsEnabled = true; }
     }

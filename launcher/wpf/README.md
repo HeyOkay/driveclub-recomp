@@ -32,6 +32,33 @@ their assignments; other pending settings are retained. Capture times out after
 15 seconds without a new wheel button. Physical wheel capture needs hardware
 validation; the prerequisite and settings-preservation paths are covered offline.
 
+The native launcher features are also available in the WPF shell:
+
+- **Update:** the installed version comes from `version.txt`, not a fixed frontend
+  version. The native checker selects the release and its checksum. Update downloads
+  and verifies the package, then a native helper waits for the WPF process to exit
+  before replacing its mapped EXE/DLL files and restarting the entry point. The
+  existing player-file exclusions apply. Development/unknown version identifiers
+  do not trigger replacement with an older stable release. No .NET installer is
+  involved in application updates.
+- **Details:** the `i` buttons open the native expanded explanations as selectable
+  text. Benchmark results expose the actual run's render/output sizes, AA, cap,
+  presentation, reflection and detail settings, rather than the currently selected
+  options for the next run.
+- **Wheel buttons:** a second click or Esc cancels capture; Delete/Backspace or
+  the context menu clears the assignment. Clearing does not require a connected
+  wheel. All other pending launcher settings remain pending. Wheel Setup launch
+  failures are returned to the frontend.
+- **Hardware and direct launch:** disabled Play explains the exact CPU/GPU check
+  failure. `DriveClub.exe --play` starts through the WPF launch path even when
+  auto-play is off; `--preview` suppresses it. Game Files lists Base game before
+  Update 1.28 while preserving their existing path IDs and saved meanings.
+
+Offline coverage: `launcher/tests/backend/parity.py`,
+`launcher/tests/setup/updater_shell_test.cpp` and
+`launcher/tests/parity/LauncherParity.Tests.csproj`. The fake SDL provider under
+tests/backend is only a test fixture and must never ship in a game package.
+
 ### PS4 preset
 
 Quick Settings offers **PS4**: 30 FPS, native 1080p output/render, original game
