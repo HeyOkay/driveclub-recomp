@@ -33,7 +33,11 @@ static int32_t trophy_load(TrophyContext *ctx) {
 static int32_t trophy_save(TrophyContext *ctx) {
     char tmp[1032];
     snprintf(tmp,sizeof(tmp),"%s.new",ctx->path);
-    for (char *p=tmp+1;*p;++p) if (*p=='/' || *p=='\\') {
+    char *start=tmp+1;
+#ifdef _WIN32
+    if (tmp[1]==':' && (tmp[2]=='/' || tmp[2]=='\\')) start=tmp+3;
+#endif
+    for (char *p=start;*p;++p) if (*p=='/' || *p=='\\') {
         char slash=*p; *p=0;
         int failed=mkdir(tmp,0755) && errno!=EEXIST;
         *p=slash;
