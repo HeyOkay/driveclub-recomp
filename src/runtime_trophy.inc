@@ -35,7 +35,10 @@ static int32_t trophy_save(TrophyContext *ctx) {
     snprintf(tmp,sizeof(tmp),"%s.new",ctx->path);
     char *start=tmp+1;
 #ifdef _WIN32
-    if (tmp[1]==':' && (tmp[2]=='/' || tmp[2]=='\\')) start=tmp+3;
+    if (tmp[1]==':' && (tmp[2]=='/' || tmp[2]=='\\')) {
+        start=tmp+3;
+        while (*start=='/' || *start=='\\') ++start;
+    }
 #endif
     for (char *p=start;*p;++p) if (*p=='/' || *p=='\\') {
         char slash=*p; *p=0;
