@@ -232,6 +232,11 @@ bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive&
 }
 
 bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
+    // A rejected cached pipeline may have loaded only some stages. Start each
+    // selection clean so it cannot inherit shader state from a previous entry.
+    sel.infos.fill(nullptr);
+    sel.modules.fill(nullptr);
+    sel.fetch_shader.reset();
     sel.graphics_key.Deserialize(ar);
 
     GraphicsPipeline::SerializationSupport sdata{};
@@ -276,8 +281,14 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     Shader::StageSpecialization spec{};
     spec.info = &program->info;
     size_t perm_idx{};
-    if (!LoadShaderMeta(ar, program->info, sel.fetch_shader, spec, perm_idx)) {
+    std::optional<Shader::Gcn::FetchShaderData> fetch_shader;
+    if (!LoadShaderMeta(ar, program->info, fetch_shader, spec, perm_idx)) {
         return false;
+    }
+    // Match RefreshGraphicsStages: a later stage without a fetch program must
+    // not erase the vertex stage's data, needed for attributes and draw offsets.
+    if (fetch_shader) {
+        sel.fetch_shader = std::move(fetch_shader);
     }
 
     std::vector<u32> spv{};
