@@ -229,7 +229,7 @@ struct PushData {
     float yscale;
     std::array<u32, NUM_USER_DATA_REGS> ud_regs;
     std::array<u8, NUM_BUFFERS> buf_offsets;
-    u32 motion_param; ///< bbport: object motion parameter index (0: off)
+    u32 motion_param; ///< low 31 bits: motion index (0: off); high bit: live world texture sampling
     u32 scene_size; ///< reduced width | height << 16; zero means native pixel coordinates
 
     void AddOffset(u32 binding, u32 offset) {

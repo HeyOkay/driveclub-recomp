@@ -44,6 +44,7 @@ Keyboard (racing layout; change it in data\user\input_config\default.ini):
   R / T          touchpad left / right half (R is Reset to Track)
   Enter or Z     accept      Backspace  back      Esc or P  pause
   Arrow keys     d-pad       I J K L    look around (or move the mouse)
+  F4             texture repetition reduction on / off (choice saved)
   F7             mouse look on / off
 
 Requirements

@@ -18,7 +18,13 @@ const char* Path() {
     return env && env[0] ? env : "bbport.ini";
 }
 
-// hdr.ini in the settings file's folder: the HDR brightness set while playing.
+// Small shared files persist choices made through in-game hotkeys.
+std::string TextureIniPath() {
+    const std::string config = Path();
+    const size_t slash = config.find_last_of("/\\");
+    return (slash == std::string::npos ? std::string() : config.substr(0, slash + 1)) + "texture_repetition.ini";
+}
+
 std::string HdrIniPath() {
     const std::string config = Path();
     const size_t slash = config.find_last_of("/\\");
@@ -147,7 +153,13 @@ void Load() {
         std::printf("Settings: %s\n", Path());
     }
     BbNeural::Load(Path());
-    // The HDR brightness last set while playing (the launcher passes its slider, which shows it).
+    // In-game hotkey choices, before explicit environment overrides.
+    if (FILE* file = std::fopen(TextureIniPath().c_str(), "r")) {
+        char line[128];
+        while (std::fgets(line, sizeof line, file))
+            if (std::strncmp(line, "enabled=", 8) == 0) v.texture_repetition = std::atoi(line + 8) != 0;
+        std::fclose(file);
+    }
     if (FILE* file = std::fopen(HdrIniPath().c_str(), "r")) {
         char line[64];
         while (std::fgets(line, sizeof(line), file)) {
@@ -180,7 +192,6 @@ void Load() {
             Set(v, key, value);
         }
     }
-    v.startup_texture_repetition = v.texture_repetition;
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;
@@ -233,7 +244,7 @@ int RenderPreset() {
 bool ResolutionNeedsRestart() {
     const auto& v = Get();
     // TAA needs the live path (native guest targets): run.sh selects it on restart.
-    return v.texture_repetition != v.startup_texture_repetition || (FixedRenderSession() &&
+    return (FixedRenderSession() &&
         (v.preset != v.startup_preset || v.output_res != v.startup_output_res ||
          (v.upscaler == UpscalerOff) != (v.startup_upscaler == UpscalerOff) ||
          (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa)));
@@ -298,6 +309,14 @@ const char* FrameGenName(int frame_gen) {
 const char* AaName(int aa) {
     static constexpr const char* names[AaCount] = {"off", "fsr3", "dlss"};
     return names[std::clamp(aa, 0, AaCount - 1)];
+}
+
+bool SaveTextureRepetition(bool enabled) {
+    if (FILE* file = std::fopen(TextureIniPath().c_str(), "w")) {
+        const bool written = std::fprintf(file, "enabled=%d\n", int(enabled)) > 0;
+        return std::fclose(file) == 0 && written;
+    }
+    return false;
 }
 
 void SaveHdrBrightness(int nits) {

@@ -49,6 +49,11 @@ int main() {
   g_user_env.clear();
   SetEnvironmentVariableW(L"BB_TEXTURE_REPETITION", nullptr);
 
+  // An F4 change is newer than the launcher's saved choice.
+  ApplyPreset(4);g_c[g_texture_repetition].sel=1;assert(SaveSettings());
+  assert(SaveIniValue(g_data+L"\\user\\texture_repetition.ini","enabled","0"));
+  LoadSettings();assert(g_c[g_texture_repetition].sel==0);
+  g_c[g_texture_repetition].sel=1;assert(SaveSettings());LoadSettings();assert(g_c[g_texture_repetition].sel==1);
   // Existing PS4 profiles predate the key. Migrate them without enabling an
   // enhancement; legacy PC profiles receive the new default.
   for (int preset : {6, 4}) {
@@ -58,6 +63,7 @@ int main() {
     for (const auto& line : ReadLines(IniPath()))
       if (line.rfind("texture_repetition=", 0) != 0) legacy += line + "\n";
     assert(SaveTextAtomically(IniPath(), legacy));
+    assert(SaveTextAtomically(g_data+L"\\user\\texture_repetition.ini", ""));
     g_c[g_texture_repetition].sel = 1;
     LoadSettings();
     assert(g_c[g_texture_repetition].sel == (preset == 6 ? 0 : 1));

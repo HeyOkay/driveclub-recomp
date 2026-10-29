@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/draw_control.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/ir/debug_print.h"
 #include "shader_recompiler/ir/microinstruction.h"
@@ -76,7 +77,8 @@ static void EmitVertexMotion(EmitContext& ctx) {
     const Id param_ptr = ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, u32_type),
                                            ctx.push_data_block,
                                            ctx.ConstU32(PushData::MotionParamIndex));
-    const Id param_index = ctx.OpLoad(u32_type, param_ptr);
+    const Id param_index = ctx.OpBitwiseAnd(u32_type, ctx.OpLoad(u32_type, param_ptr),
+        ctx.ConstU32(DrawControl::MotionIndexMask));
     const auto address = [&](u64 base, Id index, u32 stride) {
         return ctx.OpIAdd(ctx.U64, ctx.Constant(ctx.U64, base),
                           ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, index),

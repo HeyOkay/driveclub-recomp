@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <boost/container/static_vector.hpp>
-#include "bbport_settings.h"
+#include "shader_recompiler/draw_control.h"
 #include "world_repeat_policy.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/native_cube_coords.h"
@@ -83,20 +83,17 @@ Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1,
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
-// Startup-only setting: the shader cache separates the enabled and disabled
-// modes.
-static bool GlobalRepeatEnabled() { return BbSettings::Get().startup_texture_repetition; }
-
+// Emit both paths once. A uniform draw flag switches sampling without changing
+// pipeline keys, recompiling shaders, or evaluating the extra samples when off.
 void PrepareWorldRepeat(const IR::Program& program) {
     WorldRepeat::selected.clear();
-    if (GlobalRepeatEnabled())
-        WorldRepeat::Prepare(program);
+    WorldRepeat::Prepare(program);
 }
 
 static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id shader_bias,
                             const IR::Value& offset, Id original, Id provided_dx = {},
                             Id provided_dy = {}) {
-    if (!GlobalRepeatEnabled() || !WorldRepeat::selected.contains(inst) ||
+    if (!WorldRepeat::selected.contains(inst) ||
         ctx.sw_stage != SwStage::Fragment || !offset.IsEmpty())
         return original;
     const auto& tex = ctx.images[handle & 0xffff];
@@ -123,6 +120,16 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
     const Id uv = ctx.OpVectorShuffle(V, coords, coords, 0, 1);
     Id dx = Sirit::ValidId(provided_dx) ? provided_dx : ctx.OpDPdx(V, uv);
     Id dy = Sirit::ValidId(provided_dy) ? provided_dy : ctx.OpDPdy(V, uv);
+    // Derivatives remain outside the branch; the condition is uniform per draw.
+    const Id flag_ptr = ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, U),
+        ctx.push_data_block, ctx.ConstU32(PushData::MotionParamIndex));
+    const Id enabled = ctx.OpINotEqual(ctx.U1[1],
+        ctx.OpBitwiseAnd(U, ctx.OpLoad(U, flag_ptr), ctx.ConstU32(DrawControl::TextureRepeatBit)),
+        ctx.ConstU32(0u));
+    const Id before = ctx.OpLabel(), apply = ctx.OpLabel(), merge = ctx.OpLabel();
+    ctx.OpBranch(before); ctx.AddLabel(before);
+    ctx.OpSelectionMerge(merge, spv::SelectionControlMask::DontFlatten);
+    ctx.OpBranchConditional(enabled, apply, merge); ctx.AddLabel(apply);
     const Id footprint = ctx.OpFMax(F, ctx.OpLength(F, dx), ctx.OpLength(F, dy));
     Id amount = ctx.OpFClamp(
         F,
@@ -209,7 +216,8 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
     Id result = ctx.OpFMix(C, original, altered, splat(amount));
     // Never alter opacity/cutout semantics through the generic colour hook.
     result = ctx.OpCompositeInsert(C, ctx.OpCompositeExtract(F, original, 3), result, 3);
-    return result;
+    ctx.OpBranch(merge); ctx.AddLabel(merge);
+    return ctx.OpPhi(C, result, apply, original, before);
 }
 
 Id EmitImageSampleImplicitLod(EmitContext &ctx, IR::Inst *inst, u32 handle,

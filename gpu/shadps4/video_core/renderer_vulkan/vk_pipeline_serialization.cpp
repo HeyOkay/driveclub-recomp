@@ -26,10 +26,8 @@ static u32 ShaderBinaryVersion() {
     const char *lds = std::getenv("BB_LDS_BOUNDS");
     const char *wide = std::getenv("BB_WIDE_LOADS");
     // The generation sits above the switch bits and changes with the translator
-    // or the serialized layout (71: world-layer sampling and its image/sampler
-    // specialization fields).
-    return (71u << 16) +
-           (BbSettings::Get().startup_texture_repetition ? 1024u : 0u) +
+    // or the serialized layout (72: live world-layer sampling draw flag).
+    return (72u << 16) +
            (nan && std::atoi(nan) != 0 ? 1u : 0u) +
            (undef && std::atoi(undef) != 0 ? 2u : 0u) +
            (lds && lds[0] == '0' ? 8u : 0u) +

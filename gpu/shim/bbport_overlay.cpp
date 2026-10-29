@@ -226,6 +226,17 @@ void PollHotkeys() {
         std::printf("MotionBlur: F3 %s\n", reference == 30 ? "Slow" : "Fast");
         std::fflush(stdout);
     }
+    static bool f4_down = false;
+    if (edge(VK_F4, f4_down) && SDL_GetKeyboardFocus() &&
+        !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+        const bool enabled = !s.texture_repetition.load();
+        s.texture_repetition = enabled;
+        const bool saved = BbSettings::SaveTextureRepetition(enabled);
+        Note(std::string("Texture repetition reduction: ") + (enabled ? "on" : "off") +
+             "  (F4: toggle)" + (saved ? "" : "  [not saved]"));
+        std::printf("TextureRepetition: F4 %s saved=%d\n", enabled ? "on" : "off", int(saved));
+        std::fflush(stdout);
+    }
     // F2: the pedal inputs (PedalPanel) on and off.
     static bool f2_down = false;
     if (edge(VK_F2, f2_down) && SDL_GetKeyboardFocus()) {

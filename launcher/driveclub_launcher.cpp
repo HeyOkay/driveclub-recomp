@@ -1085,7 +1085,7 @@ void BuildModel() {
                             "@unlock", false);
   g_texture_repetition = toggle(L"Reduce texture repetition",
       L"Breaks up repeating patterns on compatible ground, road and building surfaces while retaining nearby detail. "
-      L"Uses extra texture samples. Enabled by default for PC presets; PS4 keeps the original sampling. Takes effect on the next game start.",
+      L"Uses extra texture samples. Enabled by default for PC presets; PS4 keeps the original sampling. F4 toggles it while playing and keeps the choice.",
       "@texture_repetition", true);
   // Graphics detail the PS4 version keeps low and the game's camera effects, from the game's own quality file
   // (graphics.cpp).
@@ -1227,7 +1227,7 @@ void BuildModel() {
   g_cards.push_back({L"CONTENT", {unlock}, 0, kTabGameplay});
   g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
-                     L"F2: pedal inputs. F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
+                     L"F2: pedal inputs. F4: texture repetition reduction. F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
   g_cards.back().sub = kSubAssists;
   g_cards.push_back({L"ASSISTS", {g_drive_preset, g_drive[0].row, g_drive[1].row, g_drive[2].row, g_drive[3].row}, 0, kTabDriving,
                      L"In-game leaves the setting to the game's Options menu. Other choices are applied when the game starts."});
@@ -1509,6 +1509,12 @@ void LoadSettings() {
       if (line.rfind("fov=", 0) == 0) g_c[g_fov].sel = (std::clamp)(atoi(line.substr(4).c_str()), g_c[g_fov].min, g_c[g_fov].max);
     }
   }
+  // The in-game F4 choice is newer than launcher.ini. Read the shared sidecar.
+  for (const auto& line : ReadLines(g_data + L"\\user\\texture_repetition.ini"))
+    if (line.rfind("enabled=", 0) == 0) {
+      texture_repetition_saved = line.substr(8) == "0" ? 0 : 1;
+      if (g_texture_repetition >= 0) g_c[g_texture_repetition].sel = texture_repetition_saved;
+    }
   // Older PS4 profiles have no setting key. Preserve their original sampling;
   // other legacy profiles inherit the PC default. Explicit saved opt-outs win.
   if (texture_repetition_saved < 0 && g_texture_repetition >= 0) {
@@ -1654,6 +1660,7 @@ bool SaveSettings() {
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_fps",fps_on ? "1" : "0")) return false;
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","show_pedals",pedals_on ? "1" : "0")) return false;
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","texture_repetition",g_c[g_texture_repetition].sel ? "1" : "0")) return false;
+    if(!SaveIniValue(g_data+L"\\user\\texture_repetition.ini","enabled",g_c[g_texture_repetition].sel ? "1" : "0")) return false;
   }
   std::ostringstream out;
   for (const auto& c : g_c) {

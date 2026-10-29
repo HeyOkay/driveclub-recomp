@@ -68,6 +68,8 @@ Any gamepad works. Keyboard, mouse and gamepad can be used at the same time.
 | D-pad | Arrow keys |
 | Look around | I J K L or the mouse |
 
+F4 toggles **Reduce texture repetition** while playing, with a short on-screen notification. The choice is shared with both launchers and saved for the next start. It reduces repeated patterns only on compatible world surfaces; PC presets enable it and PS4 keeps the original sampling.
+
 F2 shows how far the clutch, brake and throttle are pressed, as bars with their percentage in the bottom left corner (a pedal at full travel is drawn bright and outlined; without a wheel it shows the gamepad's triggers). The launcher's "Show pedal inputs" turns it on at startup. F5 and F6 narrow and widen the view. F7 turns mouse look on or off. F9 and F10 are the anti-aliasing keys above. F12 cycles the performance overlay through hidden, compact and expanded views. If the launcher enables it at startup, it starts compact. The overlay includes a raw present-time graph and rolling 60-second 1% / 0.1% low FPS (averages of the slowest frame times, after a 10-second warm-up). Text readouts refresh every 100 ms (10 Hz); FPS retains its original smoothing. Samples are collected every present, including while hidden. With frame generation, these are presentation statistics, not game-render FPS. On supported Windows game builds it also shows the track, current time of day, time compression, resolved cloud-cover preset and current precipitation intensity. Set `BB_SCENE_OVERLAY=0` to keep only the original readouts. With HDR on, Page Up and Page Down make the picture brighter or darker. The bindings are in `data\user\input_config\default.ini` and can be changed there.
 
 ### Steering wheels
