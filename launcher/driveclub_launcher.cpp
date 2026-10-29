@@ -2642,21 +2642,14 @@ std::wstring StartGame(HANDLE* process = nullptr) {
       SetEnvironmentVariableW(L"BB_FRAME_GEN_MULTIPLIER", f == 2 ? L"2" : f == 3 ? L"3" : f == 4 ? L"4" : nullptr);
   }
 
-  // ------------------------------------------------------------
-  // Hybrid GPU fix: Force disable AMD switchable graphics Vulkan layer
-  // This layer (VK_LAYER_AMD_switchable_graphics_1) is installed by old
+  // Disable VK_LAYER_AMD_switchable_graphics_1 (from old AMD drivers) which hangs Vulkan init on hybrid laptops
   // AMD drivers and causes silent hangs at Vulkan device creation on
-  // modern Vulkan 1.3+ applications.
-  // ------------------------------------------------------------
+  // This writes to HKCU\Software\Microsoft\DirectX\UserGpuPreferences.
   if (!UserEnv(L"DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1")) {
     SetEnvironmentVariableW(L"DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", L"1");
   }
 
-  // ------------------------------------------------------------
-  // Hybrid GPU fix: Register high-performance GPU preference for the
-  // game executable so Windows launches it on the discrete GPU.
-  // This writes to HKCU\Software\Microsoft\DirectX\UserGpuPreferences.
-  // ------------------------------------------------------------
+  // Prefer discrete GPU via Windows GPU preference registry
   {
     const std::wstring exe = GameExe();
     if (Exists(exe)) {

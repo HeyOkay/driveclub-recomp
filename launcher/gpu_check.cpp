@@ -22,9 +22,6 @@
 #include <comdef.h>
 #pragma comment(lib, "wbemuuid.lib")
 
-// Forward declaration
-std::wstring CheckAncientAmdDriver();
-
 namespace {
 
 std::wstring Widen(const char* text) {
@@ -223,6 +220,9 @@ int GpuCheckChildMain(const wchar_t* result_path) {
   return outcome.message.empty() ? 0 : 1;
 }
 
+// Forward declaration
+std::wstring CheckAncientAmdDriver();
+
 std::wstring CheckGpu() {
   if (FileExists(ExeDir() + L"\\skip_gpu_check.txt") || GetEnvironmentVariableW(L"DRIVECLUB_SKIP_GPU_CHECK", nullptr, 0) > 0) {
     return L"";
@@ -272,11 +272,8 @@ std::wstring CheckGpu() {
     }
   }
 
-  // Check for ancient AMD drivers on hybrid systems (warning, not a hard failure)
   std::wstring amd_warning = CheckAncientAmdDriver();
-  if (!amd_warning.empty()) {
-    return amd_warning;
-  }
+  if (!amd_warning.empty()) return amd_warning;
 
   return L"";
 }
@@ -334,10 +331,6 @@ std::wstring DescribeCpu() {
   return Widen((text + features).c_str());
 }
 
-// ------------------------------------------------------------
-// Check for ancient AMD GPU drivers that are known to cause
-// Vulkan initialization hangs on hybrid laptops.
-// ------------------------------------------------------------
 std::wstring CheckAncientAmdDriver() {
   std::wstring warning;
   HRESULT hres = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
