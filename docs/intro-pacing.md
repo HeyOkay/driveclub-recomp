@@ -22,4 +22,4 @@ Keep assertions enabled for this test. It covers exact basename matching, config
 
 Prior local driving builds were manually validated with presentation changing from 30 FPS in the intro to the player's configured 72 FPS afterwards. Logs recorded that transition. The original 60-FPS presentation experiment is superseded by this 30-FPS variant. Completion by naturally reaching EOF still needs to be distinguished from skipping the movie when reporting new manual validation.
 
-Development used Codex AI assistance and hands-on tests by the hardware owner. No commercial movie, game files or private diagnostic dumps are included.
+No commercial movie, game files or private diagnostic dumps are included.
