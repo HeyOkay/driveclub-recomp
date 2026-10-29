@@ -221,7 +221,7 @@ int GpuCheckChildMain(const wchar_t* result_path) {
 }
 
 // Forward declaration
-std::wstring CheckAncientAmdDriver();
+std::wstring CheckAncientIgpuDriver();
 
 std::wstring CheckGpu() {
   if (FileExists(ExeDir() + L"\\skip_gpu_check.txt") || GetEnvironmentVariableW(L"DRIVECLUB_SKIP_GPU_CHECK", nullptr, 0) > 0) {
@@ -272,8 +272,8 @@ std::wstring CheckGpu() {
     }
   }
 
-  std::wstring amd_warning = CheckAncientAmdDriver();
-  if (!amd_warning.empty()) return amd_warning;
+  std::wstring igpu_warning = CheckAncientIgpuDriver();
+  if (!igpu_warning.empty()) return igpu_warning;
 
   return L"";
 }
@@ -331,7 +331,7 @@ std::wstring DescribeCpu() {
   return Widen((text + features).c_str());
 }
 
-std::wstring CheckAncientAmdDriver() {
+std::wstring CheckAncientIgpuDriver() {
   std::wstring warning;
   HRESULT hres = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   bool com_init = SUCCEEDED(hres);
@@ -353,7 +353,7 @@ std::wstring CheckAncientAmdDriver() {
   }
   if (com_init && services) {
     hres = services->ExecQuery(_bstr_t(L"WQL"),
-                               _bstr_t(L"SELECT DriverVersion, DriverDate, Name FROM Win32_VideoController WHERE Name LIKE '%AMD%' OR Name LIKE '%Radeon%'"),
+                               _bstr_t(L"SELECT DriverVersion, DriverDate, Name FROM Win32_VideoController WHERE Name LIKE '%AMD%' OR Name LIKE '%Radeon%' OR Name LIKE '%Intel%' OR Name LIKE '%UHD%' OR Name LIKE '%Iris%' OR Name LIKE '%HD Graphics%'"),
                                WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, &enumerator);
   }
   if (com_init && enumerator) {
@@ -389,8 +389,8 @@ std::wstring CheckAncientAmdDriver() {
             warning += L"\n   Driver version: " + version;
             warning += L"\n   Driver date: " + std::to_wstring(year) + L"-" + std::to_wstring(month);
             warning += L" (" + std::to_wstring(months_old) + L" months old)";
-            warning += L"\n   This will cause Vulkan initialization to hang on hybrid laptops.";
-            warning += L"\n   Please update via AMD Adrenalin or your laptop manufacturer's support page.";
+            warning += L"\n   This will cause Vulkan initialization to hang on hybrid laptops (iGPU + dGPU).";
+            warning += L"\n   Please update your GPU driver (AMD Adrenalin / Intel Arc Control / laptop OEM support page).";
           }
         }
       }
