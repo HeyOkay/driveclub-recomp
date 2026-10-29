@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <map>
+#include <sstream>
 #include <thread>
 #include <httplib.h>
 #include "common/elf_info.h"
@@ -79,6 +81,10 @@ bool ResolveLocalPeer(std::string_view online_id, u32* out_addr, u16* out_port) 
     return true;
 }
 
+void StartLocalPresencePoll();
+
+extern "C" void bbgpu_overlay_note(const char* text_utf8); // the port's overlay (gpu/shim/bbgpu.cpp)
+
 void StartLocalPeerDirectory() {
     namespace Stubs = NpSignaling::Stubs;
     Stubs::SetTransportHooks({
@@ -113,6 +119,85 @@ void StartLocalPeerDirectory() {
                 }
                 registered = port;
             }
+        }
+    }).detach();
+    StartLocalPresencePoll();
+}
+
+// Friends' presence. A console's PSN pushes each change (online, offline, what a friend is doing) to
+// the game's presence filter; the game reads the friend list only at start and learns everything
+// later from those events. Ask the co-op server every 5 s and raise the events for what changed.
+std::string PresenceEscape(const std::string& s) {
+    std::string out;
+    for (const char c : s) {
+        if (c == '"' || c == '\\') {
+            out += '\\';
+        }
+        out += static_cast<unsigned char>(c) < 0x20 ? ' ' : c;
+    }
+    return out;
+}
+
+void StartLocalPresencePoll() {
+    std::thread([] {
+        std::map<std::string, std::pair<bool, std::string>> known; // name -> online, gameStatus
+        bool polled_once = false;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            httplib::Client cli(CoopServerUrl());
+            cli.set_connection_timeout(3);
+            cli.set_read_timeout(3);
+            const auto res = cli.Get(("/dccoop/presence/" + LocalNpName()).c_str());
+            if (!res || res->status != 200) {
+                continue;
+            }
+            std::istringstream lines(res->body);
+            for (std::string line; std::getline(lines, line);) {
+                const size_t a = line.find('\t'), b = a == std::string::npos ? a : line.find('\t', a + 1);
+                if (b == std::string::npos) {
+                    continue;
+                }
+                const std::string name = line.substr(0, a);
+                const bool online = line.substr(a + 1, b - a - 1) == "1";
+                const std::string status = line.substr(b + 1);
+                const auto it = known.find(name);
+                if (it != known.end() && it->second == std::make_pair(online, status)) {
+                    continue;
+                }
+                const bool was_online = it != known.end() && it->second.first;
+                known[name] = {online, status};
+                NpWebApi::PushEventInput ev;
+                ev.targetUserId = 1; // the local account's user
+                ev.npServiceName = "inGamePresence";
+                ev.hasFrom = true;
+                std::snprintf(ev.fromOnlineId.data, sizeof(ev.fromOnlineId.data) + 1, "%s", name.c_str());
+                const std::string status_json =
+                    "\"gameStatus\":\"" + PresenceEscape(online ? (status.empty() ? "In the menus" : status) : "") + "\"";
+                ev.dataType = "np:service:presence:onlineStatus";
+                ev.data = std::string("{\"onlineStatus\":\"") + (online ? "online" : "offline") +
+                          "\",\"platform\":\"PS4\"," + status_json + "}";
+                NpWebApi::EnqueuePushEvent(ev);
+                if (online) {
+                    ev.dataType = "np:service:presence:gameTitleInfo";
+                    ev.data = R"({"npTitleId":"CUSA00003_00","titleName":"DRIVECLUB",)" + status_json + "}";
+                    NpWebApi::EnqueuePushEvent(ev);
+                    ev.dataType = "np:service:presence:gameStatus";
+                    ev.data = "{" + status_json + "}";
+                    NpWebApi::EnqueuePushEvent(ev);
+                }
+                LOG_INFO(NpHandler, "presence push: '{}' {} '{}'", name, online ? "online" : "offline", status);
+                // The game's own friend list only says "Playing DRIVECLUB" (on a console the system's
+                // friend list showed the status): show what changed in the port's overlay instead.
+                if (polled_once) { // not for what everyone was doing when this game started
+                    const std::string note = online != was_online
+                                                 ? name + (online ? " is now online" : " went offline")
+                                                 : name + ": " + status;
+                    if (online || was_online) {
+                        bbgpu_overlay_note(note.c_str());
+                    }
+                }
+            }
+            polled_once = true;
         }
     }).detach();
 }
