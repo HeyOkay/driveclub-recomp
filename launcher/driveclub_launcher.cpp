@@ -2302,7 +2302,7 @@ void SetProgress(int percent, const std::wstring& text) {
 // Prepares the game from the two dumps (a few seconds the first time). Returns "" on success, else the error.
 std::wstring RunPrepare() {
   const std::wstring stamp_path = g_data + L"\\prep\\stamp.txt";
-  const std::wstring stamp_now = g_folder[0].path + L"|" + g_folder[1].path;
+  const std::wstring stamp_now = g_folder[0].path + L"|" + g_folder[1].path + L"|" + Widen(kBootFormat);
   std::wstring stamp_old;
   for (const auto& l : ReadLines(stamp_path)) stamp_old = Widen(l);
   const bool ready = Exists(g_data + L"\\prep\\boot-linked.bin") && Exists(g_data + L"\\prep\\image.meta");

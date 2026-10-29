@@ -40,7 +40,7 @@
     <Metadata Title="Driveclub" 
               isEnabled="true"
               Name="60 FPS with deltatime" 
-              Note="Patch version 2.0 features deltatime. this version will break some things in the game, if that is an issue for you, use the other 60 FPS patch. A frame longer than 33 ms is counted as 33 ms so a slow frame cannot throw the camera." 
+              Note="Patch version 2.0 features deltatime. this version will break some things in the game, if that is an issue for you, use the other 60 FPS patch. A frame longer than 33 ms is counted as 33 ms so a slow frame cannot throw the camera; the rest of it is made up over the next frames (33 ms each at most), so the game clock keeps to the wall clock and race times match between players at different frame rates. A stall over 250 ms (loading) is dropped."
               Author="illusion, u/Charlie_Muggins" 
               PatchVer="2.0" 
               AppVer="01.28" 
@@ -49,7 +49,7 @@
             <Line Type="bytes" Address="0x01184800" Value="b801000000"/>
             <Line Type="bytes" Address="0x01184725" Value="48b001"/>
             <Line Type="bytes" Address="0x00a6306e" Value="e90d50bf0090909090"/>
-            <Line Type="bytes" Address="0x01658080" Value="4889c6482b73084881fe358200007605be35820000e9ddaf40ff"/>
+            <Line Type="bytes" Address="0x01658080" Value="4889c6482b73084881fe90d0030077134881fe35820000760f488b4308480535820000be35820000e9caaf40ff"/>
         </PatchList>
     </Metadata>
     <Metadata Title="Driveclub"
