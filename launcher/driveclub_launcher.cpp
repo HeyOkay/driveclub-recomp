@@ -11,12 +11,16 @@
 //   DriveClub.exe              launcher window
 //   DriveClub.exe --play       prepare if needed and start the game without a window
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <windowsx.h>
 #include <commctrl.h>
 #include <objbase.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <objidl.h>
 #include <gdiplus.h>
 
@@ -124,7 +128,8 @@ FolderRow g_folder[2];  // 0 = update, 1 = base game
 
 std::wstring g_home, g_data, g_runtime;
 HWND g_hwnd = nullptr;
-HWND g_edit = nullptr;  // the in-place box for the player name
+HWND g_edit = nullptr;  // the in-place box for the player name (or the host address)
+bool g_edit_host = false;  // g_edit holds the host address, not the name
 float g_dpi = 1.f;  // the display scale; g_scale is what is drawn at (smaller when the window is too short)
 float g_scale = 1.f, g_content_h = 0, g_ox = 0, g_oy = 0;
 constexpr float kMaxW = 1700.f;
@@ -218,6 +223,33 @@ std::wstring Dir(const std::wstring& path) {
 }
 
 bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+// This PC's IPv4 addresses a friend could join (a VPN first), each with what it belongs to.
+std::vector<std::wstring> LocalAddresses() {
+  std::vector<std::wstring> vpn, other;
+  ULONG size = 0;
+  GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, nullptr, &size);
+  std::vector<char> buffer(size ? size : 1);
+  auto* first = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+  if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER, nullptr, first, &size) != NO_ERROR)
+    return {};
+  for (auto* a = first; a; a = a->Next) {
+    if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+    for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+      const auto* sa = reinterpret_cast<const sockaddr_in*>(u->Address.lpSockaddr);
+      const unsigned char* b = reinterpret_cast<const unsigned char*>(&sa->sin_addr);
+      if (b[0] == 169 && b[1] == 254) continue;
+      wchar_t text[16];
+      swprintf(text, 16, L"%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+      const char* kind = (b[0] == 100 && b[1] >= 64 && b[1] <= 127) ? "Tailscale" : b[0] == 25 ? "Hamachi" : b[0] == 26 ? "Radmin" : nullptr;
+      std::wstring line = text;
+      line += L"  (" + (kind ? Widen(kind) : std::wstring(a->FriendlyName ? a->FriendlyName : L"network")) + L")";
+      (kind ? vpn : other).push_back(line);
+    }
+  }
+  vpn.insert(vpn.end(), other.begin(), other.end());
+  return vpn;
+}
 
 void MakeDirs(const std::wstring& path) {
   for (size_t i = 3; i < path.size(); ++i) {
@@ -342,6 +374,9 @@ int fgen_saved = 0;   // "Frame generation" choice, from launcher.ini
 int mirror_saved = 0;  // "Mirror and reflection updates" choice, from launcher.ini
 int aniso_saved = 0;   // "Anisotropic filtering" choice, from launcher.ini
 std::wstring g_name = L"Player";  // in-game player name, from "name=" in launcher.ini
+std::wstring g_online_host;       // address of the host to join, from "online_host=" in launcher.ini
+int g_online_row = -1, g_online_host_row = -1, g_online_ip_row = -1;  // "Online play" (Off, Host, Join) and "Host address" rows
+int online_saved = 0;             // "Online play" choice, from "online=" in launcher.ini
 int g_inres = -1, g_wide = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_aniso = -1, g_fps = -1, g_fgen = -1, g_aa = -1, g_up = -1, g_lang = -1;
 // Graphics detail rows (graphics.cpp): the control of each, and its choice from launcher.ini (-1 = not saved yet).
 enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
@@ -526,6 +561,8 @@ bool RowHidden(const Ctl& c) {
   if ((g_up >= 0 && &c == &g_c[g_up]) || (g_sharp >= 0 && &c == &g_c[g_sharp])) return g_aa >= 0 && g_c[g_aa].sel == 0;
   if (g_inres >= 0 && &c == &g_c[g_inres]) return UpscaleActive();
   if (g_fps_cap >= 0 && &c == &g_c[g_fps_cap]) return g_fps >= 0 && g_c[g_fps].sel != 3;
+  if (g_online_host_row >= 0 && &c == &g_c[g_online_host_row]) return g_online_row >= 0 && g_c[g_online_row].sel != 2;
+  if (g_online_ip_row >= 0 && &c == &g_c[g_online_ip_row]) return g_online_row >= 0 && g_c[g_online_row].sel != 1;
   if ((g_hdr_paper >= 0 && &c == &g_c[g_hdr_paper]) || (g_hdr_peak >= 0 && &c == &g_c[g_hdr_peak]))
     return g_hdr >= 0 && g_c[g_hdr].sel == 0;
   return false;
@@ -1005,6 +1042,19 @@ void BuildModel() {
                L"The language of the game's menus and text. Click to switch to the next one: all 21 languages of the game are available. Japanese, Korean and Chinese may show missing characters.",
                {L"English (US)"}, {"@lang"}, 0);
   const int pname = seg(L"Player name", L"The name the game shows for you. Click it to type a new one.", {g_name}, {"@name"}, 0);
+  g_online_row = seg(L"Online play",
+                     L"Off: the game runs as always. Host: a private server starts on this PC; tell your friends your IP address on the LAN or VPN (Tailscale, Hamachi, Radmin). "
+                     L"Join: you connect to a friend who hosts; you will be asked for their IP address.",
+                     {L"Off", L"Host a session", L"Join a session"}, {"@online", "@online", "@online"}, 0);
+  g_online_ip_row = [&] {
+    auto addresses = LocalAddresses();
+    if (addresses.empty()) addresses.push_back(L"(no network found)");
+    std::vector<std::string> tags(addresses.size(), "@myip");
+    return seg(L"Your IP address", L"What your friends type under Host's IP address to join you. A VPN address (Tailscale, Hamachi, Radmin) works over the internet, a LAN address only at home.",
+               addresses, tags, 0);
+  }();
+  g_online_host_row = seg(L"Host's IP address", L"The IP address of the friend who hosts, over the LAN or VPN (for example 100.67.1.2). Click it to type one.",
+                          {g_online_host.empty() ? std::wstring(L"(not set)") : g_online_host}, {"@onhost"}, 0);
   g_mirror = seg(L"Mirror and reflection updates",
                  L"The game draws a second small scene (the mirrors, rain and reflections) every frame, about a quarter of all draw calls. "
                  L"Static draws it once and keeps that picture: much faster and steady, but reflections and rain on the glass stop updating.",
@@ -1215,6 +1265,8 @@ void BuildModel() {
   g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
   g_cards.push_back({L"CAMERA EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail});
   g_cards.push_back({L"PLAYER", {pname, g_lang}, 0, kTabGameplay});
+  g_cards.push_back({L"ONLINE", {g_online_row, g_online_ip_row, g_online_host_row}, 0, kTabGameplay,
+                     L"Private multiplayer with friends. Everyone needs the same version of the game."});
   g_cards.push_back({L"CONTENT", {unlock}, 0, kTabGameplay});
   g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov}, 0, kTabDriving,
@@ -1350,6 +1402,8 @@ void LoadSettings() {
     if (line.rfind("pedals=", 0) == 0) pedal_display = line.substr(7) == "1";
     if (line.rfind("fast=", 0) == 0) fast_render = line.substr(5) == "1";
     if (line.rfind("name=", 0) == 0) g_name = Widen(line.substr(5));
+    if (line.rfind("online=", 0) == 0) online_saved = atoi(line.substr(7).c_str());
+    if (line.rfind("online_host=", 0) == 0) g_online_host = Widen(line.substr(12));
     if (line.rfind("mirror=", 0) == 0) mirror_saved = atoi(line.substr(7).c_str());
     if (line.rfind("aniso=", 0) == 0) aniso_saved = atoi(line.substr(6).c_str());
     if (line.rfind("language=", 0) == 0) lang_saved = atoi(line.substr(9).c_str());
@@ -1396,6 +1450,8 @@ void LoadSettings() {
   if(ReadOptimizationMask(existing_mask)) g_two_thread=(existing_mask & (1ull<<37))==0;
   ShowBenchChoices();
   for (auto& c : g_c) if (c.patches[0] == "@name") c.items[0] = g_name;
+  if (g_online_row >= 0 && online_saved >= 0 && online_saved < 3) g_c[g_online_row].sel = online_saved;
+  if (g_online_host_row >= 0) g_c[g_online_host_row].items[0] = g_online_host.empty() ? L"(not set)" : g_online_host;
   CheckFolders();
   const auto lines = ReadLines(SelectionPath());
   const bool has_selection = !lines.empty() || Exists(SelectionPath());
@@ -1597,7 +1653,7 @@ bool SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") g_check_updates = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel == 3) ? 1 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) << "\r\nonline=" << (g_online_row >= 0 ? g_c[g_online_row].sel : 0) << "\r\nonline_host=" << Narrow(g_online_host) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
@@ -2338,6 +2394,85 @@ std::wstring Leaf(const std::wstring& path) {
   return slash == std::wstring::npos ? p : p.substr(slash + 1);
 }
 
+// Online play (docs/online): every online address of the game goes to a community server, the player's name is
+// a local account. Off removes what an earlier session wrote, so offline play is exactly as before.
+bool ServerRunning() {
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return false;
+  PROCESSENTRY32W e{sizeof(e)};
+  bool found = false;
+  for (BOOL ok = Process32FirstW(snap, &e); ok && !found; ok = Process32NextW(snap, &e))
+    found = _wcsicmp(e.szExeFile, L"driveclubsrv.exe") == 0;
+  CloseHandle(snap);
+  return found;
+}
+
+// Returns a problem text, empty when the game can start.
+std::wstring PrepareOnline(const std::wstring& user) {
+  const std::wstring written = user + L"\\online_files.txt";
+  const std::wstring mods = g_home + L"\\mods";
+  const int mode = g_online_row >= 0 ? g_c[g_online_row].sel : 0;
+  for (const wchar_t* v : {L"BB_ONLINE", L"BB_NP_LOCAL", L"BB_COOP_SERVER"}) SetEnvironmentVariableW(v, nullptr);
+  for (const auto& line : ReadLines(written)) DeleteFileW(Widen(line).c_str());
+  DeleteFileW(written.c_str());
+  if (mode == 0) return L"";
+
+  if (g_name.size() < 3 || g_name.size() > 16 ||
+      std::any_of(g_name.begin(), g_name.end(), [](wchar_t ch) { return !(iswalnum(ch) && ch < 128) && ch != L'-' && ch != L'_'; }))
+    return L"For online play the player name needs 3 to 16 letters, digits, - or _.";
+  std::wstring server = L"127.0.0.1:8080";
+  if (mode == 2) {
+    if (g_online_host.empty()) return L"Type the IP address of the friend who hosts under Host's IP address.";
+    server = g_online_host + L":8080";
+  } else if (!ServerRunning()) {
+    const std::wstring dir = g_home + L"\\server";
+    const std::wstring exe = dir + L"\\driveclubsrv.exe";
+    if (!Exists(exe)) return L"The server is missing: " + exe;
+    STARTUPINFOW si{sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWMINNOACTIVE;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmdline = L"\"" + exe + L"\"";
+    if (!CreateProcessW(exe.c_str(), cmdline.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi))
+      return L"The server could not be started: " + exe;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    Sleep(2000);
+  }
+
+  std::string list;
+  const auto write = [&](const std::wstring& path, const std::string& text) {
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << text;
+    list += Narrow(path) + "\r\n";
+    return true;
+  };
+  const std::string url = "\"http://" + Narrow(server) + "\"";
+  CreateDirectoryW(user.c_str(), nullptr);
+  CreateDirectoryW(mods.c_str(), nullptr);
+  if (!write(user + L"\\host_overrides.json",
+             "{\r\n  \"hub.services.otg.scee.com\": " + url + ",\r\n  \"Aegs.driveclub.online.scee.com\": " + url +
+                 ",\r\n  \"aegs.driveclub.online.scee.com\": " + url + ",\r\n  \"driveclub.api.wwsga.me\": " + url +
+                 ",\r\n  \"*\": " + url + "\r\n}\r\n"))
+    return L"Could not write the online settings in " + user;
+  // The game's server settings (TSS): slot 0 from the package, slots 1 to 6 empty.
+  std::ifstream tss((g_home + L"\\online\\override-0.tss").c_str(), std::ios::binary);
+  if (!tss) return L"The online settings file is missing: " + g_home + L"\\online\\override-0.tss";
+  std::ostringstream body;
+  body << tss.rdbuf();
+  if (!write(mods + L"\\override-0.tss", body.str())) return L"Could not write the online settings in " + mods;
+  for (int i = 1; i <= 6; ++i) {
+    const std::wstring f = mods + L"\\override-" + std::to_wstring(i) + L".tss";
+    if (!Exists(f) && !write(f, "<< Config >>\r\n")) return L"Could not write the online settings in " + mods;
+  }
+  SaveTextAtomically(written, list);
+  SetEnvironmentVariableW(L"BB_ONLINE", L"1");
+  SetEnvironmentVariableW(L"BB_NP_LOCAL", g_name.c_str());
+  SetEnvironmentVariableW(L"BB_COOP_SERVER", server.c_str());
+  return L"";
+}
+
 void LauncherLog(const std::string& text) {
   if (g_home.empty()) return;
   MakeDirs(g_home + L"\\logs");
@@ -2574,6 +2709,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     LauncherLog(problem.empty() ? std::string("faster car switching: ok") : "faster car switching: " + Narrow(problem));
     if (problem.empty()) unlock_arg += L" --mods \"" + carswitch_dir + L"\"";
   }
+  {
+    const std::wstring online_problem = PrepareOnline(user);
+    if (!online_problem.empty()) {
+      LauncherLog("online: " + Narrow(online_problem));
+      return online_problem;
+    }
+  }
   std::wstring cmd = L"\"" + exe + L"\" \"" + prep + L"\\boot-linked.bin\" --content-profile \"" + prep +
                      L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
@@ -2664,7 +2806,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     }
     std::wstring summary = L"release " + (version.empty() ? std::wstring(L"unknown") : version) + L":";
     for (const auto& c : g_c) {
-      if (c.patches.empty() || c.patches[0] == "@name" || c.patches[0] == "@lang" || IsBenchRow(c) || c.sel < 0 ||
+      if (c.patches.empty() || c.patches[0] == "@name" || c.patches[0] == "@onhost" || c.patches[0] == "@myip" || c.patches[0] == "@lang" || IsBenchRow(c) || c.sel < 0 ||
           c.kind == Kind::Button)
         continue;
       summary += L" ";
@@ -3026,6 +3168,12 @@ void CommitName() {
   DestroyWindow(g_edit);
   g_edit = nullptr;
   std::wstring n;
+  if (g_edit_host) {
+    for (wchar_t ch : std::wstring(buf)) if ((ch >= L'0' && ch <= L'9') || ch == L'.') n += ch;
+    if (n != g_online_host) { g_online_host = n; g_changed = true; }
+    g_c[g_online_host_row].items[0] = g_online_host.empty() ? L"(not set)" : g_online_host;
+    return;
+  }
   for (wchar_t ch : std::wstring(buf)) if (ch >= 32 && ch < 127) n += ch;
   if (!n.empty() && n != g_name) { g_name = n; g_changed = true; }
   for (auto& c : g_c) if (c.patches[0] == "@name") c.items[0] = g_name;
@@ -3033,7 +3181,8 @@ void CommitName() {
 
 void StartNameEdit(HWND parent, const Ctl& c) {
   const RectF r = Scaled(c.ctl);
-  g_edit = CreateWindowExW(0, L"EDIT", g_name.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, int(r.X + 6), int(r.Y + 6),
+  g_edit_host = c.patches[0] == "@onhost";
+  g_edit = CreateWindowExW(0, L"EDIT", g_edit_host ? g_online_host.c_str() : g_name.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, int(r.X + 6), int(r.Y + 6),
                            int(r.Width - 12), int(r.Height - 12), parent, nullptr, GetModuleHandleW(nullptr), nullptr);
   SendMessageW(g_edit, EM_LIMITTEXT, 20, 0);
   SendMessageW(g_edit, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
@@ -3375,7 +3524,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       const int c = HitControl(x, y, &seg);
       if (c >= 0) {
         Ctl& ctl = g_c[c];
-        if (ctl.patches[0] == "@name") {
+        if (ctl.patches[0] == "@name" || ctl.patches[0] == "@onhost") {
           StartNameEdit(h, ctl);
           return 0;
         }

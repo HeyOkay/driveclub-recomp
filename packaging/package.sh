@@ -12,7 +12,7 @@ OUT="release/$NAME"
 bash build.sh
 mkdir -p out/launcher
 windres -I launcher launcher/launcher.rc -O coff -o out/launcher/launcher.res.o
-clang++ -O2 -std=c++20 -municode -mwindows -static -Igpu/third_party/miniz -Iout/gpu/third_party/miniz -DMINIZ_STATIC_DEFINE -o out/launcher/DriveClub.exe   launcher/driveclub_launcher.cpp launcher/prepare.cpp launcher/gpu_check.cpp launcher/datx.cpp launcher/unlock.cpp launcher/graphics.cpp launcher/carswitch.cpp launcher/updater.cpp out/launcher/launcher.res.o out/gpu/third_party/miniz/libminiz.a   -lgdiplus -lgdi32 -luser32 -lshell32 -lole32 -ldwmapi -lwinhttp -lbcrypt -lcomctl32
+clang++ -O2 -std=c++20 -municode -mwindows -static -Igpu/third_party/miniz -Iout/gpu/third_party/miniz -DMINIZ_STATIC_DEFINE -o out/launcher/DriveClub.exe   launcher/driveclub_launcher.cpp launcher/prepare.cpp launcher/gpu_check.cpp launcher/datx.cpp launcher/unlock.cpp launcher/graphics.cpp launcher/carswitch.cpp launcher/updater.cpp out/launcher/launcher.res.o out/gpu/third_party/miniz/libminiz.a   -lgdiplus -lgdi32 -luser32 -lshell32 -lole32 -ldwmapi -lwinhttp -lbcrypt -lcomctl32 -liphlpapi
 # The steering wheel tools, SDL linked in: WheelSetup is a window; FfbTest a console program (-mconsole after the SDL
 # flags, which bring -mwindows).
 sdl_static="$(pkg-config --static --libs sdl3)"
@@ -22,12 +22,34 @@ clang -O2 -o out/FfbTest.exe tools/ffb_test.c -static $sdl_static -mconsole
 rm -rf "$OUT"
 mkdir -p "$OUT/runtime/patches"
 cp out/launcher/DriveClub.exe out/WheelSetup.exe out/FfbTest.exe "$OUT/"
+# The WPF launcher: its bootstrapper replaces DriveClub.exe; the Win32 launcher stays as DriveClub.Native.exe for
+# Wine and for PCs without the .NET 8 desktop runtime. Needs the .NET 8 SDK (dotnet) on PATH.
+rm -rf out/wpf
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w launcher/build-wpf.ps1)"   -OutputDirectory "$(cygpath -w "$PWD/out/wpf")" -Toolchain "$(cygpath -w "$(dirname "$(command -v clang++)")")"
+[ -f out/wpf/DriveClub.Launcher.exe ] && [ -f out/wpf/DriveClub.Native.exe ] || { echo "The WPF launcher was not built." >&2; exit 1; }
+for f in out/wpf/*; do
+  case "$(basename "$f")" in native-build|*.pdb) ;; *) cp -r "$f" "$OUT/" ;; esac
+done
 cp "tools/FFB Tuner.ps1" "tools/FFB Tuner.bat" "$OUT/"   # the force feedback sliders, next to DriveClub.exe
 cp out/DriveClubGame.exe "$OUT/runtime/"
 strip --strip-all "$OUT/runtime/DriveClubGame.exe" || true
 cp patches/DriveClub.xml "$OUT/runtime/patches/"
 cp packaging/release/README.txt packaging/release/THIRD_PARTY_NOTICES.txt LICENSE "$OUT/"
 echo "$VERSION" > "$OUT/version.txt"
+
+# Online play: the community server (a built folder: driveclubsrv.exe, its DLLs and sqldrivers/), its settings, and
+# the game settings file the launcher copies into place when Online play is on.
+SERVER_BIN="${DC_SERVER_DIR:-packaging/server_bin}"
+if [ ! -f "$SERVER_BIN/driveclubsrv.exe" ]; then
+  echo "The server build is missing: $SERVER_BIN/driveclubsrv.exe (set DC_SERVER_DIR)." >&2
+  exit 1
+fi
+mkdir -p "$OUT/server" "$OUT/online"
+cp -r "$SERVER_BIN"/. "$OUT/server/"
+cp docs/online/server-config.json "$OUT/server/config.json"
+cp docs/online/override-0.tss "$OUT/online/"
+cp docs/online/play/Firewall-Freigabe.bat docs/online/play/Firewall-Freigabe.ps1 "$OUT/"   # next to DriveClub.exe: it finds runtime\ and server\ from there
+cp docs/online/README.md docs/online/ANLEITUNG.de.md "$OUT/online/"
 
 # Every non-system DLL the game program loads, so nothing has to be installed.
 ldd out/DriveClubGame.exe | awk '{print $3}' | grep -i -E '/msys64/|^/(clang64|mingw64|ucrt64)/' | sort -u | while read -r dll; do
@@ -50,6 +72,11 @@ fi
 cp packaging/dlss_bin/bbport_dlss.dll packaging/dlss_bin/nvngx_dlss.dll packaging/dlss_bin/nvngx_dlssg.dll "$OUT/runtime/"
 mkdir -p "$OUT/licenses"
 cp packaging/dlss/NVIDIA-DLSS-LICENSE.txt packaging/dlss/dlss_bridge-LICENSE.txt "$OUT/licenses/"
+# The community server is GPL-2.0 software: its licence and where its source is.
+[ -f "$SERVER_BIN/LICENSE" ] && cp "$SERVER_BIN/LICENSE" "$OUT/licenses/driveclub-server-LICENSE.txt"
+printf 'The program in the server folder is the DriveClub community server, GPL-2.0.
+Source code: https://github.com/shad-net/driveclub-server and https://github.com/Judaswick/driveclub-server (branch coop).
+' > "$OUT/licenses/driveclub-server-SOURCE.txt"
 # DLLs the game program loads by name at run time.
 for extra in SDL3.dll; do
   [ -f "out/$extra" ] && cp "out/$extra" "$OUT/runtime/" || true
