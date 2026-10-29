@@ -1,52 +1,80 @@
 # Online (experimental)
 
-This branch lets the game play online against a community server: the online menus, leaderboards, challenges and
-profiles, friends, invitations, **private lobbies and races between players** (peer to peer, over a LAN or a VPN
-such as Tailscale, Hamachi or Radmin). It is a work in progress. Nothing here is in a release yet.
+This branch lets the game play online against a community server: sessions and private lobbies with friends,
+**races between players** (peer to peer, over a LAN or a VPN such as Tailscale, Hamachi or Radmin), clubs,
+driver and club statistics, fame and levels, leaderboards, challenges and the friends list with live presence.
+It is a work in progress.
 
 Deutsche Kurzanleitung: [ANLEITUNG.de.md](ANLEITUNG.de.md).
 
 ## What works
 
-- The game signs in with a local account, with no PSN and no shadNet server.
-- Login to the game's own services, profiles, the friends list, leaderboards (read and score posting), event
-  history, challenge lists, challenges sent to friends.
-- Every other player on the server is a friend and shows as online.
-- Private lobbies: invite a friend, they join, both see each other in the lobby, the host starts an event, both
-  race together, and after the race both are back in the lobby.
-- Players on different PCs: on one LAN or through a VPN (tested with Tailscale and Hamachi).
+**Playing together**
+- Join a friend's multiplayer session from the friends list, or invite them into a private lobby.
+- Promote another player to session leader, kick players, leave and rejoin.
+- Race together: the host starts an event, everyone races, and afterwards everyone is back in the lobby.
+- Race times match between players, also when their frame rates differ (see "Frame rate and race times").
+- Players on different PCs: one LAN or a VPN (tested with Tailscale and Hamachi).
+
+**Friends and presence**
+- Every other player on the server is a friend.
+- Online and offline show within seconds: a friend who starts the game later appears, one who quits goes away.
+- What a friend is doing ("Playing a Tour Event", "In the menus", ...) shows as a short note at the top of the
+  screen whenever it changes. The game's own friend list only ever says "Playing DRIVECLUB"; on a console the
+  status was shown by the system, not by the game.
+- Avatars (a figure on a colour made from the name) instead of an endless loading ring.
+
+**Clubs**
+- Create a club: the club name is typed with the PC keyboard (Enter accepts, Esc cancels). The name field starts
+  with your player name; type over it.
+- Find clubs, join and leave, invitations, members list, badge and livery customization.
+- Club level, club fame (the members' fame summed), the global club leaderboard, club statistics and club
+  accolades (the members' summed).
+
+**Statistics and progression**
+- Driver profile for yourself and your friends: total fame, driver level, global ranking, favourite track and
+  manufacturer, accolades ("Nearly leveled up", "Recently leveled up").
+- Statistics per track, car, game mode, solo challenge, overdrive and face-off.
+- The global driver leaderboard by fame.
+- Leaderboards (read and score posting), event history, challenges and challenges sent to friends.
 
 ## What does not work yet
 
-- Public matchmaking (the "Multiplayer" events), clubs, tours with others and ghosts.
-- Each game runs its own simulation, and its speed follows the frame rate. With different frame rate settings
-  (or one PC that cannot hold its target), race clocks and weather drift apart: in one test 4.3 s over 3:24. All
-  players should use the same fixed frame rate in the launcher (e.g. 60 FPS, "Unlocked" off); then the times
-  match closely.
-- The game reads its friend list only when it starts: someone who comes online later is not listed until you
-  restart the game. Let the others in first, then start the host's game.
-- Presence (what a friend is doing) is accepted and not shown.
+- Public matchmaking (the "Multiplayer" events), tours with others and ghosts.
+- Fame is worked out from the events the game reports (it does not send its own total), so fame from accolades is
+  missing and a level can be one lower than the game shows for itself.
+- Club fame is the members' fame, not fame earned while in the club.
 - The add-ons store answers with an empty container.
+- "View Profile" on a friend opens the console's PlayStation profile, which the port does not have: use "View
+  Driver Profile" instead.
 
 ## Play with friends
 
-You need: your own copy of the game (PS4, CUSA00093, version 1.28), a build of this branch, the community server
-(only the host), and for players outside your home network a VPN that all of you join (Tailscale is the quickest:
-direct connections, free for 3 users).
+You need: your own copy of the game (PS4, CUSA00093 or CUSA00003, version 1.28), a build of this branch (or a release
+package), the community server (only the host), and for players outside your home network a VPN that all of you
+join (Tailscale is the quickest: direct connections, free for 3 users).
 
-1. Build the server from [Judaswick/driveclub-server](https://github.com/Judaswick/driveclub-server) branch
-   `coop` (see "The server" below), or take it from a release. Only the host needs it.
-2. Copy the files from `play/` next to `DriveClub.exe`, and `override-0.tss` too. The host puts the server in a
-   folder `server` next to them (or sets `server=` in `online.ini`), with `server-config.json` renamed to
-   `config.json`.
-3. Every player runs `Firewall-Freigabe.bat` once (adds inbound rules for the game, and for the server on the host).
-4. Every player starts `DriveClub.exe` once to pick the game folders and sets the **same fixed frame rate** as
-   the others (e.g. 60 FPS, "Unlocked" off), then closes it.
-5. The host runs `Online-Spielen.bat` with `host=self`. It starts the server and shows the host's IP addresses.
-6. The others run `Online-Spielen.bat` with the host's IP (the VPN address, e.g. `100.x.x.x` for Tailscale).
-7. When they are in the main menu, the host presses Enter to start the game, opens a private lobby and invites them.
+1. Unpack the release package (or build the runtime, the launcher and the server, see below). Only the host needs
+   the `server` folder.
+2. Every player runs `Firewall-Freigabe.bat` once. It allows the game (and on the host the server, TCP 8080) from
+   the home network and the VPN address ranges only, not from the internet.
+3. Every player starts `DriveClub.exe` once to pick the game folders (the 1.28 update with `eboot.bin`, and the base
+   game with `game000.dat`), then closes it.
+4. The host runs `Online-Spielen.bat` with `host=self`. It starts the server and shows the host's IP addresses.
+5. The others run `Online-Spielen.bat` with the host's IP (the VPN address, e.g. `100.x.x.x` for Tailscale).
+6. Join the host's session from the friends list, or let the host invite you into a private lobby, and race.
 
 `online.ini` keeps the name and the host; delete it to change them.
+
+Every player needs the same build: the runtime, the launcher and the server of one release belong together.
+
+## Frame rate and race times
+
+Each game runs its own simulation, timed by its own clock. With "60 FPS (deltatime)" or "Unlocked (VRR)" the game
+times itself by the wall clock, so race times match between players at any frame rate. A frame longer than 33 ms is
+counted as 33 ms so a hitch cannot throw the car or camera; the rest of it is made up over the next frames, so the
+race clock still keeps to the wall clock (a stall over 250 ms, such as loading, is dropped). With "60 FPS (fixed
+tick)" the game runs slower whenever it misses 60 FPS, and times drift apart: don't use it online.
 
 ## How it fits together
 
@@ -63,7 +91,7 @@ direct connections, free for 3 users).
    single line `<< Config >>`, so the game does not wait for a storage server that no longer exists.
 5. Invitations go through the server as PSN "game custom data": the runtime polls `dccoop/pending/<name>` and raises
    the system event the game waits for. The server then pushes the inviter's lobby to both games (see
-   `lobby-notes.md`).
+   `lobby-notes.md`). Joining from the friends list pushes the lobby to the joiner the same way.
 6. Races are peer to peer. The game looks up the other player's profile (`/v1/profiles`, which must carry `npId`),
    opens a connection with `sceNpSignalingActivateConnection` and then talks over `sceRudp`:
    - Without a matchmaking server, each runtime registers the UDP port of its P2P transport on the community server
@@ -75,13 +103,26 @@ direct connections, free for 3 users).
      talk to a console.
    - The game owns two signaling contexts. An incoming connection goes to the newest one, also when the game creates
      it after the peer connected, and `PEER_ACTIVATED` reaches it; the game answers with its own activation.
+7. Presence: on a console PSN pushes every change of a friend to the game. The runtime asks the server every 5 s
+   (`dccoop/presence/<name>`, one `name<TAB>online<TAB>status` line per friend) and raises the
+   `np:service:presence:*` push events for what changed. That poll is also each game's sign of life: the server
+   counts a player online while their game keeps asking (15 s).
+8. The on-screen keyboard is the game's plugin `oskGNMm.prx`: its `module_start` registers an "OnScreenKeyboard"
+   service with the service list the game passes to `sceKernelLoadStartModule`, and the service opens the system
+   text dialog (`libSceImeDialog`), which the runtime answers from the PC keyboard. The launcher links the plugin
+   with a "start when loaded" flag (boot image format `BBPROBE6`) and the runtime starts it when the game loads it.
+   A game prepared by an older launcher is prepared again once.
+9. Statistics: after each event the game uploads counters (`stats/V06/player/<id>` gamestate, keys such as
+   `au_r8/vehicle/distance` or `Drift/overdrive/fame`). The server answers `statsService.getAccountStats` and the
+   profile pages from them and takes each player's fame from the event fame there. `libScePngDec` (on libpng)
+   decodes the avatars.
 
 ## The server
 
 [shad-net/driveclub-server](https://github.com/shad-net/driveclub-server) (GPL-2.0) with the online changes on
-[Judaswick/driveclub-server](https://github.com/Judaswick/driveclub-server), branch `coop` (lobbies, invitations,
-messaging push, matching stubs, profiles with `npId`, the P2P directory). The patches in `server-patches` are an
-older state of the same work.
+[Judaswick/driveclub-server](https://github.com/Judaswick/driveclub-server), branch `coop`: lobbies and sessions
+(join, leave, host change, kick), invitations, messaging push, matching stubs, profiles with `npId`, avatars, the P2P
+directory, presence, clubs, statistics and fame. The patches in `server-patches` are an older state of the same work.
 
 Build (Qt 6.10 or newer and protobuf; on Windows with MSYS2 CLANG64 the packages are
 `mingw-w64-clang-x86_64-{qt6-base,protobuf}`):
@@ -95,12 +136,17 @@ ninja -C out
 
 Run `driveclubsrv.exe` from a folder that holds `server-config.json` renamed to `config.json`, with the Qt DLLs and
 `sqldrivers/qsqlite.dll` next to the exe (or run `windeployqt`). With `shadnet.url` empty and `allow_unverified` true
-it accepts any login. It listens on all interfaces (port 8080): keep it behind your router or VPN, since anyone who
-reaches it can sign in under any name.
+it accepts any login. It listens on all interfaces (port 8080): anyone who reaches it can sign in under any name, so
+keep it to your home network and VPN (`Firewall-Freigabe.bat` does that) and don't forward the port on your router.
+
+## Building the runtime and the launcher
+
+See [BUILDING.md](../../BUILDING.md). `bash build.sh` builds the runtime; `packaging/package.sh` builds the runtime and
+the launcher and packs a release. The launcher must come from this branch too: it links the on-screen keyboard.
 
 ## Tools for continuing
 
-Run with `BB_GPU_LOG=info` and `BB_GPU_LOG_ONLY=NpHandler,Lib.NpSignaling,Lib.Net,Lib.Np` for the network side.
+Run with `BB_GPU_LOG=info` and `BB_GPU_LOG_ONLY=NpHandler,Lib.NpSignaling,Lib.NpWebApi,Lib.Net` for the network side.
 These are for reverse engineering and do nothing unless set:
 
 - `BB_GUEST_TRACE="0xADDR,..."` logs the registers whenever the game reaches one of those guest addresses
