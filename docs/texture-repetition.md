@@ -23,29 +23,6 @@ launcher and runtime configuration; `BB_TEXTURE_REPETITION=0/1` is a startup ove
 This costs extra GPU texture reads. No performance measurements across GPUs or
 presets are available yet, including Handheld. The user can disable it separately.
 
-## What it looks like
-
-Left: original sampling. Right: selective repeating-layer sampling.
-Both enlarged comparisons use identical crop rectangles and **2x nearest-neighbour
-enlargement**, with no sharpening, blur or contrast adjustment.
-
-![Asphalt at middle distance, 2x](images/texture-repetition/road-mid-2x.png)
-
-![Asphalt farther away, 2x](images/texture-repetition/road-distance-2x.png)
-
-Full-resolution 2560x1440 images:
-[Off](images/texture-repetition/off-2560x1440.png),
-[On](images/texture-repetition/on-2560x1440.png).
-
-These are same-frame RenderDoc replays of Goshodaira, Time Trial, Caterham SP/300.R,
-stationary, 16:00, Clear/Dry, FOV 150% of the game's setting. Only the `road2`
-fragment program was replaced with the targeted preview's production SPIR-V.
-This isolates the road effect; it is not a full-scene live OFF/ON comparison or a
-comparison with PS4 hardware. The final color target is exported before window
-resizing. Its presentation R/B mapping is corrected identically in both images.
-This capture predates the launcher's new setting; the illustrated sampler math
-and road-layer selection are the same as the enabled setting.
-
 ## Which layers qualify
 
 The renderer combines native material ownership with shader dataflow. It does
@@ -128,8 +105,8 @@ prints input SHA256 hashes and derives ownership again rather than editing a lis
   provenance, non-pixel stages and deterministic output.
 - Local native-road selector check: reconstructed 919-instruction captured graph
   selected only images 6/7/8/9 (two color/normal pairs), leaving slots 0-5 unchanged.
-- Targeted preview runtime: 9 affected SPIR-V modules passed `spirv-val` in an
-  ordinary game launch. Those runtime checks and screenshots precede the public
+- Selective-sampling runtime: 9 affected SPIR-V modules passed `spirv-val` in an
+  ordinary game launch. Those runtime checks precede the public
   launcher integration. The publication source was compiled and privately linked
   against existing local dependency/runtime objects; this is not a clean release
   build or a cross-GPU performance result.
