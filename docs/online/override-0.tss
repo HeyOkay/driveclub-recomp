@@ -5,6 +5,8 @@ fa_egsConnection 100 100
 fa_storeCatalog 100 100
 gs_retrospectiveGhosts false
 egs_allowPSPlus false
+egs_oAuthRefreshTime 1200
+egs_timeout 3600
 otg_telemetry_enabled false
 OTG_Login_Type fake
 OTG_Domain driveclub

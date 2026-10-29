@@ -6,12 +6,16 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 #include <httplib.h>
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/invitation_dialog/invitation_dialog.h"
+#include "core/libraries/network/net.h"
 #include "core/libraries/network/net_upnp.h"
+#include "core/libraries/network/sockets.h"
+#include "core/libraries/np/np_signaling/np_signaling_stubs.h"
 #include "core/libraries/np/np_error.h"
 #include "core/libraries/np/np_manager.h"
 #include "core/libraries/np/np_matching2/np_matching2_mm.h"
@@ -37,6 +41,80 @@ const std::string& LocalNpName() {
         return std::string(env ? env : "");
     }();
     return name;
+}
+
+// Co-op server of a local account (BB_COOP_SERVER=host:port, default 127.0.0.1:8080).
+std::string CoopServerUrl() {
+    const char* env = std::getenv("BB_COOP_SERVER");
+    return std::string("http://") + (env && *env ? env : "127.0.0.1:8080");
+}
+
+// A local account has no shadNet matchmaking server to tell signaling where a peer's P2P transport
+// listens. The co-op server keeps that directory instead: each game registers its UDP port (the
+// server takes the address the request came from) and signaling resolves a peer's online ID there.
+bool ResolveLocalPeer(std::string_view online_id, u32* out_addr, u16* out_port) {
+    httplib::Client cli(CoopServerUrl());
+    cli.set_connection_timeout(3);
+    cli.set_read_timeout(3);
+    const auto res = cli.Get(("/dccoop/p2p/" + std::string(online_id)).c_str());
+    if (!res || res->status != 200) {
+        LOG_WARNING(NpHandler, "P2P peer '{}' not registered on the co-op server", online_id);
+        return false;
+    }
+    // body: "<ipv4> <udp port>"
+    const auto space = res->body.find(' ');
+    if (space == std::string::npos) {
+        return false;
+    }
+    const std::string ip = res->body.substr(0, space);
+    const int port = std::atoi(res->body.c_str() + space + 1);
+    u32 addr_nbo = 0;
+    if (port <= 0 || port > 0xffff ||
+        Libraries::Net::sceNetInetPton(Libraries::Net::ORBIS_NET_AF_INET, ip.c_str(), &addr_nbo) <= 0) {
+        return false;
+    }
+    *out_addr = addr_nbo;
+    *out_port = Libraries::Net::sceNetHtons(static_cast<u16>(port));
+    LOG_INFO(NpHandler, "P2P peer '{}' -> {}:{}", online_id, ip, port);
+    return true;
+}
+
+void StartLocalPeerDirectory() {
+    namespace Stubs = NpSignaling::Stubs;
+    Stubs::SetTransportHooks({
+        .signaling_send = Net::P2PSignalingSendTo,
+        .signaling_recv = Net::P2PSignalingRecvFrom,
+        .control_send = Net::P2PControlSendTo,
+        .control_recv = Net::P2PControlRecvFrom,
+        .transport_ready = Net::P2PTransportIsReady,
+        .configured_port = Net::GetP2PConfiguredPort,
+        .advertised_addr = Net::GetP2PAdvertisedAddr,
+        .ensure_transport = Net::EnsureP2PTransport,
+    });
+    Stubs::SetPeerResolver(ResolveLocalPeer);
+    // Re-register now and then: the transport starts late and its port changes with each run.
+    std::thread([] {
+        u16 registered = 0;
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(registered ? 30 : 2));
+            if (!Net::P2PTransportIsReady()) {
+                continue;
+            }
+            const u16 port = Net::GetP2PConfiguredPort();
+            httplib::Client cli(CoopServerUrl());
+            cli.set_connection_timeout(3);
+            cli.set_read_timeout(3);
+            const std::string path =
+                "/dccoop/p2p/register/" + LocalNpName() + "?port=" + std::to_string(port);
+            const auto res = cli.Get(path.c_str());
+            if (res && res->status >= 200 && res->status < 300) {
+                if (registered != port) {
+                    LOG_INFO(NpHandler, "P2P port {} registered on the co-op server", port);
+                }
+                registered = port;
+            }
+        }
+    }).detach();
 }
 } // namespace
 
@@ -118,6 +196,7 @@ void NpHandler::Initialize() {
     }
     if (!LocalNpName().empty()) {
         LOG_INFO(NpHandler, "local account '{}': no shadNet server is contacted", LocalNpName());
+        StartLocalPeerDirectory();
         return;
     }
 
