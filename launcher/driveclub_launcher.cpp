@@ -352,7 +352,6 @@ int g_motion_blur = -1;
 int g_camera_patch_row = -1;
 bool g_camera_patch = true;
 bool g_camera_patch_saved = false;
-int motion_blur_saved = 0;  // Slow by default; Fast uses the native 60 FPS exposure.
 const wchar_t* MotionBlurHint(int choice) {
   return choice == 1
       ? L"Fast: shorter motion blur, matching the game's 60 FPS exposure."
@@ -1117,7 +1116,7 @@ void BuildModel() {
                            "@gfx", true);
   g_motion_blur = seg(L"Motion blur exposure",
       L"Slow: original 30 FPS exposure, best for a cinematic look. Fast: shorter 60 FPS exposure.",
-      {L"Slow", L"Fast"}, {"@motion_blur", ""}, 0);
+      {L"Slow", L"Fast"}, {"@motion_blur", ""}, 1);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
   g_gfx[kGfxFxaa] = toggle(L"FXAA pass",
@@ -1352,6 +1351,7 @@ bool ReadOptimizationMask(uint64_t& mask) {
   in>>std::ws; return in.eof();
 }
 void LoadSettings() {
+  int motion_blur_saved = -1;
   int texture_repetition_saved = -1;
   g_two_thread = !PrimaryGpuIsAmd();  // the saved choice (draw_threads=) replaces it below
   for (const auto& line : ReadLines(IniPath())) {
@@ -1496,7 +1496,8 @@ void LoadSettings() {
     const int choices = c.kind == Kind::Toggle ? 2 : int(c.items.size());
     c.sel = gfx_saved[k] >= 0 && gfx_saved[k] < choices ? gfx_saved[k] : c.def;
   }
-  if (g_motion_blur >= 0) g_c[g_motion_blur].sel = motion_blur_saved;
+  // Use native exposure while recognizing legacy PS4 profiles below.
+  if (g_motion_blur >= 0) g_c[g_motion_blur].sel = motion_blur_saved < 0 ? 0 : motion_blur_saved;
   if (g_fps >= 0 && unlocked_saved && g_c[g_fps].sel == 1) g_c[g_fps].sel = 3;  // Unlocked is deltatime without the cap
   NameNativeUpscale();
   if(!g_camera_patch_saved)ApplyFrameModeCameraDefault();
@@ -1514,6 +1515,8 @@ void LoadSettings() {
     g_c[g_texture_repetition].sel = 0;
     g_c[g_texture_repetition].sel = IsPs4Profile() ? 0 : 1;
   }
+  if (motion_blur_saved < 0 && g_motion_blur >= 0)
+    g_c[g_motion_blur].sel = IsPs4Profile() ? 0 : 1;
   DerivePreset();
 }
 
@@ -1562,6 +1565,7 @@ void ApplyPreset(int preset) {
     NameNativeUpscale(); return;
   }
   if (preset < 0 || preset > 5) return;
+  if (g_motion_blur >= 0) g_c[g_motion_blur].sel = 1;
   if (g_texture_repetition >= 0) g_c[g_texture_repetition].sel = 1;
   if (preset == 0 || g_outres < 0 || g_inres < 0) return;
   g_c[g_outres].sel = kPresetOut[preset];
