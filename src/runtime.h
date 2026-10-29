@@ -34,6 +34,8 @@ void runtime_rwlock_report(void);
 void runtime_set_libc_tls(const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_module_tls(uint64_t module, const void *data, uint64_t filesz, uint64_t memsz);
 void runtime_set_procparam(void *param);
+/* Starts a linked module the game loads itself (probe.c); 1 when path names one. */
+int runtime_start_linked_module(const char *path, uint64_t args, const void *argp, int32_t *result);
 void **runtime_application_heap_api(void);
 uintptr_t runtime_thread_resolve(const char *name);
 void runtime_thread_report(void);
