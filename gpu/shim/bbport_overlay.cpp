@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_frame_info.h"
+#include <deque>
+#include <cstring>
+#include <zlib.h>
 #include <string>
 #include <vector>
 #include "bbport_overlay.h"
@@ -48,6 +51,7 @@ asm(".section .rodata\n"
     "bb_font_ttf_end:\n"
     ".previous\n");
 #endif
+extern "C" int runtime_file_translate(const char* guest, char* out, size_t size);
 extern "C" const unsigned char bb_font_ttf[];
 extern "C" const unsigned char bb_font_ttf_end[];
 
@@ -86,6 +90,13 @@ std::string text_entry_prompt, text_entry_text;
 std::string note_text;
 std::chrono::steady_clock::time_point note_until{};
 std::atomic<bool> note_active{false};
+// Trophy banners (Trophy), guarded by imgui_mutex: shown one after another, a few seconds each.
+struct TrophyToast { int grade; std::string title, description; std::vector<ImU32> icon; };
+std::deque<TrophyToast> trophy_queue;
+std::chrono::steady_clock::time_point trophy_shown{};
+bool trophy_showing = false;
+std::atomic<bool> trophy_active{false};
+float fps_panel_bottom = 0.0f; // bottom edge of the FPS panel this frame, 0 when it is not drawn
 float base_scale = 1.0f;
 ImFont *exit_body=nullptr,*exit_heading=nullptr;
 std::atomic<bool> mouse_capture_requested{false};
@@ -298,6 +309,208 @@ void PollHotkeys() {
 #endif
 }
 
+// The artwork of a trophy sits unencrypted as a PNG in the game's own trophy file (sce_sys/trophy/trophy00.trp), so
+// the banner shows the real picture without any key. It is decoded here (zlib) and shrunk to IconSize squares.
+constexpr int IconSize = 64;
+
+bool DecodePng(const std::vector<unsigned char>& png, int& width, int& height, std::vector<unsigned char>& rgba) {
+    static const unsigned char signature[8] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    if (png.size() < 33 || std::memcmp(png.data(), signature, 8) != 0) {
+        return false;
+    }
+    const auto be32 = [&](size_t at) {
+        return (uint32_t(png[at]) << 24) | (uint32_t(png[at + 1]) << 16) | (uint32_t(png[at + 2]) << 8) | png[at + 3];
+    };
+    std::vector<unsigned char> packed;
+    int colour_type = 0;
+    size_t at = 8;
+    width = height = 0;
+    while (at + 12 <= png.size()) {
+        const uint32_t length = be32(at);
+        const char* type = reinterpret_cast<const char*>(&png[at + 4]);
+        if (at + 12 + length > png.size()) {
+            return false;
+        }
+        if (!std::memcmp(type, "IHDR", 4) && length >= 13) {
+            width = int(be32(at + 8));
+            height = int(be32(at + 12));
+            colour_type = png[at + 17];
+            if (png[at + 16] != 8 || png[at + 20] != 0) {
+                return false; // 8 bits per channel, not interlaced
+            }
+        } else if (!std::memcmp(type, "IDAT", 4)) {
+            packed.insert(packed.end(), png.begin() + at + 8, png.begin() + at + 8 + length);
+        } else if (!std::memcmp(type, "IEND", 4)) {
+            break;
+        }
+        at += 12 + length;
+    }
+    const int bytes = colour_type == 6 ? 4 : colour_type == 2 ? 3 : 0;
+    if (!bytes || width <= 0 || height <= 0 || width > 2048 || height > 2048) {
+        return false;
+    }
+    const size_t stride = size_t(width) * bytes;
+    std::vector<unsigned char> raw((stride + 1) * size_t(height));
+    uLongf raw_size = uLongf(raw.size());
+    if (uncompress(raw.data(), &raw_size, packed.data(), uLong(packed.size())) != Z_OK || raw_size != raw.size()) {
+        return false;
+    }
+    std::vector<unsigned char> pixels(stride * size_t(height));
+    for (int y = 0; y < height; ++y) {
+        const unsigned char filter = raw[size_t(y) * (stride + 1)];
+        const unsigned char* in = &raw[size_t(y) * (stride + 1) + 1];
+        unsigned char* out = &pixels[size_t(y) * stride];
+        const unsigned char* above = y ? out - stride : nullptr;
+        for (size_t x = 0; x < stride; ++x) {
+            const int a = x >= size_t(bytes) ? out[x - bytes] : 0;
+            const int b = above ? above[x] : 0;
+            const int c = above && x >= size_t(bytes) ? above[x - bytes] : 0;
+            int predictor = 0;
+            switch (filter) {
+            case 1: predictor = a; break;
+            case 2: predictor = b; break;
+            case 3: predictor = (a + b) / 2; break;
+            case 4: {
+                const int p = a + b - c, pa = std::abs(p - a), pb = std::abs(p - b), pc = std::abs(p - c);
+                predictor = pa <= pb && pa <= pc ? a : (pb <= pc ? b : c);
+                break;
+            }
+            default: break;
+            }
+            out[x] = static_cast<unsigned char>(in[x] + predictor);
+        }
+    }
+    rgba.assign(size_t(width) * size_t(height) * 4, 255);
+    for (size_t i = 0; i < size_t(width) * size_t(height); ++i) {
+        for (int k = 0; k < bytes; ++k) {
+            rgba[i * 4 + k] = pixels[i * bytes + k];
+        }
+    }
+    return true;
+}
+
+// Reads trophy `id`'s picture out of the player's own trophy file; empty when it is not there.
+std::vector<ImU32> LoadTrophyIcon(int id) {
+    std::vector<ImU32> icon;
+    char host[1024];
+    if (runtime_file_translate("/app0/sce_sys/trophy/trophy00.trp", host, sizeof(host)) != 0) {
+        return icon;
+    }
+    std::FILE* file = std::fopen(host, "rb");
+    if (!file) {
+        return icon;
+    }
+    unsigned char header[0x60];
+    uint32_t count = 0;
+    std::vector<unsigned char> png;
+    char wanted[16];
+    std::snprintf(wanted, sizeof(wanted), "TROP%03d.PNG", id);
+    if (std::fread(header, 1, sizeof(header), file) == sizeof(header)) {
+        count = (uint32_t(header[0x10]) << 24) | (uint32_t(header[0x11]) << 16) | (uint32_t(header[0x12]) << 8) | header[0x13];
+        for (uint32_t i = 0; i < count && i < 512 && png.empty(); ++i) {
+            unsigned char entry[0x40];
+            if (std::fseek(file, long(0x60 + i * 0x40), SEEK_SET) != 0 || std::fread(entry, 1, sizeof(entry), file) != sizeof(entry)) {
+                break;
+            }
+            if (std::strncmp(reinterpret_cast<const char*>(entry), wanted, 0x20) != 0) {
+                continue;
+            }
+            uint64_t offset = 0, size = 0;
+            for (int k = 0; k < 8; ++k) {
+                offset = (offset << 8) | entry[0x20 + k];
+                size = (size << 8) | entry[0x28 + k];
+            }
+            if (size > 0 && size < (8u << 20) && std::fseek(file, long(offset), SEEK_SET) == 0) {
+                png.resize(size_t(size));
+                if (std::fread(png.data(), 1, png.size(), file) != png.size()) {
+                    png.clear();
+                }
+            }
+            break;
+        }
+    }
+    std::fclose(file);
+    int width = 0, height = 0;
+    std::vector<unsigned char> rgba;
+    if (png.empty() || !DecodePng(png, width, height, rgba)) {
+        return icon;
+    }
+    icon.resize(size_t(IconSize) * IconSize);
+    for (int y = 0; y < IconSize; ++y) {
+        for (int x = 0; x < IconSize; ++x) {
+            const int x0 = x * width / IconSize, x1 = std::max(x0 + 1, (x + 1) * width / IconSize);
+            const int y0 = y * height / IconSize, y1 = std::max(y0 + 1, (y + 1) * height / IconSize);
+            unsigned sum[3] = {0, 0, 0}, n = 0;
+            for (int yy = y0; yy < y1 && yy < height; ++yy) {
+                for (int xx = x0; xx < x1 && xx < width; ++xx) {
+                    const unsigned char* p = &rgba[(size_t(yy) * width + xx) * 4];
+                    sum[0] += p[0]; sum[1] += p[1]; sum[2] += p[2]; ++n;
+                }
+            }
+            n = n ? n : 1;
+            icon[size_t(y) * IconSize + x] = IM_COL32(sum[0] / n, sum[1] / n, sum[2] / n, 255);
+        }
+    }
+    return icon;
+}
+
+void TrophyBanner(const TrophyToast& toast, float age) {
+    // The console's banner: top right, a dark pill with the trophy's own picture on the left, the name over the
+    // description, and the grade's cup at the end. It slides in from the edge and out again.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float s = base_scale;
+    const float slide = age < 0.35f ? age / 0.35f : (age > 4.65f ? std::max(0.0f, (5.0f - age) / 0.35f) : 1.0f);
+    const float w = 560.0f * s, h = 92.0f * s, margin = 40.0f * s;
+    const float banner_top = fps_panel_bottom > 0.0f ? fps_panel_bottom + 10.0f * s : viewport->WorkPos.y + margin;
+    const ImVec2 pos(viewport->WorkPos.x + viewport->WorkSize.x - w - margin + (1.0f - slide) * (w + margin), banner_top);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::SetNextWindowBgAlpha(0.9f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * s);
+    ImGui::Begin("##trophy", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float icon_size = 68.0f * s;
+    const ImVec2 icon_pos(pos.x + 12.0f * s, pos.y + (h - icon_size) * 0.5f);
+    if (!toast.icon.empty()) {
+        const ImDrawListFlags saved = draw->Flags;
+        draw->Flags &= ~ImDrawListFlags_AntiAliasedFill; // keep the picture's pixels edge to edge
+        const float cell = icon_size / IconSize;
+        for (int y = 0; y < IconSize; ++y) {
+            for (int x = 0; x < IconSize; ++x) {
+                const ImVec2 a(icon_pos.x + std::floor(x * cell), icon_pos.y + std::floor(y * cell));
+                const ImVec2 b(icon_pos.x + std::ceil((x + 1) * cell), icon_pos.y + std::ceil((y + 1) * cell));
+                draw->AddRectFilled(a, b, toast.icon[size_t(y) * IconSize + x]);
+            }
+        }
+        draw->Flags = saved;
+        draw->AddRect(icon_pos, ImVec2(icon_pos.x + icon_size, icon_pos.y + icon_size), IM_COL32(255, 255, 255, 70), 0.0f, 0, 1.0f);
+    }
+    static const ImU32 cup[4] = {IM_COL32(190, 220, 245, 255), IM_COL32(240, 190, 60, 255), IM_COL32(200, 205, 215, 255),
+                                 IM_COL32(205, 130, 70, 255)};
+    const ImU32 colour = cup[toast.grade >= 0 && toast.grade < 4 ? toast.grade : 3];
+    const float cx = pos.x + w - 34.0f * s, top = pos.y + h * 0.5f - 18.0f * s;
+    draw->AddRectFilled(ImVec2(cx - 12.0f * s, top), ImVec2(cx + 12.0f * s, top + 17.0f * s), colour, 4.0f * s, ImDrawFlags_RoundCornersBottom);
+    draw->AddRect(ImVec2(cx - 17.0f * s, top + 2.0f * s), ImVec2(cx - 10.0f * s, top + 11.0f * s), colour, 3.0f * s, 0, 2.0f * s);
+    draw->AddRect(ImVec2(cx + 10.0f * s, top + 2.0f * s), ImVec2(cx + 17.0f * s, top + 11.0f * s), colour, 3.0f * s, 0, 2.0f * s);
+    draw->AddRectFilled(ImVec2(cx - 2.5f * s, top + 17.0f * s), ImVec2(cx + 2.5f * s, top + 25.0f * s), colour);
+    draw->AddRectFilled(ImVec2(cx - 9.0f * s, top + 25.0f * s), ImVec2(cx + 9.0f * s, top + 29.0f * s), colour, 2.0f * s);
+    const float text_x = pos.x + 12.0f * s + (toast.icon.empty() ? 0.0f : icon_size + 14.0f * s);
+    ImGui::SetCursorScreenPos(ImVec2(text_x, pos.y + 12.0f * s));
+    ImGui::TextDisabled("Trophy earned");
+    ImGui::SetCursorScreenPos(ImVec2(text_x, pos.y + 31.0f * s));
+    ImGui::SetWindowFontScale(1.2f);
+    ImGui::TextUnformatted(toast.title.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(text_x, pos.y + 58.0f * s));
+    ImGui::PushTextWrapPos(pos.x + w - 60.0f * s);
+    ImGui::TextDisabled("%s", toast.description.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
 void NoteBox() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x * 0.5f, viewport->WorkPos.y + 40.0f * base_scale),
@@ -479,6 +692,7 @@ void FpsCounter() {
         ImGui::GetWindowDrawList()->AddText(ImVec2(x, fps_hint_y),
                                           ImGui::GetColorU32(ImGuiCol_TextDisabled), fps_hint);
     }
+    fps_panel_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     ImGui::End();
 }
 
@@ -697,8 +911,15 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (runtime_exit_captures() || menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
+    return initialized && (runtime_exit_captures() || menu_open || text_entry_active || note_active || trophy_active || BbSettings::Get().show_fps ||
                            BbSettings::Get().show_pedals);
+}
+
+void Trophy(int id, int grade, const std::string& title, const std::string& description) {
+    std::vector<ImU32> icon = LoadTrophyIcon(id);
+    std::scoped_lock lock{imgui_mutex};
+    trophy_queue.push_back({grade, title, description, std::move(icon)});
+    trophy_active = true;
 }
 
 void Note(const std::string& text) {
@@ -762,6 +983,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    fps_panel_bottom = 0.0f;
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
     }
@@ -776,6 +998,20 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
             NoteBox();
         } else {
             note_active = false;
+        }
+    }
+    if (trophy_showing || !trophy_queue.empty()) {
+        if (!trophy_showing) {
+            trophy_showing = true;
+            trophy_shown = now;
+        }
+        const float age = std::chrono::duration<float>(now - trophy_shown).count();
+        if (age < 5.0f) {
+            TrophyBanner(trophy_queue.front(), age);
+        } else {
+            trophy_queue.pop_front();
+            trophy_showing = false;
+            trophy_active = !trophy_queue.empty();
         }
     }
     ExitConfirmation(scale);

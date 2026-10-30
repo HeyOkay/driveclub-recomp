@@ -9,6 +9,18 @@
     </TitleID>
     <Metadata Title="Driveclub"
               Always="true"
+              Name="Native render feedback timing"
+              Note="Keep the native interval in renderer frame-time feedback to avoid fountain mist flicker with high-FPS patches. Simulation and presentation timing are unchanged."
+              Author="HeyOkay"
+              PatchVer="1.0"
+              AppVer="01.28"
+              AppElf="eboot.bin">
+        <PatchList>
+            <Line Type="bytes" Address="0x00b3a7f0" Value="b802000000909090" OriginalHash="9b5df33222e489e1"/>
+        </PatchList>
+    </Metadata>
+    <Metadata Title="Driveclub"
+              Always="true"
               Name="Red zone fix (particle curve sampler)"
               Note="The function at 0x64d980 keeps seven locals below the stack pointer. A memory-tracking fault taken inside it on Windows overwrites them and the game stopped with a read of address 0 at 0x64db13. It gets a real stack frame instead."
               Author="Ianespaa"

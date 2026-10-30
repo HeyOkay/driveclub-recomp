@@ -41,6 +41,7 @@ static size_t page_size;
 #include "runtime_scene_debug.inc"
 #include "runtime_motion_blur.inc"
 #include "runtime_menu_repeat.inc"
+#include "runtime_replay_seek.inc"
 #include "runtime_resource_entry.inc"
 /* flags bit 0: the module starts when the game loads it (BBPROBE6), see runtime_start_linked_module. */
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module, flags; char name[32]; int started; } LinkedModule;
@@ -1528,6 +1529,7 @@ int main(int argc, char **argv) {
         printf("SSE4a: %" PRIu64 " guest EXTRQ rewritten, %" PRIu64 " left to the fault handler\n", rewritten, left);
     }
     menu_repeat_install();
+    replay_seek_install();
     resource_entry_install();
     if (!cpu_only) camera_patch_install();
     protect(traps, round_page((import_count + 1) * 32), 5);
