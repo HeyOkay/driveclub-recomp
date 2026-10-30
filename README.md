@@ -44,6 +44,20 @@ Nothing to install. Your own files are never modified or copied, and the folders
 
 Logs are in the `logs` folder.
 
+### Linux (x86_64)
+The AppImage is built by the [AppImage workflow](.github/workflows/appimage.yml), or locally with
+`bash packaging/appimage/build-appimage.sh <version>` (see [BUILDING.md](BUILDING.md#linux-x86_64)).
+It uses the same game dumps and keeps its settings, prepared image, saves and logs in a
+`data/` folder beside the AppImage whenever that folder is writable (otherwise in
+`~/.local/share/driveclub-recomp`). Running the AppImage opens the native Linux launcher, with
+the same game folders, display, driving and patch settings as the Windows launcher. Press
+PLAY there and the recomp prepares and starts; `--play` starts it headlessly with the saved
+settings. Use DATA FOLDER > Change... in the launcher to select another folder or move the
+existing data. Put `update/` and `base/` next to the AppImage, use `--setup UPDATE BASE` once,
+or set `DRIVECLUB_UPDATE_DIR` and `DRIVECLUB_BASE_DIR`. The choice is stored in `data-path`
+beside the AppImage; `DRIVECLUB_DATA_DIR` overrides it, and a `portable` marker selects `data/`
+when no folder has been chosen.
+
 ## Highlights
 - The game's own x86-64 code runs directly on your CPU, with no CPU emulation. The PS4 system libraries are reimplemented and the GPU commands are translated to Vulkan, similar to Wine and DXVK
 - Playable from the menus through races, photo mode and saves, with trophies and private multiplayer with friends
@@ -181,7 +195,8 @@ A second line, `Benchmark: ran render=... output=... fps_limit=... aa=...`, list
 - Requires Windows 10/11 64-bit, a processor from Intel Haswell (2013) or AMD Excavator or Ryzen onward, and a graphics card with a Vulkan 1.3 driver. About 40 GB of free space is needed for the game dumps.
 
 ## Building from source
-See [BUILDING.md](BUILDING.md).
+See [BUILDING.md](BUILDING.md). The Linux build produces a native AppImage (`packaging/appimage/build-appimage.sh`);
+the same document lists its dependencies.
 
 ## Reporting problems
 Open an [issue](../../issues/new/choose) and fill in the form. **Attach the log files**: without them an issue usually cannot be solved. In the folder next to `DriveClub.exe`, open `logs` and drag these into the issue:
