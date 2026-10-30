@@ -108,7 +108,8 @@ static bool snapshot(MenuSnapshot *m) {
 static pthread_mutex_t exit_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t tick_lock=PTHREAD_MUTEX_INITIALIZER;
 static ExitDialog dialog;
-static bool root, quit_dispatched;
+static bool root;
+static atomic_bool quit_dispatched;
 static unsigned key_held,key_pressed;
 static int active_device;
 static char confirm_label[48]="A",back_label[48]="B";
@@ -139,6 +140,82 @@ static ABI bool webapi_retry(unsigned char *manager) {
     if (*(volatile unsigned char *)(manager+0x21)) return true;
     return ((NetworkOperation)(runtime_image_base+0x7d6810))(manager);
 }
+/* Cached Lua file wrappers may outlive their source signals after a race.
+ * Disconnecting from an already destroyed subscription table enters the native
+ * lazy-bucket initializer recursively with index zero. During confirmed shutdown,
+ * expire only those dead connections before running the original destructor;
+ * live connections, owned buffers and every other cleanup remain native. */
+static void (ABI *stream_destructor)(void *);
+static ABI void close_stream(void *object) {
+    if (atomic_load(&quit_dispatched)) {
+        unsigned expired=0;
+        for (unsigned offset=0x20;offset<=0x30;offset+=0x10) {
+            uintptr_t connection=(uintptr_t)object+offset;
+            uintptr_t owner=ptr(connection), key=ptr(connection+8);
+            if (!owner || key==UINTPTR_MAX) continue;
+            uintptr_t table=ptr(owner+0x18);
+            if (!table || !ptr(table+0x30)) {
+                *(uintptr_t *)connection=0;
+                *(uintptr_t *)(connection+8)=UINTPTR_MAX;
+                ++expired;
+            }
+        }
+        static atomic_bool reported;
+        if (expired && !atomic_exchange(&reported,true))
+            puts("Exit dialog: expired file-stream subscriptions skipped during shutdown");
+    }
+    stream_destructor(object);
+}
+static bool install_stream_shutdown_guard(void) {
+    unsigned char *site=(unsigned char *)(runtime_image_base+0xea24d0);
+    /* Complete, RIP-independent prologue. Keep it in the trampoline verbatim. */
+    static const unsigned char prologue[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x68};
+    static const unsigned char first_connection[]={0x48,0x8b,0x43,0x28,0x48,0x83,0xf8,0xff,0x74,0x3a};
+    static const unsigned char second_connection[]={0x48,0x8b,0x43,0x38,0x48,0x83,0xf8,0xff,0x74,0x3a};
+    if (memcmp(site,prologue,sizeof(prologue)) ||
+        memcmp((const void *)(runtime_image_base+0xea24f3),first_connection,sizeof(first_connection)) ||
+        memcmp((const void *)(runtime_image_base+0xea2537),second_connection,sizeof(second_connection))) return false;
+#ifdef _WIN32
+    unsigned char *trampoline=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+#else
+    unsigned char *trampoline=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if (trampoline==MAP_FAILED) trampoline=NULL;
+#endif
+    if (!trampoline) return false;
+    memcpy(trampoline,prologue,sizeof(prologue));
+    unsigned char jump[12]={0x48,0xb8};
+    uintptr_t resume=(uintptr_t)site+sizeof(prologue);
+    memcpy(jump+2,&resume,8);jump[10]=0xff;jump[11]=0xe0;
+    memcpy(trampoline+sizeof(prologue),jump,sizeof(jump));
+    unsigned char patch[sizeof(prologue)];memset(patch,0x90,sizeof(patch));
+    uintptr_t target=(uintptr_t)close_stream;
+    memcpy(jump+2,&target,8);memcpy(patch,jump,sizeof(jump));
+#ifdef _WIN32
+    DWORD old,ignored;
+    if (!VirtualProtect(trampoline,4096,PAGE_EXECUTE_READ,&old) ||
+        !VirtualProtect(site,sizeof(patch),PAGE_EXECUTE_READWRITE,&old)) {
+        VirtualFree(trampoline,0,MEM_RELEASE);return false;
+    }
+    stream_destructor=(void (ABI *)(void *))trampoline;
+    memcpy(site,patch,sizeof(patch));
+    VirtualProtect(site,sizeof(patch),old,&ignored);
+    FlushInstructionCache(GetCurrentProcess(),trampoline,sizeof(prologue)+sizeof(jump));
+    FlushInstructionCache(GetCurrentProcess(),site,sizeof(patch));
+#else
+    const size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    void *start=(void *)((uintptr_t)site&~(uintptr_t)(page-1));
+    if (mprotect(trampoline,4096,PROT_READ|PROT_EXEC) ||
+        mprotect(start,page,PROT_READ|PROT_WRITE|PROT_EXEC)) {
+        munmap(trampoline,4096);return false;
+    }
+    stream_destructor=(void (ABI *)(void *))trampoline;
+    memcpy(site,patch,sizeof(patch));mprotect(start,page,PROT_READ|PROT_EXEC);
+    __builtin___clear_cache((char *)trampoline,(char *)trampoline+sizeof(prologue)+sizeof(jump));
+    __builtin___clear_cache((char *)site,(char *)site+sizeof(patch));
+#endif
+    return true;
+}
 void runtime_exit_initialize(void) {
     if (!runtime_image_base || runtime_image_size<0x189f8d0) return;
     static const unsigned char regional_predicate[]={
@@ -153,6 +230,9 @@ void runtime_exit_initialize(void) {
         0x4c,0x89,0xff,0xe8,0x90,0xf9,0xff,0xff};
     if (memcmp(site,expected,sizeof(expected))) {
         puts("Exit dialog: unsupported WebAPI shutdown code; dialog disabled"); return;
+    }
+    if (!install_stream_shutdown_guard()) {
+        puts("Exit dialog: unsupported file-stream destructor; dialog disabled");return;
     }
 #ifdef _WIN32
     DWORD old;
