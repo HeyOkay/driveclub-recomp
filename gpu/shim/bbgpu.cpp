@@ -229,8 +229,8 @@ u32 BbDisplayRefreshHz() {
 extern "C" void runtime_ffb_release(const char* why); // src/runtime_logiwheel.inc: the wheel's forces off
 
 #ifdef BB_PGO_GENERATE
-extern "C" void __gcov_dump(void);
-extern "C" void __gcov_reset(void);
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_reset_counters(void);
 // Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
 // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
 // intervals.
@@ -239,9 +239,11 @@ static void StartProfileWriter() {
         Common::SetCurrentThreadName("bb:pgo");
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
-            __gcov_dump();
-            __gcov_reset();
-            std::printf("PGO: profile written\n");
+            // Clang's profile runtime merges each write into the same file (%m), so the counters restart at zero.
+            const int status = __llvm_profile_write_file();
+            __llvm_profile_reset_counters();
+            std::printf("PGO: profile %s\n", status == 0 ? "written" : "write failed");
+            std::fflush(stdout);
         }
     }).detach();
 }
