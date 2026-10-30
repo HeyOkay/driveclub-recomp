@@ -91,6 +91,11 @@ struct Values {
     std::atomic<bool> hdr_output{false};
     std::atomic<float> hdr_paper{350.0f};
     std::atomic<float> hdr_peak{1000.0f};
+    /// The SDR picture (picture.ini, F4 in the game): brightness -50..50 (0 as made), contrast 50..150 %, and the
+    /// display gamma it is made for in hundredths, 180..280 (240 the TVs the game was made for, 220 a PC monitor).
+    std::atomic<int> picture_brightness{0};
+    std::atomic<int> picture_contrast{100};
+    std::atomic<int> picture_gamma{240};
     std::atomic<int> upscaler{UpscalerFsr3};
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
@@ -160,7 +165,7 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
-    /// Live world-layer sampling, toggled by F4 without replacing pipelines.
+    /// Live world-layer sampling, toggled by Shift+F4 without replacing pipelines.
     std::atomic<bool> texture_repetition{true};
 };
 
@@ -191,5 +196,7 @@ const char* AaScaleName(int scale);
 void SaveHdrBrightness(int nits);
 /// Persist only this hotkey choice; preserve all unrelated user settings.
 bool SaveTextureRepetition(bool enabled);
+/// The picture changed while playing (F4): picture.ini next to the settings file, which the launcher's sliders show.
+void SavePicture();
 float AaScaleFactor(int scale);
 } // namespace BbSettings

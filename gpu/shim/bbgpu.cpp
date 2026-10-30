@@ -229,8 +229,8 @@ u32 BbDisplayRefreshHz() {
 extern "C" void runtime_ffb_release(const char* why); // src/runtime_logiwheel.inc: the wheel's forces off
 
 #ifdef BB_PGO_GENERATE
-extern "C" void __gcov_dump(void);
-extern "C" void __gcov_reset(void);
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_reset_counters(void);
 // Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
 // exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
 // intervals.
@@ -239,9 +239,11 @@ static void StartProfileWriter() {
         Common::SetCurrentThreadName("bb:pgo");
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
-            __gcov_dump();
-            __gcov_reset();
-            std::printf("PGO: profile written\n");
+            // Clang's profile runtime merges each write into the same file (%m), so the counters restart at zero.
+            const int status = __llvm_profile_write_file();
+            __llvm_profile_reset_counters();
+            std::printf("PGO: profile %s\n", status == 0 ? "written" : "write failed");
+            std::fflush(stdout);
         }
     }).detach();
 }
@@ -489,6 +491,9 @@ extern "C" int bbgpu_overlay_captures_input(void) {
 extern "C" int bbgpu_exit_dialog_available(void) { return BbOverlay::ExitDialogAvailable(); }
 extern "C" void bbgpu_mouse_stick_capture(int capture) { BbOverlay::RequestMouseCapture(capture!=0); }
 
+extern "C" void bbgpu_overlay_trophy(int id, int grade, const char* title_utf8, const char* description_utf8) {
+    BbOverlay::Trophy(id, grade, title_utf8 ? title_utf8 : "", description_utf8 ? description_utf8 : "");
+}
 extern "C" void bbgpu_overlay_note(const char* text_utf8) {
     BbOverlay::Note(text_utf8 ? text_utf8 : "");
 }
