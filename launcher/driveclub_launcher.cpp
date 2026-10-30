@@ -99,6 +99,7 @@ struct Ctl {
   const wchar_t* more = nullptr;       // the details the (i) opens, after the hint
   int min = 0, max = 0;                // slider range
   const wchar_t* unit = L"%";          // after a slider's value
+  int decimals = 0;                    // a slider's value is shown divided by 10^decimals (gamma 240 as 2.40)
   bool physics_only = false;           // a steering wheel row shown with the physics force model only
   int loaded = 0;                      // steering wheel rows: the value default.ini had, so only changes are written
 };
@@ -367,6 +368,8 @@ int DisplayHz() {
 // HDR output (BB_HDR): on/off, and the brightness of white and of the highlights in nits (hdr=, hdr_paper=,
 // hdr_peak= in launcher.ini; -1: not saved yet).
 int g_hdr = -1, g_hdr_paper = -1, g_hdr_peak = -1;
+int g_picture[3] = {-1, -1, -1};  // brightness, contrast, gamma (picture.ini; F4 in the game)
+constexpr const char* kPictureKey[3] = {"brightness=", "contrast=", "gamma="};
 int hdr_saved = -1, hdr_paper_saved = -1, hdr_peak_saved = -1;
 void NameNativeUpscale();
 int aa_saved = 0;     // "Anti-aliasing" choice, from launcher.ini
@@ -507,6 +510,7 @@ std::wstring CameraIniPath() { return g_data + L"\\user\\camera.ini"; }
 // HDR brightness: Page Up / Page Down change it while playing and save it in data\user\hdr.ini paper= (gpu/shim/
 // bbport_settings.cpp); it wins over launcher.ini's, being newer.
 std::wstring HdrIniPath() { return g_data + L"\\user\\hdr.ini"; }
+std::wstring PictureIniPath() { return g_data + L"\\user\\picture.ini"; }
 
 // The last result, from data\user\benchmark\result.txt.
 struct BenchResult {
@@ -565,6 +569,8 @@ bool RowHidden(const Ctl& c) {
   if (g_online_ip_row >= 0 && &c == &g_c[g_online_ip_row]) return g_online_row >= 0 && g_c[g_online_row].sel != 1;
   if ((g_hdr_paper >= 0 && &c == &g_c[g_hdr_paper]) || (g_hdr_peak >= 0 && &c == &g_c[g_hdr_peak]))
     return g_hdr >= 0 && g_c[g_hdr].sel == 0;
+  for (int p : g_picture)  // the SDR picture; HDR has its own brightness
+    if (p >= 0 && &c == &g_c[p]) return g_hdr >= 0 && g_c[g_hdr].sel != 0;
   return false;
 }
 bool IsWheelRow(const Ctl& c) { return c.patches[0].rfind("@ffb:", 0) == 0 || c.patches[0].rfind("@wheel", 0) == 0; }
@@ -1121,6 +1127,25 @@ void BuildModel() {
     g_hdr_peak = int(g_c.size());
     g_c.push_back(std::move(c));
   }
+  {
+    const struct { const wchar_t* label; const wchar_t* hint; int def, min, max, decimals; const wchar_t* unit; } kPicture[3] = {
+        {L"Brightness", L"Lifts or lowers the whole picture.\n\x2022 Raise it if dark corners and night races are too hard to see.\nIn game: Page Up brighter, Page Down darker.",
+         0, -50, 50, 0, L""},
+        {L"Contrast", L"The difference between dark and bright.\n\x2022 Lower it if the picture looks harsh; raise it if it looks flat.\nIn game: F4 twice, then Page Up / Page Down.",
+         100, 50, 150, 0, L"%"},
+        {L"Gamma", L"The kind of screen the picture is made for.\n\x2022 2.40: the TVs the game was made for (the default).\n\x2022 2.20: a PC monitor. Brighter and paler in the shadows.\nIn game: F4 three times, then Page Up / Page Down.",
+         240, 180, 280, 2, L""},
+    };
+    for (int k = 0; k < 3; ++k) {
+      Ctl c{kPicture[k].label, kPicture[k].hint, Kind::Slider, {}, {"@picture"}, kPicture[k].def, kPicture[k].def};
+      c.min = kPicture[k].min;
+      c.max = kPicture[k].max;
+      c.decimals = kPicture[k].decimals;
+      c.unit = kPicture[k].unit;
+      g_picture[k] = int(g_c.size());
+      g_c.push_back(std::move(c));
+    }
+  }
   const int showfps = toggle(L"Show FPS counter", L"Draws the frame rate in the top right corner while playing.", "@fps", false);
   const int showpedals = toggle(L"Show pedal inputs",
                                 L"Draws how far the clutch, brake and throttle are pressed, in the bottom left corner while "
@@ -1262,6 +1287,8 @@ void BuildModel() {
   g_cards.push_back({L"RESOLUTION AND WINDOW", {outres, inres, wide, g_gfx[kGfxDynres], full}, 0, kTabGraphics});
   g_cards.push_back({L"ANTI-ALIASING", {g_aa, g_up, g_sharp, g_aniso}, 0, kTabGraphics});
   g_cards.push_back({L"HDR", {g_hdr, g_hdr_paper, g_hdr_peak}, 0, kTabGraphics});
+  g_cards.push_back({L"PICTURE", {g_picture[0], g_picture[1], g_picture[2]}, 0, kTabGraphics,
+                     L"For SDR. With HDR on, use HDR brightness.\nIn game: Page Up / Page Down change the brightness; F4 picks contrast or gamma."});
   g_cards.push_back({L"SCENE DETAIL", {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery],
                                       g_gfx[kGfxShadows], g_gfx[kGfxParticles]}, 0, kTabDetail});
   g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
@@ -1530,6 +1557,19 @@ void LoadSettings() {
   }
   if (g_hdr_peak >= 0)
     g_c[g_hdr_peak].sel = hdr_peak_saved >= 0 ? (std::clamp)(hdr_peak_saved, 400, 2000) : g_c[g_hdr_peak].def;
+  {
+    // The picture as last set here or with F4 in the game.
+    for (int p : g_picture) if (p >= 0) g_c[p].sel = g_c[p].def;
+    std::ifstream picture_ini(PictureIniPath().c_str());
+    std::string picture_line;
+    while (std::getline(picture_ini, picture_line))
+      for (int k = 0; k < 3; ++k)
+        if (g_picture[k] >= 0 && picture_line.rfind(kPictureKey[k], 0) == 0) {
+          Ctl& c = g_c[g_picture[k]];
+          c.sel = (std::clamp)(atoi(picture_line.substr(strlen(kPictureKey[k])).c_str()), c.min, c.max);
+        }
+    for (int p : g_picture) if (p >= 0) g_c[p].loaded = g_c[p].sel;
+  }
   if (g_aa >= 0 && aa_saved >= 1 && aa_saved <= 2) g_c[g_aa].sel = aa_saved;
   if (g_fgen >= 0 && fgen_saved >= 1 && fgen_saved <= 4) g_c[g_fgen].sel = fgen_saved;
   for (int k = 0; k < kGfxRows; ++k) {
@@ -1671,6 +1711,17 @@ bool SaveSettings() {
     if (g_hdr_paper >= 0 && g_c[g_hdr_paper].sel != g_c[g_hdr_paper].loaded) {
       if(!SaveIniValue(HdrIniPath(),"paper",std::to_string(g_c[g_hdr_paper].sel))) return false;
       g_c[g_hdr_paper].loaded = g_c[g_hdr_paper].sel;
+    }
+    // The picture, only when moved here (the game may have saved a newer one with F4 since this window read it).
+    bool picture_moved = false;
+    for (int p : g_picture) picture_moved |= p >= 0 && g_c[p].sel != g_c[p].loaded;
+    if (picture_moved) {
+      std::ofstream picture_ini(PictureIniPath().c_str(), std::ios::binary | std::ios::trunc);
+      for (int k = 0; k < 3; ++k)
+        if (g_picture[k] >= 0) {
+          picture_ini << kPictureKey[k] << g_c[g_picture[k]].sel << "\r\n";
+          g_c[g_picture[k]].loaded = g_c[g_picture[k]].sel;
+        }
     }
     if (g_fov >= 0 && (g_c[g_fov].sel != 100 || Exists(CameraIniPath()))) {
       if(!SaveIniValue(CameraIniPath(),"fov",std::to_string(g_c[g_fov].sel))) return false;
@@ -2150,7 +2201,13 @@ void Paint(HDC hdc, int w, int h) {
       if (c.kind == Kind::Slider) {
         // Label and value above a track with a knob.
         RowLabel(g, c, i, fLabel, RectF(row.X, row.Y + 2 * S, row.Width - 70 * S, 22 * S));
-        Text(g, std::to_wstring(c.sel) + c.unit, fSegBold, RectF(row.X + row.Width - 90 * S, row.Y + 2 * S, 90 * S, 22 * S),
+        std::wstring value = std::to_wstring(c.sel);
+        if (c.decimals > 0) {
+          wchar_t buf[32];
+          swprintf(buf, 32, L"%.*f", c.decimals, c.sel / std::pow(10.0, c.decimals));
+          value = buf;
+        }
+        Text(g, value + c.unit, fSegBold, RectF(row.X + row.Width - 90 * S, row.Y + 2 * S, 90 * S, 22 * S),
              hot ? kWhite : kText, StringAlignmentFar);
         const float t = c.max > c.min ? float((std::clamp)(c.sel, c.min, c.max) - c.min) / float(c.max - c.min) : 0.f;
         const RectF track(ct.X + 8 * S, ct.Y + ct.Height / 2 - 3 * S, ct.Width - 16 * S, 6 * S);
