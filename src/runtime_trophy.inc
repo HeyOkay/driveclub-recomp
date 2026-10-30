@@ -49,8 +49,8 @@ static void trophy_texts_load(void) {
 static void trophy_announce(int trophy) {
     trophy_texts_load();
     const TrophyText *t=&trophy_texts[trophy];
-    if (t->grade) bbgpu_overlay_trophy(t->grade-1,t->name,t->text);
-    else bbgpu_overlay_trophy(3,"Trophy unlocked","");
+    if (t->grade) bbgpu_overlay_trophy(trophy,t->grade-1,t->name,t->text);
+    else bbgpu_overlay_trophy(trophy,3,"Trophy unlocked","");
 }
 static TrophyContext trophy_contexts[8];
 
