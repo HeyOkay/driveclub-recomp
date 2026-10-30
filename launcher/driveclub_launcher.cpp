@@ -985,10 +985,10 @@ void BuildModel() {
                       L"\x2022 60 FPS: smooth; the game speed stays right if the frame rate dips.\n"
                       L"\x2022 60 FPS (fixed tick): the engine's own 60 Hz mode. Works with every feature, but the game slows down when the frame rate dips.\n"
                       L"\x2022 Unlocked (VRR): as fast as your PC allows, up to your display's refresh rate, with the speed kept right.\n"
-                      L"\x2022 No V-Sync: unlocked with no cap and no V-Sync, for displays without G-Sync or FreeSync. You may see tearing.\n"
+                      L"\x2022 Unlimited: no cap at all. The game runs as fast as your PC can, even above your display's refresh rate (a 144 FPS game on a 60 Hz screen). The picture can tear. Pick it only if Unlocked (VRR) is not enough.\n"
                       L"Note: above about 120 FPS the game's movement timing breaks: the car can run slower or behave wrongly. Cap it in your graphics driver if your PC goes past 120.\n"
                       L"Tip: 60 FPS suits most PCs. Unlocked (VRR) is for G-Sync or FreeSync displays: they show every frame as it comes, with no stutter.",
-                      {L"30 FPS", L"60 FPS", L"60 FPS (fixed tick)", L"Unlocked (VRR)", L"No V-Sync"},
+                      {L"30 FPS", L"60 FPS", L"60 FPS (fixed tick)", L"Unlocked (VRR)", L"Unlimited"},
                       {"", "60 FPS with deltatime", "60 FPS with fixed tickrate", "@unlocked", "@unlocked"}, 1));
   {
     const int top = DisplayHz() ? DisplayHz() - 3 : 117;
@@ -2749,7 +2749,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     // Unlocked: the deltatime patch keeps the game speed right at any frame rate. Frames go out in step with the
     // display (Fifo) and the rate stays 3 below its refresh, so a variable refresh display (G-Sync, FreeSync) follows
     // each frame; Mailbox showed them on a fixed refresh, some for one refresh and some for two (stutter).
-    // No V-Sync: unlocked with no cap (1000; 0 would tie frames to the 60 Hz vblank) and Immediate presents, for
+    // Unlimited: unlocked with no cap (1000; 0 would tie frames to the 60 Hz vblank) and Immediate presents, for
     // fixed refresh displays; past about 120 FPS the game's timing breaks (the Frame rate hint says so).
     const bool unlocked = g_fps >= 0 && g_c[g_fps].sel == 3, free = g_fps >= 0 && g_c[g_fps].sel == 4;
     const std::wstring cap = free ? L"1000" : g_fps_cap >= 0 ? std::to_wstring(g_c[g_fps_cap].sel) : DisplayHz() ? std::to_wstring(DisplayHz() - 3) : L"1000";
