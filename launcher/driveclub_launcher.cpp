@@ -982,12 +982,10 @@ void BuildModel() {
   const int fps = (g_fps = int(g_c.size()), seg(L"Frame rate",
                       L"How fast the game runs.\n"
                       L"\x2022 30 FPS: as on PS4.\n"
-                      L"\x2022 60 FPS: smooth; the game speed stays right if the frame rate dips.\n"
-                      L"\x2022 60 FPS (fixed tick): the engine's own 60 Hz mode. Works with every feature, but the game slows down when the frame rate dips.\n"
-                      L"\x2022 Unlocked (VRR): for G-Sync or FreeSync displays (VRR means variable refresh rate). As fast as your PC allows, up to just under your display's refresh rate, with the speed kept right.\n"
-                      L"\x2022 Unlimited: no cap at all. The game runs as fast as your PC can, even above your display's refresh rate (a 144 FPS game on a 60 Hz screen). The picture can tear. Pick it only if Unlocked (VRR) is not enough.\n"
-                      L"Note: above about 120 FPS the game's movement timing breaks: the car can run slower or behave wrongly. Cap it in your graphics driver if your PC goes past 120.\n"
-                      L"Tip: 60 FPS suits most PCs. Unlocked (VRR) is for G-Sync or FreeSync displays: they show every frame as it comes, with no stutter.",
+                      L"\x2022 60 FPS: smooth, the speed stays right.\n"
+                      L"\x2022 60 FPS (fixed tick): the engine's own 60 Hz mode.\n"
+                      L"\x2022 Unlocked (VRR): for G-Sync or FreeSync, up to your refresh rate.\n"
+                      L"\x2022 Unlimited: no cap, the picture can tear. Past about 120 FPS the game's timing breaks.",
                       {L"30 FPS", L"60 FPS", L"60 FPS (fixed tick)", L"Unlocked (VRR)", L"Unlimited"},
                       {"", "60 FPS with deltatime", "60 FPS with fixed tickrate", "@unlocked", "@unlocked"}, 1));
   {
