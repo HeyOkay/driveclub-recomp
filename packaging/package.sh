@@ -9,6 +9,8 @@ VERSION="${1:-dev}"
 NAME="driveclub-recomp-$VERSION-win64"
 OUT="release/$NAME"
 
+# The player release is built with link-time optimization and the recorded profile (about 10% more FPS).
+if [ -f pgo/default.profdata ]; then export BB_PGO=use BB_LTO=ON; fi
 bash build.sh
 mkdir -p out/launcher
 windres -I launcher launcher/launcher.rc -O coff -o out/launcher/launcher.res.o
