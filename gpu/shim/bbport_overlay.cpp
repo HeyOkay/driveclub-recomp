@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "bbport_frame_info.h"
+#include <deque>
 #include <string>
 #include <vector>
 #include "bbport_overlay.h"
@@ -86,6 +87,12 @@ std::string text_entry_prompt, text_entry_text;
 std::string note_text;
 std::chrono::steady_clock::time_point note_until{};
 std::atomic<bool> note_active{false};
+// Trophy banners (Trophy), guarded by imgui_mutex: shown one after another, a few seconds each.
+struct TrophyToast { int grade; std::string title, description; };
+std::deque<TrophyToast> trophy_queue;
+std::chrono::steady_clock::time_point trophy_shown{};
+bool trophy_showing = false;
+std::atomic<bool> trophy_active{false};
 float base_scale = 1.0f;
 ImFont *exit_body=nullptr,*exit_heading=nullptr;
 std::atomic<bool> mouse_capture_requested{false};
@@ -296,6 +303,44 @@ void PollHotkeys() {
     }
     f8_down = f8;
 #endif
+}
+
+void TrophyBanner(const TrophyToast& toast, float age) {
+    // The PS4 banner: a dark rounded plate with the cup on the left, the line "Trophy earned" over the name.
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const float s = base_scale;
+    const float slide = age < 0.35f ? age / 0.35f : (age > 4.65f ? std::max(0.0f, (5.0f - age) / 0.35f) : 1.0f);
+    const float w = 520.0f * s, h = 96.0f * s;
+    const ImVec2 pos(viewport->WorkPos.x + 40.0f * s - (1.0f - slide) * (w + 40.0f * s), viewport->WorkPos.y + 40.0f * s);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::SetNextWindowBgAlpha(0.88f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14.0f * s);
+    ImGui::Begin("##trophy", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoSavedSettings);
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    static const ImU32 cup[4] = {IM_COL32(190, 220, 245, 255), IM_COL32(240, 190, 60, 255), IM_COL32(200, 205, 215, 255),
+                                 IM_COL32(205, 130, 70, 255)};
+    const ImU32 colour = cup[toast.grade >= 0 && toast.grade < 4 ? toast.grade : 3];
+    const float cx = pos.x + 52.0f * s, top = pos.y + 22.0f * s;
+    draw->AddRectFilled(ImVec2(cx - 22.0f * s, top), ImVec2(cx + 22.0f * s, top + 30.0f * s), colour, 6.0f * s, ImDrawFlags_RoundCornersBottom);
+    draw->AddRect(ImVec2(cx - 30.0f * s, top + 4.0f * s), ImVec2(cx - 18.0f * s, top + 20.0f * s), colour, 5.0f * s, 0, 3.0f * s);
+    draw->AddRect(ImVec2(cx + 18.0f * s, top + 4.0f * s), ImVec2(cx + 30.0f * s, top + 20.0f * s), colour, 5.0f * s, 0, 3.0f * s);
+    draw->AddRectFilled(ImVec2(cx - 4.0f * s, top + 30.0f * s), ImVec2(cx + 4.0f * s, top + 44.0f * s), colour);
+    draw->AddRectFilled(ImVec2(cx - 16.0f * s, top + 44.0f * s), ImVec2(cx + 16.0f * s, top + 50.0f * s), colour, 2.0f * s);
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + 100.0f * s, pos.y + 14.0f * s));
+    ImGui::TextDisabled("Trophy earned");
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + 100.0f * s, pos.y + 34.0f * s));
+    ImGui::SetWindowFontScale(1.25f);
+    ImGui::TextUnformatted(toast.title.c_str());
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + 100.0f * s, pos.y + 62.0f * s));
+    ImGui::PushTextWrapPos(pos.x + w - 16.0f * s);
+    ImGui::TextDisabled("%s", toast.description.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::End();
+    ImGui::PopStyleVar();
 }
 
 void NoteBox() {
@@ -697,8 +742,14 @@ bool HandleEvent(const SDL_Event& event) {
 }
 
 bool Visible() {
-    return initialized && (runtime_exit_captures() || menu_open || text_entry_active || note_active || BbSettings::Get().show_fps ||
+    return initialized && (runtime_exit_captures() || menu_open || text_entry_active || note_active || trophy_active || BbSettings::Get().show_fps ||
                            BbSettings::Get().show_pedals);
+}
+
+void Trophy(int grade, const std::string& title, const std::string& description) {
+    std::scoped_lock lock{imgui_mutex};
+    trophy_queue.push_back({grade, title, description});
+    trophy_active = true;
 }
 
 void Note(const std::string& text) {
@@ -776,6 +827,20 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
             NoteBox();
         } else {
             note_active = false;
+        }
+    }
+    if (trophy_showing || !trophy_queue.empty()) {
+        if (!trophy_showing) {
+            trophy_showing = true;
+            trophy_shown = now;
+        }
+        const float age = std::chrono::duration<float>(now - trophy_shown).count();
+        if (age < 5.0f) {
+            TrophyBanner(trophy_queue.front(), age);
+        } else {
+            trophy_queue.pop_front();
+            trophy_showing = false;
+            trophy_active = !trophy_queue.empty();
         }
     }
     ExitConfirmation(scale);

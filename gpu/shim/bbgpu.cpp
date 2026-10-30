@@ -489,6 +489,9 @@ extern "C" int bbgpu_overlay_captures_input(void) {
 extern "C" int bbgpu_exit_dialog_available(void) { return BbOverlay::ExitDialogAvailable(); }
 extern "C" void bbgpu_mouse_stick_capture(int capture) { BbOverlay::RequestMouseCapture(capture!=0); }
 
+extern "C" void bbgpu_overlay_trophy(int grade, const char* title_utf8, const char* description_utf8) {
+    BbOverlay::Trophy(grade, title_utf8 ? title_utf8 : "", description_utf8 ? description_utf8 : "");
+}
 extern "C" void bbgpu_overlay_note(const char* text_utf8) {
     BbOverlay::Note(text_utf8 ? text_utf8 : "");
 }

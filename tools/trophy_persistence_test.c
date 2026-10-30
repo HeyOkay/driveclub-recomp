@@ -13,6 +13,7 @@
 static const char *test_root, *test_title="CUSA00003";
 const char *runtime_file_user_dir(void) { return test_root; }
 const char *runtime_savedata_title(void) { return test_title; }
+void bbgpu_overlay_trophy(int grade,const char *title,const char *text) { (void)grade;(void)title;(void)text; }
 static int new_id(void) { static int id; return ++id; }
 #include "../src/runtime_trophy.inc"
 

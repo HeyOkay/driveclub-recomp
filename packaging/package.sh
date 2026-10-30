@@ -26,6 +26,7 @@ cp "tools/FFB Tuner.ps1" "tools/FFB Tuner.bat" "$OUT/"   # the force feedback sl
 cp out/DriveClubGame.exe "$OUT/runtime/"
 strip --strip-all "$OUT/runtime/DriveClubGame.exe" || true
 cp patches/DriveClub.xml "$OUT/runtime/patches/"
+cp packaging/release/trophies.tsv "$OUT/runtime/"   # trophy banner texts: names, descriptions, grades
 cp packaging/release/README.txt packaging/release/THIRD_PARTY_NOTICES.txt LICENSE "$OUT/"
 echo "$VERSION" > "$OUT/version.txt"
 

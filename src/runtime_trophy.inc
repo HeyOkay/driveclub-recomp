@@ -15,6 +15,43 @@ typedef struct { int32_t id; char path[1024]; uint64_t ticks[128]; } TrophyConte
 typedef struct { uint64_t size; int32_t id; uint8_t unlocked, reserved[3]; uint64_t timestamp; } TrophyData;
 _Static_assert(sizeof(TrophyData)==24,"OrbisNpTrophyData layout");
 static pthread_mutex_t trophy_lock=PTHREAD_MUTEX_INITIALIZER;
+
+/* The banner: names, grades and descriptions come from trophies.tsv next to the program (id, grade 0 platinum to
+ * 3 bronze, name, description, tab separated), so no console key is needed. */
+typedef struct { char grade, name[96], text[256]; } TrophyText;
+static TrophyText trophy_texts[128];
+static int trophy_texts_loaded;
+static void trophy_texts_load(void) {
+    if (trophy_texts_loaded) return;
+    trophy_texts_loaded=1;
+    char path[1100]="trophies.tsv";
+#ifdef _WIN32
+    DWORD n=GetModuleFileNameA(NULL,path,sizeof(path)-16);
+    if (n && n<sizeof(path)-16) { char *slash=strrchr(path,'\\'); if (slash) strcpy(slash+1,"trophies.tsv"); }
+#endif
+    FILE *f=fopen(path,"rb");
+    if (!f) return;
+    char line[512];
+    while (fgets(line,sizeof(line),f)) {
+        char *field[4]={line,NULL,NULL,NULL};
+        int count=1;
+        for (char *p=line;*p && count<4;++p) if (*p=='\t') { *p=0; field[count++]=p+1; }
+        if (count<4) continue;
+        int id=atoi(field[0]);
+        if (id<0 || id>=128) continue;
+        field[3][strcspn(field[3],"\r\n")]=0;
+        trophy_texts[id].grade=(char)(atoi(field[1])+1);
+        snprintf(trophy_texts[id].name,sizeof(trophy_texts[id].name),"%s",field[2]);
+        snprintf(trophy_texts[id].text,sizeof(trophy_texts[id].text),"%s",field[3]);
+    }
+    fclose(f);
+}
+static void trophy_announce(int trophy) {
+    trophy_texts_load();
+    const TrophyText *t=&trophy_texts[trophy];
+    if (t->grade) bbgpu_overlay_trophy(t->grade-1,t->name,t->text);
+    else bbgpu_overlay_trophy(3,"Trophy unlocked","");
+}
 static TrophyContext trophy_contexts[8];
 
 static TrophyContext *trophy_find(int32_t id) {
@@ -87,7 +124,22 @@ static ABI int32_t trophy_destroy_context(int32_t id) {
 }
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
 static ABI int32_t trophy_destroy_handle(int32_t handle) { (void)handle; return 0; }
-static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
+static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) {
+    (void)ctx; (void)handle; (void)options;
+    /* BB_TROPHY_TEST=0,126 shows those trophies' banners once at start, to check the look. */
+    static int shown;
+    const char *test=getenv("BB_TROPHY_TEST");
+    if (test && !shown) {
+        shown=1;
+        for (const char *p=test;*p;) {
+            char *end; long id=strtol(p,&end,10);
+            if (end==p) break;
+            if (id>=0 && id<128) trophy_announce((int)id);
+            p=*end==',' ? end+1 : end;
+        }
+    }
+    return 0;
+}
 static ABI int32_t trophy_unlock(int32_t id,int32_t handle,int32_t trophy,int32_t *platinum) {
     (void)handle;
     if (platinum) *platinum=-1;
@@ -100,7 +152,7 @@ static ABI int32_t trophy_unlock(int32_t id,int32_t handle,int32_t trophy,int32_
         ctx->ticks[trophy]=UINT64_C(0xdcbffeff2bc000)+(uint64_t)time(NULL)*1000000;
         result=trophy_save(ctx);
         if (result) ctx->ticks[trophy]=0;
-        else printf("Runtime: trophy %d unlocked (saved locally)\n",trophy);
+        else { printf("Runtime: trophy %d unlocked (saved locally)\n",trophy); trophy_announce(trophy); }
     }
     pthread_mutex_unlock(&trophy_lock);
     return result;
