@@ -5,7 +5,6 @@ This branch lets the game play online against a community server: sessions and p
 driver and club statistics, fame and levels, leaderboards, challenges and the friends list with live presence.
 It is a work in progress.
 
-Deutsche Kurzanleitung: [ANLEITUNG.de.md](ANLEITUNG.de.md).
 
 ## What works
 
@@ -56,12 +55,12 @@ join (Tailscale is the quickest: direct connections, free for 3 users).
 
 1. Unpack the release package (or build the runtime, the launcher and the server, see below). Only the host needs
    the `server` folder.
-2. Every player runs `Firewall-Freigabe.bat` once. It allows the game (and on the host the server, TCP 8080) from
+2. Every player runs `Allow-Firewall.bat` once. It allows the game (and on the host the server, TCP 8080) from
    the home network and the VPN address ranges only, not from the internet.
 3. Every player starts `DriveClub.exe` once to pick the game folders (the 1.28 update with `eboot.bin`, and the base
    game with `game000.dat`), then closes it.
-4. The host runs `Online-Spielen.bat` with `host=self`. It starts the server and shows the host's IP addresses.
-5. The others run `Online-Spielen.bat` with the host's IP (the VPN address, e.g. `100.x.x.x` for Tailscale).
+4. The host runs `Play-Online.bat` with `host=self`. It starts the server and shows the host's IP addresses.
+5. The others run `Play-Online.bat` with the host's IP (the VPN address, e.g. `100.x.x.x` for Tailscale).
 6. Join the host's session from the friends list, or let the host invite you into a private lobby, and race.
 
 `online.ini` keeps the name and the host; delete it to change them.
@@ -84,7 +83,7 @@ tick)" the game runs slower whenever it misses 60 FPS, and times drift apart: do
    is derived from the name. `BB_COOP_SERVER=<host:port>` is the community server for the runtime's own requests
    (default `127.0.0.1:8080`).
 3. `data/user/host_overrides.json` sends the game's old hostnames to the community server over plain http
-   (see `host_overrides.json` here; `Online-Spielen.ps1` writes it).
+   (see `host_overrides.json` here; `Play-Online.ps1` writes it).
 4. The game reads its server settings from a "TSS" file. `mods/override-0.tss` replaces it (see `override-0.tss`
    here). The `OTG_*` keys switch on the leaderboard service, `fa_egsConnection` the server connection, and
    `egs_timeout 3600` stops the game from dropping its session every 30 seconds. Slots 1 to 6 are files with the
@@ -137,7 +136,7 @@ ninja -C out
 Run `driveclubsrv.exe` from a folder that holds `server-config.json` renamed to `config.json`, with the Qt DLLs and
 `sqldrivers/qsqlite.dll` next to the exe (or run `windeployqt`). With `shadnet.url` empty and `allow_unverified` true
 it accepts any login. It listens on all interfaces (port 8080): anyone who reaches it can sign in under any name, so
-keep it to your home network and VPN (`Firewall-Freigabe.bat` does that) and don't forward the port on your router.
+keep it to your home network and VPN (`Allow-Firewall.bat` does that) and don't forward the port on your router.
 
 ## Building the runtime and the launcher
 

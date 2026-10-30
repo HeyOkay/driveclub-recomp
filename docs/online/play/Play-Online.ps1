@@ -1,5 +1,5 @@
 # DriveClub online: starts the game against a community server, as host or as guest.
-# Put this folder's files next to DriveClub.exe and double-click Online-Spielen.bat.
+# Put this folder's files next to DriveClub.exe and double-click Play-Online.bat.
 #
 # online.ini (asked for on the first start, delete it to change):
 #   name=<your player name>
@@ -14,10 +14,9 @@ if (Test-Path $cfg) {
     Get-Content $cfg | ForEach-Object { if ($_ -match '^(\w+)=(.*)$') { $settings[$Matches[1]] = $Matches[2].Trim() } }
 }
 while ($settings.name -notmatch '^[A-Za-z0-9_-]{3,16}$') {
-    $settings.name = (Read-Host 'Spielername / player name (3-16: letters, digits, - _)').Trim()
+    $settings.name = (Read-Host 'Player name (3-16: letters, digits, - or _)').Trim()
 }
 while ($settings.host -ne 'self' -and $settings.host -notmatch '^\d{1,3}(\.\d{1,3}){3}$') {
-    Write-Host 'Hostest du selbst? Dann "self". Sonst die IP des Hosts (z. B. 100.67.1.2).'
     Write-Host 'Are you hosting? Then "self". Otherwise the host''s IP.'
     $settings.host = (Read-Host 'host').Trim()
 }
@@ -29,7 +28,7 @@ if ($settings.host -eq 'self') {
     $exe = Join-Path $settings.server 'driveclubsrv.exe'
     if (-not (Get-Process driveclubsrv -ErrorAction SilentlyContinue)) {
         if (-not (Test-Path $exe)) {
-            Write-Host "Server nicht gefunden / server not found: $exe (server= in online.ini)" -ForegroundColor Yellow
+            Write-Host "Server not found: $exe (server= in online.ini)" -ForegroundColor Yellow
             Read-Host 'Enter'
             exit 1
         }
@@ -38,24 +37,22 @@ if ($settings.host -eq 'self') {
     }
     $server = '127.0.0.1:8080'
     Write-Host ''
-    Write-Host 'Server laeuft / server is running. Deine IP fuer Mitspieler / your IP for other players:' -ForegroundColor Green
+    Write-Host 'Server is running. Your IP for other players:' -ForegroundColor Green
     Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
         ForEach-Object {
             $kind = switch -Regex ($_.IPAddress) { '^100\.' { 'Tailscale' } '^25\.' { 'Hamachi' } '^26\.' { 'Radmin' } default { $_.InterfaceAlias } }
             Write-Host "  $($_.IPAddress)  ($kind)" -ForegroundColor Green
         }
     Write-Host ''
-    Write-Host 'Das Spiel liest die Freundesliste nur beim Start: erst Mitspieler ins Spiel lassen.'
     Write-Host 'The game reads its friend list only when it starts: let the others get in first.'
-    Read-Host 'Enter = Spiel starten / start the game'
+    Read-Host 'Enter = start the game'
 } else {
     $server = "$($settings.host):8080"
     try {
         $null = Invoke-WebRequest "http://$server/dccoop/pending/$($settings.name)" -UseBasicParsing -TimeoutSec 5
     } catch {
-        Write-Host "Server $server nicht erreichbar / not reachable." -ForegroundColor Yellow
-        Write-Host 'VPN an? Host hat Online-Spielen gestartet? Firewall-Freigabe gemacht? (IP aendern: online.ini loeschen)'
-        Write-Host 'VPN on? Host started Online-Spielen? Firewall rule added? (change IP: delete online.ini)'
+        Write-Host "Server $server not reachable." -ForegroundColor Yellow
+        Write-Host 'VPN on? Host started Play-Online? Firewall rule added? (change IP: delete online.ini)'
         Read-Host 'Enter'
         exit 1
     }
