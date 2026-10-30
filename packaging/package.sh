@@ -24,10 +24,13 @@ mkdir -p "$OUT/runtime/patches"
 cp out/launcher/DriveClub.exe out/WheelSetup.exe out/FfbTest.exe "$OUT/"
 # The WPF launcher: its bootstrapper replaces DriveClub.exe; the Win32 launcher stays as DriveClub.Native.exe for
 # Wine and for PCs without the .NET 8 desktop runtime. Needs the .NET 8 SDK (dotnet) on PATH.
-rm -rf out/wpf
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w launcher/build-wpf.ps1)"   -OutputDirectory "$(cygpath -w "$PWD/out/wpf")" -Toolchain "$(cygpath -w "$(dirname "$(command -v clang++)")")"
-[ -f out/wpf/DriveClub.Launcher.exe ] && [ -f out/wpf/DriveClub.Native.exe ] || { echo "The WPF launcher was not built." >&2; exit 1; }
-for f in out/wpf/*; do
+WPF_OUT="${WPF_DIR:-out/wpf}"   # a folder built earlier with launcher/build-wpf.ps1, or built here
+if [ -z "${WPF_DIR:-}" ]; then
+  rm -rf out/wpf
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w launcher/build-wpf.ps1)"   -OutputDirectory "$(cygpath -w "$PWD/out/wpf")" -Toolchain "$(cygpath -w "$(dirname "$(command -v clang++)")")"
+fi
+[ -f "$WPF_OUT/DriveClub.Launcher.exe" ] && [ -f "$WPF_OUT/DriveClub.Native.exe" ] || { echo "The WPF launcher was not built." >&2; exit 1; }
+for f in "$WPF_OUT"/*; do
   case "$(basename "$f")" in native-build|*.pdb) ;; *) cp -r "$f" "$OUT/" ;; esac
 done
 cp "tools/FFB Tuner.ps1" "tools/FFB Tuner.bat" "$OUT/"   # the force feedback sliders, next to DriveClub.exe
