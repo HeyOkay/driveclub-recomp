@@ -985,7 +985,7 @@ void BuildModel() {
                       L"\x2022 60 FPS: smooth, the speed stays right.\n"
                       L"\x2022 60 FPS (fixed tick): the engine's own 60 Hz mode.\n"
                       L"\x2022 Unlocked (VRR): for G-Sync or FreeSync, up to your refresh rate.\n"
-                      L"\x2022 Unlimited: no cap, the picture can tear. Past about 120 FPS the game's timing breaks.",
+                      L"\x2022 Unlimited: no cap, the picture can tear. Above 120 FPS the game can have issues.",
                       {L"30 FPS", L"60 FPS", L"60 FPS (fixed tick)", L"Unlocked (VRR)", L"Unlimited"},
                       {"", "60 FPS with deltatime", "60 FPS with fixed tickrate", "@unlocked", "@unlocked"}, 1));
   {
