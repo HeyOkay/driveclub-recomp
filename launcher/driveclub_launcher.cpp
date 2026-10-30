@@ -1041,8 +1041,8 @@ void BuildModel() {
   const int blur = g_blur_patch = toggle(L"Disable motion blur and depth of field",
                           L"They share one shader, so both are turned off together. Cannot be changed while FSR or DLSS anti-aliasing is on: they need the game's blur pass.",
                           "Disable motion blur and depth of field", false);
-  const int reset = toggle(L"No reset-to-track timer", L"Disables the reset to track timer.", "Reset Disable", false);
-  const int barrier = toggle(L"Disable track barriers", L"Removes the invisible barriers at the track edges.",
+  const int reset = toggle(L"No reset-to-track timer", L"Disables the reset to track timer. Players report stutter and cars teleporting with it on; turn it off if races feel wrong.", "Reset Disable", false);
+  const int barrier = toggle(L"Disable track barriers", L"Removes the invisible barriers at the track edges. Players report stutter and cars teleporting with it on; turn it off if races feel wrong.",
                              "Barrier Disable", false);
   const int pcol = toggle(L"Photo mode: free camera through cars",
                           L"Disables car collision with the free camera, so you can look inside any car.",
@@ -1104,7 +1104,7 @@ void BuildModel() {
   const int overlays = toggle(L"Let overlay programs into the game",
                               L"Steam, Epic, Discord, OBS and tuning tools add themselves to the game's graphics. "
                               L"A part of the crashes players report comes from those additions, so the launcher keeps them "
-                              L"out. Turn this on if you want the in-game overlay while playing.", "@overlays", false);
+                              L"out. Turn this on if you want the in-game overlay while playing. Players report random collision penalties and crashes with it on.", "@overlays", false);
   const int twothread = toggle(L"Two-thread rendering",
                                L"Records each frame's draw commands on a second thread, so the thread that runs the game's "
                                L"graphics commands waits less. Faster on most PCs, but it lost the graphics device in races on AMD cards and ran slower there, so it starts off on AMD cards and under Wine or Proton. Turn it off if you see flicker, broken graphics or a crash.",
