@@ -34,11 +34,10 @@ if (BB_PGO STREQUAL "generate")
     add_link_options(-fprofile-generate=${BB_PGO_DIR})
     add_compile_definitions(BB_PGO_GENERATE)
 elseif (BB_PGO STREQUAL "use")
-    # Partial training keeps unprofiled code optimized normally; counters from concurrent
-    # threads can be slightly inconsistent (correction). Functions changed since the profile
+    # Clang: code without recorded counts is optimized normally, and functions changed since the profile
     # (or built differently for it, bbgpu_init) are compiled without it.
-    add_compile_options(-fprofile-use=${BB_PGO_DIR} -fprofile-partial-training
-                        -fprofile-correction -Wno-missing-profile -Wno-coverage-mismatch)
+    add_compile_options(-fprofile-use=${BB_PGO_DIR} -Wno-profile-instr-missing
+                        -Wno-profile-instr-out-of-date -Wno-profile-instr-unprofiled)
 endif()
 
 find_package(Vulkan REQUIRED)
