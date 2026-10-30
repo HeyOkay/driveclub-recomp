@@ -160,6 +160,12 @@ int RunWpfBridge(int argc,wchar_t** argv) {
         OpenWheelSetup();
         if(g_status_color.GetValue()==kBad.GetValue())throw std::runtime_error(Narrow(g_status));
       }
+      else if(command==L"--ui-savebackup" || command==L"--ui-saverestore"){
+        std::wstring message;
+        const bool ok=RunSaveButton(command==L"--ui-saverestore",message);
+        g_status=message;g_status_color=ok?kOk:kBad;
+        if(!ok)throw std::runtime_error(Narrow(message));
+      }
       else if(command==L"--ui-check-update" || command==L"--ui-install-update") {
         const auto current=UiInstalledVersion();
         const bool enabled=std::any_of(g_c.begin(),g_c.end(),[](const Ctl& c){return c.patches[0]=="@updatecheck" && c.sel!=0;});

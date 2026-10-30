@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <sstream>
@@ -382,6 +383,8 @@ int aniso_saved = 0;   // "Anisotropic filtering" choice, from launcher.ini
 std::wstring g_name = L"Player";  // in-game player name, from "name=" in launcher.ini
 std::wstring g_online_host;       // address of the host to join, from "online_host=" in launcher.ini
 int g_online_row = -1, g_online_host_row = -1, g_online_ip_row = -1;  // "Online play" (Off, Host, Join) and "Host address" rows
+int g_profile_row = -1, g_save_backup_row = -1, g_save_restore_row = -1;  // "Save profile" and its two buttons
+int profile_saved = 0;  // "Save profile" choice, from "profile=" in launcher.ini
 int online_saved = 0;             // "Online play" choice, from "online=" in launcher.ini
 int g_inres = -1, g_wide = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_aniso = -1, g_fps = -1, g_fgen = -1, g_aa = -1, g_up = -1, g_lang = -1;
 // Graphics detail rows (graphics.cpp): the control of each, and its choice from launcher.ini (-1 = not saved yet).
@@ -1158,6 +1161,19 @@ void BuildModel() {
   const int unlock = toggle(L"Unlock DLC content",
                             L"Unlocks the DLC content: add-on cars, bikes, tours and livery decals. Cars you earn by playing still unlock through normal progression. Built from your own game files; the game folders are not modified.",
                             "@unlock", false);
+  const int unlock_all = toggle(L"Unlock every car and bike",
+                                L"Every car and bike is free from the start, with no driver or club level needed. It includes the add-on content, so Unlock DLC content is not needed with it. Cars you earn by winning an event stay as the game has them. Off by default.",
+                                "@unlockall", false);
+  g_profile_row = seg(L"Save profile",
+                      L"Four separate careers on one install, for different players. Picking another profile swaps your saves in when you press Play or Save. "
+                      L"The saves of the others are kept.",
+                      {L"Profile 1", L"Profile 2", L"Profile 3", L"Profile 4"}, {"@profile", "@profile", "@profile", "@profile"}, 0);
+  g_save_backup_row = int(g_c.size());
+  g_c.push_back(Ctl{L"Back up saves", L"Copies this profile's saves to a dated backup. The launcher also makes one at every start and keeps the last ten.",
+                    Kind::Button, {L"Back up now"}, {"@savebackup"}, 0, 0});
+  g_save_restore_row = int(g_c.size());
+  g_c.push_back(Ctl{L"Restore saves", L"Puts back this profile's newest backup. The current saves are backed up first.",
+                    Kind::Button, {L"Restore the latest backup"}, {"@saverestore"}, 0, 0});
   // Graphics detail the PS4 version keeps low and the game's camera effects, from the game's own quality file
   // (graphics.cpp).
   g_gfx[kGfxCar] = toggle(L"Your car: full detail",
@@ -1319,7 +1335,8 @@ void BuildModel() {
   g_cards.push_back({L"PLAYER", {pname, g_lang}, 0, kTabGameplay});
   g_cards.push_back({L"ONLINE", {g_online_row, g_online_ip_row, g_online_host_row}, 0, kTabGameplay,
                      L"Private multiplayer with friends. Everyone needs the same version of the game."});
-  g_cards.push_back({L"CONTENT", {unlock}, 0, kTabGameplay});
+  g_cards.push_back({L"CONTENT", {unlock, unlock_all}, 0, kTabGameplay});
+  g_cards.push_back({L"SAVES", {g_profile_row, g_save_backup_row, g_save_restore_row}, 0, kTabGameplay});
   g_cards.push_back({L"STARTUP AND OVERLAYS", {showfps, showpedals, overlays, autoplay, updatecheck}, 0, kTabGameplay});
   g_cards.push_back({L"VIEW AND KEYS", {g_fov, lock_horizon, g_camera_shake}, 0, kTabDriving,
                      L"F2: pedal inputs. F5 / F6: field of view. F7: mouse look. F9 / F10: anti-aliasing. F12: performance overlay. Page Up / Page Down: HDR brightness."});
@@ -1393,6 +1410,7 @@ std::wstring BenchName(const BenchChoice* list, int count, const std::string& id
   return i >= 0 ? std::wstring(list[i].name) : Widen(id);
 }
 
+bool unlock_all_cars = false;  // "Unlock every car and bike" (unlock_all= in launcher.ini)
 bool fps_counter = false, pedal_display = false, fast_render = false, full_screen = true, unlock_dlc = false;  // the settings that are not patches
 
 // Output / render choices per preset: indices into the "Output resolution" and "Render resolution" rows,
@@ -1487,6 +1505,8 @@ void LoadSettings() {
       if (line.rfind(kGfxKey[k], 0) == 0) gfx_saved[k] = atoi(line.substr(strlen(kGfxKey[k])).c_str());
     }
     if (line.rfind("motion_blur=", 0) == 0) motion_blur_saved = line.substr(12) == "fast" ? 1 : 0;
+    if (line.rfind("unlock_all=", 0) == 0) unlock_all_cars = line.substr(11) == "1";
+    if (line.rfind("profile=", 0) == 0) profile_saved = atoi(line.substr(8).c_str());
     if (line.rfind("dlc_unlock=", 0) == 0) unlock_dlc = line.substr(11) == "1";  // the "unlock=" of earlier versions is not read: off for everyone
     if (line.rfind("bench_track=", 0) == 0) g_bench_track = FindBench(kBenchTracks, kBenchTrackCount, line.substr(12), 0);
     if (line.rfind("bench_car=", 0) == 0) g_bench_car = FindBench(kBenchCars, kBenchCarCount, line.substr(10), kBenchDefaultCar);
@@ -1505,6 +1525,7 @@ void LoadSettings() {
   ShowBenchChoices();
   for (auto& c : g_c) if (c.patches[0] == "@name") c.items[0] = g_name;
   if (g_online_row >= 0 && online_saved >= 0 && online_saved < 3) g_c[g_online_row].sel = online_saved;
+  if (g_profile_row >= 0 && profile_saved >= 0 && profile_saved < 4) g_c[g_profile_row].sel = profile_saved;
   if (g_online_host_row >= 0) g_c[g_online_host_row].items[0] = g_online_host.empty() ? L"(not set)" : g_online_host;
   CheckFolders();
   const auto lines = ReadLines(SelectionPath());
@@ -1557,6 +1578,10 @@ void LoadSettings() {
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") {
       c.sel = unlock_dlc ? 1 : 0;
+      continue;
+    }
+    if (c.kind == Kind::Toggle && c.patches[0] == "@unlockall") {
+      c.sel = unlock_all_cars ? 1 : 0;
       continue;
     }
     if (!has_selection || IsBenchRow(c) || IsWheelRow(c) || IsDriveRow(c)) continue;  // defaults; the benchmark and driving rows are in launcher.ini, the wheel's in default.ini
@@ -1716,7 +1741,7 @@ bool SaveSettings() {
   const auto old_patches=ReadLines(SelectionPath());
   {
     std::ostringstream ini;
-    bool fps_on = false, pedals_on = false, fast_on = fast_render, full_on = true, unlock_on = false;
+    bool fps_on = false, pedals_on = false, fast_on = fast_render, full_on = true, unlock_on = false, unlock_all_on = false;
     for (const auto& c : g_c) {
       if (c.kind == Kind::Segmented && c.patches[0] == "@lock_horizon") g_lock_horizon = c.sel;
       if (c.kind == Kind::Toggle && c.patches[0] == "@fps") fps_on = c.sel != 0;
@@ -1724,13 +1749,14 @@ bool SaveSettings() {
       if (c.kind == Kind::Toggle && c.patches[0] == "@fast") fast_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@full") full_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") unlock_on = c.sel != 0;
+      if (c.kind == Kind::Toggle && c.patches[0] == "@unlockall") unlock_all_on = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@overlays") g_allow_overlays = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@twothread") g_two_thread = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@autoplay") g_auto_play = c.sel != 0;
       if (c.kind == Kind::Toggle && c.patches[0] == "@updatecheck") g_check_updates = c.sel != 0;
     }
     ini << "update=" << Narrow(g_folder[0].path) << "\r\nbase=" << Narrow(g_folder[1].path) << "\r\nfps=" << (fps_on ? 1 : 0)
-        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel >= 3) ? g_c[g_fps].sel - 2 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) << "\r\nonline=" << (g_online_row >= 0 ? g_c[g_online_row].sel : 0) << "\r\nonline_host=" << Narrow(g_online_host) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
+        << "\r\nfast=" << (fast_on ? 1 : 0) << "\r\nunlocked=" << ((g_fps >= 0 && g_c[g_fps].sel >= 3) ? g_c[g_fps].sel - 2 : 0) << "\r\nskip_gpu_check=" << (g_skip_gpu_check ? 1 : 0) << "\r\nmirror=" << (g_mirror >= 0 ? g_c[g_mirror].sel : 0) << "\r\nlanguage=" << g_lang_id << "\r\naniso=" << (g_aniso >= 0 ? g_c[g_aniso].sel : 0) << "\r\nup=" << (g_up >= 0 ? g_c[g_up].sel : 0) << "\r\nsharpness=" << (g_sharp >= 0 ? g_c[g_sharp].sel : 80) << "\r\nfps_cap=" << (g_fps_cap >= 0 && g_c[g_fps_cap].sel < g_c[g_fps_cap].max ? g_c[g_fps_cap].sel : 0) <<"\r\nhdr=" << (g_hdr >= 0 ? g_c[g_hdr].sel : 0) << "\r\nhdr_paper=" << (g_hdr_paper >= 0 ? g_c[g_hdr_paper].sel : 350) << "\r\nhdr_peak=" << (g_hdr_peak >= 0 ? g_c[g_hdr_peak].sel : 1000) << "\r\naa=" << (g_aa >= 0 ? g_c[g_aa].sel : 0) << "\r\nfgen=" << (g_fgen >= 0 ? g_c[g_fgen].sel : fgen_saved) <<"\r\nname=" << Narrow(g_name) << "\r\nprofile=" << (g_profile_row >= 0 ? g_c[g_profile_row].sel : 0) << "\r\nonline=" << (g_online_row >= 0 ? g_c[g_online_row].sel : 0) << "\r\nonline_host=" << Narrow(g_online_host) <<"\r\nfull=" << (full_on ? 1 : 0) << "\r\nunlock_all=" << (unlock_all_on ? 1 : 0) << "\r\ndlc_unlock=" << (unlock_on ? 1 : 0) << "\r\noverlays=" << (g_allow_overlays ? 1 : 0) << "\r\nauto_play=" << (g_auto_play ? 1 : 0) << "\r\ncheck_updates=" << (g_check_updates ? 1 : 0) << "\r\ndraw_threads=" << (g_two_thread ? 1 : 0) << "\r\n";
     for (int k = 0; k < kGfxRows; ++k) {
       if (g_gfx[k] >= 0) ini << kGfxKey[k] << g_c[g_gfx[k]].sel << "\r\n";
     }
@@ -2492,6 +2518,123 @@ std::wstring Leaf(const std::wstring& path) {
 
 // Online play (docs/online): every online address of the game goes to a community server, the player's name is
 // a local account. Off removes what an earlier session wrote, so offline play is exactly as before.
+// ------------------------------------------------------------------------------------------
+// Save profiles and backups: data\user\savedata is the active profile's saves. The other profiles wait in
+// data\profiles\<n>, the backups in data\backups\profile<n>\<date>. Saves are small (a few hundred KB).
+// ------------------------------------------------------------------------------------------
+namespace fs = std::filesystem;
+
+bool ProcessRunning(const wchar_t* exe_name) {
+  const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return false;
+  PROCESSENTRY32W e{sizeof(e)};
+  bool found = false;
+  for (BOOL ok = Process32FirstW(snap, &e); ok && !found; ok = Process32NextW(snap, &e))
+    found = _wcsicmp(e.szExeFile, exe_name) == 0;
+  CloseHandle(snap);
+  return found;
+}
+
+std::wstring SavesDir() { return g_data + L"\\user\\savedata"; }
+std::wstring ProfileDir(int p) { return g_data + L"\\profiles\\" + std::to_wstring(p + 1); }
+std::wstring BackupDir(int p) { return g_data + L"\\backups\\profile" + std::to_wstring(p + 1); }
+std::wstring ActiveProfilePath() { return g_data + L"\\profiles\\active.txt"; }
+
+int ActiveProfile() {
+  const auto lines = ReadLines(ActiveProfilePath());
+  const int p = lines.empty() ? 0 : atoi(lines[0].c_str());
+  return p >= 0 && p < 4 ? p : 0;
+}
+
+int SelectedProfile() { return g_profile_row >= 0 ? g_c[g_profile_row].sel : 0; }
+
+std::wstring Stamp() {
+  SYSTEMTIME t;
+  GetLocalTime(&t);
+  wchar_t text[32];
+  swprintf(text, 32, L"%04d%02d%02d_%02d%02d%02d", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+  return text;
+}
+
+// Keeps the newest `keep` backups of a profile.
+void PruneBackups(int p, size_t keep) {
+  std::error_code ec;
+  std::vector<std::wstring> names;
+  for (const auto& d : fs::directory_iterator(BackupDir(p), ec))
+    if (d.is_directory()) names.push_back(d.path().filename().wstring());
+  std::sort(names.begin(), names.end());
+  for (size_t i = 0; i + keep < names.size(); ++i) fs::remove_all(BackupDir(p) + L"\\" + names[i], ec);
+}
+
+// Copies the active profile's saves into a new dated backup. "" when done; otherwise a sentence for the player.
+std::wstring BackupSaves() {
+  std::error_code ec;
+  if (!fs::exists(SavesDir(), ec)) return L"There are no saves to back up yet.";
+  const int p = ActiveProfile();
+  const std::wstring dest = BackupDir(p) + L"\\" + Stamp();
+  fs::create_directories(dest, ec);
+  fs::copy(SavesDir(), dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+  if (ec) return L"The backup could not be written: " + Widen(ec.message());
+  PruneBackups(p, 10);
+  return L"";
+}
+
+// Makes `to` the active profile: the current saves go to their profile folder and the chosen profile's come back.
+std::wstring SwitchProfile(int to) {
+  const int from = ActiveProfile();
+  if (to == from) return L"";
+  if (ProcessRunning(L"DriveClubGame.exe")) return L"Close the game before switching save profiles.";
+  std::error_code ec;
+  const std::wstring problem = BackupSaves();  // a safety copy; "no saves yet" is fine here
+  (void)problem;
+  fs::create_directories(g_data + L"\\profiles", ec);
+  fs::remove_all(ProfileDir(from), ec);
+  if (fs::exists(SavesDir(), ec)) {
+    fs::rename(SavesDir(), ProfileDir(from), ec);
+    if (ec) return L"The saves could not be moved: " + Widen(ec.message());
+  }
+  if (fs::exists(ProfileDir(to), ec)) {
+    fs::rename(ProfileDir(to), SavesDir(), ec);
+    if (ec) return L"The profile could not be loaded: " + Widen(ec.message());
+  } else {
+    fs::create_directories(SavesDir(), ec);  // a new career
+  }
+  SaveTextAtomically(ActiveProfilePath(), std::to_string(to));
+  return L"";
+}
+
+std::wstring RestoreLatestBackup() {
+  if (ProcessRunning(L"DriveClubGame.exe")) return L"Close the game before restoring saves.";
+  std::wstring problem = SwitchProfile(SelectedProfile());
+  if (!problem.empty()) return problem;
+  const int p = ActiveProfile();
+  std::error_code ec;
+  std::vector<std::wstring> names;
+  for (const auto& d : fs::directory_iterator(BackupDir(p), ec))
+    if (d.is_directory()) names.push_back(d.path().filename().wstring());
+  if (names.empty()) return L"There is no backup of this profile yet.";
+  std::sort(names.begin(), names.end());
+  const std::wstring latest = BackupDir(p) + L"\\" + names.back();
+  BackupSaves();  // the current saves are kept too
+  fs::remove_all(SavesDir(), ec);
+  fs::create_directories(SavesDir(), ec);
+  fs::copy(latest, SavesDir(), fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+  if (ec) return L"The backup could not be restored: " + Widen(ec.message());
+  return L"";
+}
+
+// What the two buttons say afterwards, in the status line of both launchers. Returns false on a problem.
+bool RunSaveButton(bool restore, std::wstring& message) {
+  std::wstring problem = SwitchProfile(SelectedProfile());
+  if (problem.empty()) problem = restore ? RestoreLatestBackup() : BackupSaves();
+  if (!problem.empty()) {
+    message = problem;
+    return false;
+  }
+  message = restore ? L"The latest backup is restored." : L"The saves are backed up.";
+  return true;
+}
+
 bool ServerRunning() {
   const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snap == INVALID_HANDLE_VALUE) return false;
@@ -2770,13 +2913,14 @@ std::wstring StartGame(HANDLE* process = nullptr) {
   // Add-on content: changed copies of three data lists, built from the player's own archive. Files in the mods
   // folder come first, so a player's own versions win.
   std::wstring unlock_arg;
-  bool unlock_on = false;
+  bool unlock_on = false, unlock_all_on = false;
   for (const Ctl& c : g_c) {
     if (c.kind == Kind::Toggle && c.patches[0] == "@unlock") unlock_on = c.sel != 0;
+    if (c.kind == Kind::Toggle && c.patches[0] == "@unlockall") unlock_all_on = c.sel != 0;
   }
-  if (unlock_on) {
+  if (unlock_on || unlock_all_on) {
     const std::wstring unlock_dir = g_data + L"\\unlock";
-    const std::wstring problem = BuildUnlock(g_folder[0].path, g_folder[1].path, unlock_dir);
+    const std::wstring problem = BuildUnlock(g_folder[0].path, g_folder[1].path, unlock_dir, unlock_all_on);
     LauncherLog(problem.empty() ? std::string("add-on content unlock: ok") : "add-on content unlock: " + Narrow(problem));
     if (problem.empty()) unlock_arg = L" --mods \"" + unlock_dir + L"\"";
     else MessageBoxW(nullptr, (L"The add-on content could not be unlocked (" + problem + L"). The game starts without it.").c_str(), L"DriveClub", MB_OK | MB_ICONWARNING);
@@ -2815,6 +2959,15 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     const std::wstring problem = BuildFastCarSwitch(g_folder[0].path, g_folder[1].path, carswitch_dir);
     LauncherLog(problem.empty() ? std::string("faster car switching: ok") : "faster car switching: " + Narrow(problem));
     if (problem.empty()) unlock_arg += L" --mods \"" + carswitch_dir + L"\"";
+  }
+  {
+    const std::wstring profile_problem = SwitchProfile(SelectedProfile());
+    if (!profile_problem.empty()) {
+      LauncherLog("saves: " + Narrow(profile_problem));
+      return profile_problem;
+    }
+    const std::wstring backup_problem = BackupSaves();  // one per start; the last ten are kept
+    LauncherLog(backup_problem.empty() ? std::string("saves: backed up") : "saves: " + Narrow(backup_problem));
   }
   {
     const std::wstring online_problem = PrepareOnline(user);
@@ -3690,6 +3843,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (ctl.kind == Kind::Button) {
           const RectF ct = Scaled(ctl.ctl);
           if (c == g_wheel_setup && y >= ct.Y && y <= ct.Y + ct.Height) OpenWheelSetup();
+          if ((c == g_save_backup_row || c == g_save_restore_row) && y >= ct.Y && y <= ct.Y + ct.Height) {
+            std::wstring message;
+            const bool ok = RunSaveButton(c == g_save_restore_row, message);
+            g_status = message;
+            g_status_color = ok ? kOk : kBad;
+          }
           for (int k = 0; k < 2; ++k)
             if (c == g_ffb_gain_row[k] && y >= ct.Y && y <= ct.Y + ct.Height) StartFfbCapture(h, k);
           InvalidateRect(h, nullptr, FALSE);
