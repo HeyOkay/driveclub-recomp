@@ -2,6 +2,7 @@
 #include "bbport_settings.h"
 #include "bbport_neural_settings.h"
 
+#include <cmath>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
