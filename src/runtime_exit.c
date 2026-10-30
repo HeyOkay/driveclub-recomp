@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <time.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -111,7 +112,21 @@ static bool root, quit_dispatched;
 static unsigned key_held,key_pressed;
 static int active_device;
 static char confirm_label[48]="A",back_label[48]="B";
-static bool shutdown_retry_ready;
+static bool shutdown_retry_ready, regional_input_ready;
+static _Atomic uint32_t confirm_button=0x4000;
+uint32_t runtime_exit_confirm_button(void) { return atomic_load(&confirm_button); }
+
+/* The same native regional predicate selects Cross/Circle in the game's pad
+ * processing (+0xd94fd5, +0xd9509d) and button help (+0x277700). It reads the
+ * game's title-region state, not the host language or controller model. */
+static void update_button_layout(void) {
+    if (!regional_input_ready) return;
+    typedef bool (ABI *CircleConfirm)(void);
+    uint32_t button=((CircleConfirm)(runtime_image_base+0x5008f0))() ? 0x2000 : 0x4000;
+    if (atomic_exchange(&confirm_button,button)!=button)
+        printf("Exit dialog: regional Confirm=%s, Back=%s\n",
+               button==0x2000 ? "Circle" : "Cross", button==0x2000 ? "Cross" : "Circle");
+}
 
 /* WebAPI_0 retries failed offline initialization inside a loop which never
  * checks the manager's stop flag (+0x21). During application teardown this
@@ -126,6 +141,13 @@ static ABI bool webapi_retry(unsigned char *manager) {
 }
 void runtime_exit_initialize(void) {
     if (!runtime_image_base || runtime_image_size<0x189f8d0) return;
+    static const unsigned char regional_predicate[]={
+        0x48,0x8d,0x05,0xcd,0x7c,0x05,0x01,0x8b,0x00,0x83,0xf8,0x02,0x74,0x05,
+        0x83,0xf8,0x04,0x75,0x03,0xb0,0x01,0xc3,0x83,0xf8,0x05,0x0f,0x94,0xc0,0xc3};
+    if (memcmp((const void *)(runtime_image_base+0x5008f0),regional_predicate,sizeof(regional_predicate))) {
+        puts("Exit dialog: unsupported regional input code; dialog disabled"); return;
+    }
+    regional_input_ready=true;
     unsigned char *site=(unsigned char *)(runtime_image_base+0x7d6e70);
     static const unsigned char expected[]={0x4c,0x89,0xff,0xe8,0xa8,0x05,0,0,
         0x4c,0x89,0xff,0xe8,0x90,0xf9,0xff,0xff};
@@ -159,7 +181,7 @@ void runtime_exit_initialize(void) {
 static bool supported_layout(void) {
     /* Check both the UI binding and quit binding, not just a common prologue.
      * Fail closed on another game revision; never try guessed offsets. */
-    return shutdown_retry_ready && runtime_image_base && runtime_image_size>0x189f8d0 &&
+    return shutdown_retry_ready && regional_input_ready && runtime_image_base && runtime_image_size>0x189f8d0 &&
         ptr(runtime_image_base+0x15b4878)==runtime_image_base+0x1404d0 &&
         ptr(runtime_image_base+0x15c1978)==runtime_image_base+0x2821e0 &&
         !memcmp((const void *)(runtime_image_base+0x12ad1b7),"x_main.frontend",15);
@@ -170,6 +192,7 @@ void runtime_exit_tick(void) {
     const bool dispatched=quit_dispatched;
     pthread_mutex_unlock(&exit_lock);
     if (dispatched) { pthread_mutex_unlock(&tick_lock); return; }
+    update_button_layout();
     MenuSnapshot m;
     bool at_root=supported_layout() && snapshot(&m) && m.stack[0].count==1 &&
         !strcmp(m.stack[0].name,"x_main.frontend") && !m.stack[1].count && !m.stack[2].count &&
@@ -217,7 +240,7 @@ void runtime_exit_release_keys(void) {
 int runtime_exit_pad(uint32_t buttons, int lx, int ly, int neutral, int available,
                      int pad_activity, int device, const char *confirm, const char *back) {
     pthread_mutex_lock(&exit_lock);
-    unsigned held=key_held | exit_dialog_actions(buttons);
+    unsigned held=key_held | exit_dialog_actions(buttons,runtime_exit_confirm_button());
     if (pad_activity) {
         active_device=device;
         snprintf(confirm_label,sizeof(confirm_label),"%s",confirm);

@@ -29,6 +29,11 @@ included in this checkout.
 The pure state machine is in `runtime_exit_state.c`. The normal pad sampler
 continues sampling while captured so releases can be observed. Actions use the
 existing logical Cross/Circle/d-pad outputs after user bindings have been applied.
+The dialog uses the same validated native regional predicate as the game's
+input update and button help: Asian Circle-confirm layouts automatically use
+Circle to select and Cross to go back. No host-language heuristic or manual
+setting is involved. Controller remaps are then applied to the displayed prompts.
+
 SDL physical buttons are used only to identify the active device and its prompts.
 
 Back/Esc must be released before another opening or cancellation. Returning from
