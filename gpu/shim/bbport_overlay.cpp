@@ -96,6 +96,7 @@ std::deque<TrophyToast> trophy_queue;
 std::chrono::steady_clock::time_point trophy_shown{};
 bool trophy_showing = false;
 std::atomic<bool> trophy_active{false};
+float fps_panel_bottom = 0.0f; // bottom edge of the FPS panel this frame, 0 when it is not drawn
 float base_scale = 1.0f;
 ImFont *exit_body=nullptr,*exit_heading=nullptr;
 std::atomic<bool> mouse_capture_requested{false};
@@ -460,8 +461,8 @@ void TrophyBanner(const TrophyToast& toast, float age) {
     const float s = base_scale;
     const float slide = age < 0.35f ? age / 0.35f : (age > 4.65f ? std::max(0.0f, (5.0f - age) / 0.35f) : 1.0f);
     const float w = 560.0f * s, h = 92.0f * s, margin = 40.0f * s;
-    const ImVec2 pos(viewport->WorkPos.x + viewport->WorkSize.x - w - margin + (1.0f - slide) * (w + margin),
-                     viewport->WorkPos.y + margin);
+    const float banner_top = fps_panel_bottom > 0.0f ? fps_panel_bottom + 10.0f * s : viewport->WorkPos.y + margin;
+    const ImVec2 pos(viewport->WorkPos.x + viewport->WorkSize.x - w - margin + (1.0f - slide) * (w + margin), banner_top);
     ImGui::SetNextWindowPos(pos);
     ImGui::SetNextWindowSize(ImVec2(w, h));
     ImGui::SetNextWindowBgAlpha(0.9f);
@@ -691,6 +692,7 @@ void FpsCounter() {
         ImGui::GetWindowDrawList()->AddText(ImVec2(x, fps_hint_y),
                                           ImGui::GetColorU32(ImGuiCol_TextDisabled), fps_hint);
     }
+    fps_panel_bottom = ImGui::GetWindowPos().y + ImGui::GetWindowSize().y;
     ImGui::End();
 }
 
@@ -981,6 +983,7 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
+    fps_panel_bottom = 0.0f;
     if (BbSettings::Get().show_fps && !menu_open) {
         FpsCounter();
     }
