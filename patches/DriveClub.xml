@@ -22,7 +22,7 @@
     <Metadata Title="Driveclub"
               Always="true"
               Name="Red zone fix (particle curve sampler)"
-              Note="The function at 0x64d980 keeps seven locals below the stack pointer. A memory-tracking fault taken inside it on Windows overwrites them and the game stopped with a read of address 0 at 0x64db13. It gets a real stack frame instead."
+              Note="The function at 0x64d980 keeps seven locals below the stack pointer. A memory-tracking fault taken inside it on Windows overwrites them and the game stopped with a read of address 0 at 0x64db13. It gets a real stack frame instead. A particle system without curve data (a null pointer at [rsi+0x740], seen as a read of 0x140 at 0x64d9b2) now returns instead of crashing."
               Author="Ianespaa"
               PatchVer="1.0"
               AppVer="01.28"
@@ -45,7 +45,7 @@
             <Line Type="bytes" Address="0x00a4e735" Value="488b442430" OriginalHash="469c901fe033edc4"/>
             <Line Type="bytes" Address="0x00a4e8c5" Value="488b442428" OriginalHash="469c981fe033fb5c"/>
             <Line Type="bytes" Address="0x00a4e8f6" Value="e9e531f000909090909090" OriginalHash="b09699eac1a0b4d6"/>
-            <Line Type="bytes" Address="0x01951ac0" Value="554157415641554154534883ec40e9b7be0fff"/>
+            <Line Type="bytes" Address="0x01951ac0" Value="554157415641554154534883ec404883be40070000007408e9adbe0fff"/>
             <Line Type="bytes" Address="0x01951ae0" Value="4883c4405b415c415d415e415f5dc3"/>
         </PatchList>
     </Metadata>
