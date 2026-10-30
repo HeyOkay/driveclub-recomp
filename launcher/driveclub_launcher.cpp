@@ -1357,7 +1357,7 @@ const int kPresetMirror[6] = {0, 1, 0, 0, 0, 0};  // Live, Static (Handheld take
 // workaround, then retire its auto-enable and UI entry. Do not stack a known
 // corrected native path with the workaround or infer correctness from version.
 bool FrameModeNeedsCameraPatch() {
-  return g_fps>=0 && (g_c[g_fps].sel==1 || g_c[g_fps].sel==3);
+  return g_fps>=0 && (g_c[g_fps].sel==1 || g_c[g_fps].sel==3 || g_c[g_fps].sel==4);
 }
 void ApplyFrameModeCameraDefault() {
   if(g_camera_patch_row>=0)g_c[g_camera_patch_row].sel=FrameModeNeedsCameraPatch()?1:0;
