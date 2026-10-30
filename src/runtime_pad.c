@@ -576,10 +576,13 @@ static bool exit_input(PadData *d) {
     static uint32_t previous_physical; static int previous_axis;
     bool activity=(physical & ~previous_physical) || (axis_direction && axis_direction!=previous_axis);
     previous_physical=physical; previous_axis=axis_direction;
-    int confirm=SDL_GAMEPAD_BUTTON_SOUTH,back=SDL_GAMEPAD_BUTTON_EAST;
+    const uint32_t logical_confirm=runtime_exit_confirm_button();
+    const uint32_t logical_back=logical_confirm ^ (BTN_CROSS|BTN_CIRCLE);
+    int confirm=logical_confirm==BTN_CIRCLE ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
+    int back=logical_back==BTN_CIRCLE ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH;
     for(int i=0;i<pad_remap_count;++i) {
-        if((uint32_t)pad_remap[i][0]==BTN_CROSS) confirm=pad_remap[i][1];
-        if((uint32_t)pad_remap[i][0]==BTN_CIRCLE) back=pad_remap[i][1];
+        if((uint32_t)pad_remap[i][0]==logical_confirm) confirm=pad_remap[i][1];
+        if((uint32_t)pad_remap[i][0]==logical_back) back=pad_remap[i][1];
     }
     bool neutral=!d->buttons && !d->touch_count && !SDL_GetMouseState(NULL,NULL) && d->l2<25 && d->r2<25 &&
         abs(d->left_x-128)<32 && abs(d->left_y-128)<32 &&
