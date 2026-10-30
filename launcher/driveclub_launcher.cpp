@@ -2788,6 +2788,31 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     if (!UserEnv(L"BB_FRAME_GEN_MULTIPLIER"))
       SetEnvironmentVariableW(L"BB_FRAME_GEN_MULTIPLIER", f == 2 ? L"2" : f == 3 ? L"3" : f == 4 ? L"4" : nullptr);
   }
+
+  // Disable VK_LAYER_AMD_switchable_graphics_1 (from old AMD drivers) which hangs Vulkan init on hybrid laptops
+  // AMD drivers and causes silent hangs at Vulkan device creation on
+  // This writes to HKCU\Software\Microsoft\DirectX\UserGpuPreferences.
+  if (!UserEnv(L"DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1")) {
+    SetEnvironmentVariableW(L"DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", L"1");
+  }
+
+  // Prefer discrete GPU via Windows GPU preference registry
+  {
+    const std::wstring exe = GameExe();
+    if (Exists(exe)) {
+      const std::wstring reg_path = L"Software\\Microsoft\\DirectX\\UserGpuPreferences";
+      HKEY hkey;
+      if (RegCreateKeyExW(HKEY_CURRENT_USER, reg_path.c_str(), 0, nullptr,
+                          REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hkey, nullptr) == ERROR_SUCCESS) {
+        const std::wstring value = L"GpuPreference=2;"; // 2 = High performance (discrete GPU)
+        RegSetValueExW(hkey, exe.c_str(), 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(value.c_str()),
+                       static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(hkey);
+      }
+    }
+  }
+
   if (g_aniso >= 0 && g_c[g_aniso].sel >= 1) {
     static const wchar_t* const kAniso[] = {L"", L"0", L"2", L"4", L"8", L"16"};
     SetEnvironmentVariableW(L"BB_ANISO", kAniso[g_c[g_aniso].sel]);
