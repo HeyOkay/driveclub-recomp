@@ -29,6 +29,11 @@ included in this checkout.
 The pure state machine is in `runtime_exit_state.c`. The normal pad sampler
 continues sampling while captured so releases can be observed. Actions use the
 existing logical Cross/Circle/d-pad outputs after user bindings have been applied.
+The dialog uses the same validated native regional predicate as the game's
+input update and button help: Asian Circle-confirm layouts automatically use
+Circle to select and Cross to go back. No host-language heuristic or manual
+setting is involved. Controller remaps are then applied to the displayed prompts.
+
 SDL physical buttons are used only to identify the active device and its prompts.
 
 Back/Esc must be released before another opening or cancellation. Returning from
@@ -63,6 +68,13 @@ This exposed previously unused cleanup paths, fixed here:
    rasterizer callbacks are removed before their owners disappear.
 4. ImGui Vulkan resources and DLSS/NGX state must be released before destroying
    their Vulkan device. Later process-exit cleanup is idempotent.
+
+5. After leaving an event, cached Lua file wrappers can retain subscriptions to
+   already destroyed file signals. Native teardown then recursively tries to
+   initialize a missing bucket zero until its stack overflows. A validated stream
+   destructor trampoline expires those dead subscriptions only after confirmed
+   shutdown. The original destructor still closes live subscriptions, owned
+   buffers and the stream itself. Normal gameplay takes the original cleanup path.
 
 The confirmation path uses ordinary `exit` after this cleanup. The existing
 window-close/emergency-exit paths are separate and are not used by the dialog.
@@ -104,3 +116,19 @@ Back, held Confirm after cancellation, stick drift, and complete exits with
 status 0 both without AA and with DLAA. All 191 original save files matched
 their pre-test SHA-256 hashes. Physical PlayStation controllers and Linux have
 not been exercised; controller routing was covered by the SDL virtual test.
+
+## Shutdown subscription regression
+
+`tools/exit_shutdown_test.c` exercises the real wrapper against live, expired,
+missing and already disconnected signal owners, checks that ordinary gameplay
+leaves the connections alone, and verifies delegation to the native destructor.
+
+```
+clang -O1 -std=c11 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -I. tools/exit_shutdown_test.c src/runtime_exit_state.c -Wl,--gc-sections -lwinpthread -o out/exit_shutdown_test.exe
+out/exit_shutdown_test.exe
+```
+
+On Windows/DRIVECLUB 1.28, the 0.4.0 event -> pause -> Quit event -> Home ->
+confirmed Exit path reproduced stack exhaustion at native +0xe7eb40, reached
+from cached Lua stream teardown. The guarded path returned from game main with
+status 0 and completed host GPU shutdown. No timeout termination is used.
