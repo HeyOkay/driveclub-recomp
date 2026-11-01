@@ -35,7 +35,7 @@ static void camera_patch_install(void) {
     printf("CameraPatch: driver observer %s\n",replay_driver_observation_patch()?"on":"unavailable");
     replay_hud_install();
     camera_rate_impulse_original=(CameraRateImpulse)camera_rate_hook(0x6ce6f0,impulse,sizeof impulse,(uintptr_t)camera_rate_impulse);
-    camera_noise_update_original=(CameraNoiseUpdate)camera_rate_hook(0xce3540,noise,sizeof noise,(uintptr_t)camera_noise_update);
+    if(camera_noise_lifecycle_install())camera_noise_update_original=(CameraNoiseUpdate)camera_rate_hook(0xce3540,noise,sizeof noise,(uintptr_t)camera_noise_update);
     puts("CameraPatch: experimental high-FPS camera/replay workaround enabled; behavior is not reference-accurate");
 }
 #else
