@@ -1,0 +1,8 @@
+Environment timelapse (experimental)
+
+Hold + to fast-forward the environment; hold - to rewind available session history.
+Shift doubles the rate; Ctrl halves it. Release to return to normal speed.
+Default rate: 600x. Car physics keep their normal clock; weather can change road grip.
+Clouds, sky, weather, lightning, scene animation groups and shader wind share the visual timeline.
+Rewind is limited to recorded history; particles are held during reverse playback.
+Set BB_ENV_TIMELAPSE=0 before launch to disable the mod. Debug tracing is off by default.

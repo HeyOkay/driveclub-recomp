@@ -5,7 +5,8 @@ typedef void(ABI *SceneTimeUpdate)(void *, float);
 static SceneTimeUpdate scene_time_original;
 static uint64_t scene_time_values, scene_time_stamp;
 static ABI void scene_time_update(void *self, float dt) {
-  scene_time_original(self, dt);
+  scene_time_original(self, env_time_delta(self,dt));
+  env_trace_time(self,dt);
   uint64_t values;
   memcpy(&values, (const unsigned char *)self + 0xc, sizeof(values));
   __atomic_store_n(&scene_time_values, values, __ATOMIC_RELAXED);
@@ -18,6 +19,8 @@ int runtime_scene_debug_time(float *hours, float *compression) {
   uint64_t values = __atomic_load_n(&scene_time_values, __ATOMIC_RELAXED);
   memcpy(hours, &values, 4);
   memcpy(compression, (unsigned char *)&values + 4, 4);
+  if(env_timelapse_enabled&&__atomic_load_n(&env_action,__ATOMIC_ACQUIRE))
+    *compression *= (float)env_load_double(&env_frame_scale_bits);
   return 1;
 }
 static void scene_debug_jump(unsigned char *code, uintptr_t target) {
@@ -27,7 +30,7 @@ static void scene_debug_jump(unsigned char *code, uintptr_t target) {
 }
 static void scene_debug_install(void) {
   const char *enabled = getenv("BB_SCENE_OVERLAY");
-  if (enabled && atoi(enabled) == 0)
+  if (enabled && atoi(enabled) == 0 && !getenv("BB_ENV_TIMELAPSE"))
     return;
   const size_t offset = 0x75a00;
   /* Whole instructions only; no PC-relative operands in this prologue. */
