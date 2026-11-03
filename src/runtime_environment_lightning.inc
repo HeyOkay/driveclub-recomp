@@ -79,9 +79,9 @@ static ABI void env_light_update(void *self,float dt) {
   static uintptr_t last_c,last_g;static unsigned generation;
   unsigned gen=__atomic_load_n(&env_generation,__ATOMIC_ACQUIRE);
   if(c!=last_c||g!=last_g||gen!=generation){env_light_clear();last_c=c;last_g=g;generation=gen;}
-  double cursor=env_load_double(&env_cursor_bits);int action=__atomic_load_n(&env_action,__ATOMIC_ACQUIRE);int restored=0;
+  double cursor=env_load_double(&env_cursor_bits);int action=__atomic_load_n(&env_action,__ATOMIC_ACQUIRE);
   if(action<0) {
-    if(env_light_count){unsigned lo=0,hi=env_light_count;while(lo+1<hi){unsigned mid=(lo+hi)/2;if(env_light_at(mid)->time<=cursor)lo=mid;else hi=mid;}restored=env_light_restore(env_light_at(lo),c,g);}
+    if(env_light_count){unsigned lo=0,hi=env_light_count;while(lo+1<hi){unsigned mid=(lo+hi)/2;if(env_light_at(mid)->time<=cursor)lo=mid;else hi=mid;}(void)env_light_restore(env_light_at(lo),c,g);}
     env_light_original(self,0);
   } else {
     while(env_light_count&&env_light_at(env_light_count-1)->time>cursor)env_light_drop_last();
@@ -90,6 +90,4 @@ static ABI void env_light_update(void *self,float dt) {
     EnvLightSnapshot *s=env_light_capture(c,g,cursor);
     if(s){while(env_light_count&&(env_light_count==ENV_LIGHT_SLOTS||env_light_bytes+s->size>ENV_LIGHT_BUDGET))env_light_drop_first();env_lights[(env_light_first+env_light_count++)%ENV_LIGHT_SLOTS]=s;env_light_bytes+=s->size;env_store_double(&env_light_oldest_bits,env_light_at(0)->time);}
   }
-  static uint64_t last;
-  if(env_timelapse_trace&&GetTickCount64()-last>=500){last=GetTickCount64();printf("EnvTrace: lightning dt=%.9g step=%.9g action=%d state=%u phase=%u age=%.9g brightness=%.9g history=%u bytes=%zu restored=%d cursor=%.6f\n",dt,action<0?0:env_group_step(dt,0),action,*(unsigned *)(c+0x20),*(unsigned *)(g+0x44),*(float *)(g+0x48),*(float *)(g+0x58),env_light_count,env_light_bytes,restored,cursor);fflush(stdout);}
 }

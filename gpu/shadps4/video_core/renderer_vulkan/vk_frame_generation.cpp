@@ -95,7 +95,9 @@ void DumpFrame(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer
     });
 }
 
+#ifdef _WIN32
 extern "C" short __stdcall GetAsyncKeyState(int key);
+#endif
 
 bool DumpWindow() {
     static const char* env = BB_DIAGNOSTIC_ENV("BB_FG_DUMP");
@@ -104,7 +106,11 @@ bool DumpWindow() {
     if (!env) {
         return false;
     }
+#ifdef _WIN32
     const bool now = (GetAsyncKeyState(0x7A) & 0x8000) != 0;
+#else
+    const bool now = false; // BB_FG_DUMP's F11 trigger is Windows-only
+#endif
     if (now && !down) {
         left = 3;
     }
@@ -119,7 +125,7 @@ bool DumpWindow() {
 } // namespace
 
 void FgProfiler::Init(const Instance& instance) {
-    const char* env = BB_DIAGNOSTIC_ENV("BB_FG_PROFILE");
+    const char* env = std::getenv("BB_FG_PROFILE");   // also in the normal build: the one way to see where the time goes
     if (!env || env[0] != '1' || instance_ptr) {
         return;
     }
@@ -229,7 +235,7 @@ FrameGenerator::FrameGenerator(const Instance& instance_, Scheduler& scheduler_)
     if (settings.frame_gen == BbSettings::FrameGenDlss && dlss_max < 1) {
         const Dlss* dlss = Dlss::Get();
         std::printf("Frame generation: DLSS Frame Generation unavailable (%s); using FSR 3.1\n",
-                    !dlss ? "bbport_dlss.dll and nvngx_dlss.dll are not installed"
+                    !dlss ? "driveclub_dlss.dll and nvngx_dlss.dll are not installed"
                     : !dlss->Available() ? "DLSS is unavailable on this system"
                                          : "GeForce RTX 40 or newer, nvngx_dlssg.dll and a "
                                            "current driver are needed");

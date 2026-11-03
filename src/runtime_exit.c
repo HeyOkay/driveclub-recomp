@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "runtime_exit.h"
+#include "guest_cpu.h"
 #include "exit_dialog.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -37,6 +38,10 @@ static bool copy_guest(uintptr_t p, void *out, size_t n) {
 #endif
 }
 static uintptr_t ptr(uintptr_t p) { uintptr_t v=0; copy_guest(p,&v,sizeof(v)); return v; }
+/* The game's functions are guest code: called through the guest CPU (directly on x86-64, FEXCore on ARM64). */
+static uint64_t game_call(uintptr_t offset, uint64_t argument) {
+    return guest_cpu_call(runtime_image_base+offset,1,&argument);
+}
 static bool text(uintptr_t p, char *out, size_t n) {
     for (size_t i=0;i<n;++i) {
         if (!copy_guest(p+i,out+i,1)) { out[0]=0; return false; }
@@ -99,8 +104,7 @@ static bool snapshot(MenuSnapshot *m) {
     }
     uintptr_t gs=ptr(runtime_image_base+0x17788c0);
     if (gs) {
-        typedef uintptr_t (ABI *Current)(uintptr_t);
-        uintptr_t state=((Current)(runtime_image_base+0x4f24a0))(gs+8);
+        uintptr_t state=(uintptr_t)game_call(0x4f24a0,gs+8);
         text(ptr(state+8),m->state,sizeof(m->state));
     }
     return ptr(runtime_image_base+0x189f8c8)==m->selector;
@@ -135,10 +139,85 @@ static void update_button_layout(void) {
  * Preserve cleanup/initialization verbatim during play. When its owner asks
  * it to stop, leave the retry loop so its original outer loop can exit. */
 static ABI bool webapi_retry(unsigned char *manager) {
-    typedef bool (ABI *NetworkOperation)(void *);
-    ((NetworkOperation)(runtime_image_base+0x7d7420))(manager);
+    game_call(0x7d7420,(uintptr_t)manager);
     if (*(volatile unsigned char *)(manager+0x21)) return true;
-    return ((NetworkOperation)(runtime_image_base+0x7d6810))(manager);
+    return (game_call(0x7d6810,(uintptr_t)manager)&0xff)!=0;   /* a bool: AL */
+}
+/* Cached Lua file wrappers may outlive their source signals after a race.
+ * Disconnecting from an already destroyed subscription table enters the native
+ * lazy-bucket initializer recursively with index zero. During confirmed shutdown,
+ * expire only those dead connections before running the original destructor;
+ * live connections, owned buffers and every other cleanup remain native. */
+static void (ABI *stream_destructor)(void *);
+static ABI void close_stream(void *object) {
+    if (atomic_load(&quit_dispatched)) {
+        unsigned expired=0;
+        for (unsigned offset=0x20;offset<=0x30;offset+=0x10) {
+            uintptr_t connection=(uintptr_t)object+offset;
+            uintptr_t owner=ptr(connection), key=ptr(connection+8);
+            if (!owner || key==UINTPTR_MAX) continue;
+            uintptr_t table=ptr(owner+0x18);
+            if (!table || !ptr(table+0x30)) {
+                *(uintptr_t *)connection=0;
+                *(uintptr_t *)(connection+8)=UINTPTR_MAX;
+                ++expired;
+            }
+        }
+        static atomic_bool reported;
+        if (expired && !atomic_exchange(&reported,true))
+            puts("Exit dialog: expired file-stream subscriptions skipped during shutdown");
+    }
+    stream_destructor(object);
+}
+static bool install_stream_shutdown_guard(void) {
+    unsigned char *site=(unsigned char *)(runtime_image_base+0xea24d0);
+    /* Complete, RIP-independent prologue. Keep it in the trampoline verbatim. */
+    static const unsigned char prologue[]={0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,
+        0x41,0x55,0x41,0x54,0x53,0x48,0x83,0xec,0x68};
+    static const unsigned char first_connection[]={0x48,0x8b,0x43,0x28,0x48,0x83,0xf8,0xff,0x74,0x3a};
+    static const unsigned char second_connection[]={0x48,0x8b,0x43,0x38,0x48,0x83,0xf8,0xff,0x74,0x3a};
+    if (memcmp(site,prologue,sizeof(prologue)) ||
+        memcmp((const void *)(runtime_image_base+0xea24f3),first_connection,sizeof(first_connection)) ||
+        memcmp((const void *)(runtime_image_base+0xea2537),second_connection,sizeof(second_connection))) return false;
+#ifdef _WIN32
+    unsigned char *trampoline=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);
+#else
+    unsigned char *trampoline=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    if (trampoline==MAP_FAILED) trampoline=NULL;
+#endif
+    if (!trampoline) return false;
+    memcpy(trampoline,prologue,sizeof(prologue));
+    unsigned char jump[12]={0x48,0xb8};
+    uintptr_t resume=(uintptr_t)site+sizeof(prologue);
+    memcpy(jump+2,&resume,8);jump[10]=0xff;jump[11]=0xe0;
+    memcpy(trampoline+sizeof(prologue),jump,sizeof(jump));
+    unsigned char patch[sizeof(prologue)];memset(patch,0x90,sizeof(patch));
+    uintptr_t target=(uintptr_t)close_stream;
+    memcpy(jump+2,&target,8);memcpy(patch,jump,sizeof(jump));
+#ifdef _WIN32
+    DWORD old,ignored;
+    if (!VirtualProtect(trampoline,4096,PAGE_EXECUTE_READ,&old) ||
+        !VirtualProtect(site,sizeof(patch),PAGE_EXECUTE_READWRITE,&old)) {
+        VirtualFree(trampoline,0,MEM_RELEASE);return false;
+    }
+    stream_destructor=(void (ABI *)(void *))trampoline;
+    memcpy(site,patch,sizeof(patch));
+    VirtualProtect(site,sizeof(patch),old,&ignored);
+    FlushInstructionCache(GetCurrentProcess(),trampoline,sizeof(prologue)+sizeof(jump));
+    FlushInstructionCache(GetCurrentProcess(),site,sizeof(patch));
+#else
+    const size_t page=(size_t)sysconf(_SC_PAGESIZE);
+    void *start=(void *)((uintptr_t)site&~(uintptr_t)(page-1));
+    if (mprotect(trampoline,4096,PROT_READ|PROT_EXEC) ||
+        mprotect(start,page,PROT_READ|PROT_WRITE|PROT_EXEC)) {
+        munmap(trampoline,4096);return false;
+    }
+    stream_destructor=(void (ABI *)(void *))trampoline;
+    memcpy(site,patch,sizeof(patch));mprotect(start,page,PROT_READ|PROT_EXEC);
+    __builtin___clear_cache((char *)trampoline,(char *)trampoline+sizeof(prologue)+sizeof(jump));
+    __builtin___clear_cache((char *)site,(char *)site+sizeof(patch));
+#endif
+    return true;
 }
 /* Cached Lua file wrappers may outlive their source signals after a race.
  * Disconnecting from an already destroyed subscription table enters the native
@@ -242,9 +321,10 @@ void runtime_exit_initialize(void) {
     void *start=(void *)((uintptr_t)site&~(uintptr_t)(page-1));
     if (mprotect(start,page,PROT_READ|PROT_WRITE|PROT_EXEC)) return;
 #endif
-    /* mov rdi,r15; movabs rax,webapi_retry; call rax; nop */
+    /* mov rdi,r15; movabs rax,webapi_retry; call rax; nop. The guest-callable address of the host function: on
+     * ARM64 the guest cannot run host code, FEXCore enters it through a thunk. */
     unsigned char patch[16]={0x4c,0x89,0xff,0x48,0xb8};
-    uintptr_t target=(uintptr_t)webapi_retry;
+    uintptr_t target=guest_cpu_host_function((void *)webapi_retry);
     memcpy(patch+5,&target,8); patch[13]=0xff; patch[14]=0xd0; patch[15]=0x90;
     memcpy(site,patch,sizeof(patch));
 #ifdef _WIN32
@@ -254,6 +334,7 @@ void runtime_exit_initialize(void) {
     mprotect(start,page,PROT_READ|PROT_EXEC);
     __builtin___clear_cache((char *)site,(char *)site+sizeof(patch));
 #endif
+    guest_cpu_code_changed((uintptr_t)site,sizeof(patch));
     shutdown_retry_ready=true;
     puts("Exit dialog: WebAPI offline retry now observes the game's stop request");
 }
@@ -293,8 +374,7 @@ void runtime_exit_tick(void) {
      * Never use SDL_QUIT/_Exit here. */
     if (quit) {
         puts("Exit dialog: requesting GameState.Quit (save transactions complete)");
-        typedef int (ABI *Quit)(void *);
-        ((Quit)(runtime_image_base+0x1404d0))(NULL);
+        game_call(0x1404d0,0);
     }
     pthread_mutex_unlock(&tick_lock);
 }

@@ -94,6 +94,4 @@ static void env_sky_prepare(void *self,float value) {
     if(!advance)break;
     produce(self);env_sky_capture(sequence,value);
   }
-  static uint64_t last;
-  if(env_timelapse_trace&&steps&&GetTickCount64()-last>=500){last=GetTickCount64();printf("EnvTrace: cloudproducer clock=%.9g steps=%u history=%u\n",value,steps,env_sky_count);fflush(stdout);}
 }

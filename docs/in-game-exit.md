@@ -158,4 +158,5 @@ out/exit_exception_order_test.exe
 Expected status: **23**, with `GPU_STOPPED_WITH_POOL_ALIVE` followed by
 `POOL_DESTROYED_AFTER_GPU`. Restoring the old handler fails with status 91
 (`pool destroyed before presentation stopped`). The fixture checks ordering;
-the affected user's graphics configuration still needs a confirmation run.
+the affected user has confirmed that the follow-up resolves the hang on their
+graphics configuration.
