@@ -1,3 +1,7 @@
+#include "native_depth_grid.h"
+#include "sun_atlas_proxy.h"
+#include "sun_atlas_proxy_2x_policy.h"
+#include "sun_atlas_proxy_route.h"
 #include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -146,6 +150,15 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     g_drive_motion = &upscaler->GetDriveMotion();
     drive_aa = std::make_unique<DriveAA>(instance, scheduler, texture_cache, runtime,
                                          upscaler->GetDriveMotion(), *camera_motion);
+    NativeDepthGrid::Start(runtime, [this] { return DrawPipe::OnStageB() || OnStageA(); });
+    SunAtlasProxy::Start(
+        runtime, texture_cache, [this] { return DrawPipe::OnStageB() || OnStageA(); },
+        [this] {
+            if (draw_pipe)
+                draw_pipe->Drain();
+            bind_helper.Join();
+            scheduler.Finish();
+        });
     if (!EmulatorSettings.IsNullGPU()) {
         liverpool->BindRasterizer(this);
     }
@@ -172,7 +185,12 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     });
 }
 
-Rasterizer::~Rasterizer() = default;
+Rasterizer::~Rasterizer() {
+    // The live StageA shutdown callback already stopped the proxy. Never consult
+    // Liverpool here: bbgpu_shutdown joins/destroys it before this member.
+    SunAtlasProxy::Stop(runtime);
+    NativeDepthGrid::Stop(runtime);
+}
 
 inline const AmdGpu::Regs& Rasterizer::Regs() const {
     return stage_regs ? *stage_regs : liverpool->regs;
@@ -1307,7 +1325,9 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     if (frame_display) {
         // The frame counter also drives the mirror update rate: it must not depend on the upscaler.
         NoteFrameStart();
+        SunAtlasProxy::NextFrame(runtime);
         drive_aa->NextFrame();
+        NativeDepthGrid::NextFrame(runtime);
         if (camera_motion->Enabled()) {
             scene_started = false;
             camera_motion->OnDisplayPass(cb_descs[0].first);
@@ -1387,10 +1407,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
-    push_data.xscale *= target_scale[0];
-    push_data.xoffset *= target_scale[0];
-    push_data.yscale *= target_scale[1];
-    push_data.yoffset *= target_scale[1];
+    SunAtlasProxy::ScaleTargetPush(push_data, target_scale,
+                                   SunAtlasProxy::ActiveScaledClipWindow(runtime));
     {
         // BB_RT_STATS=1: how much geometry the scene's G-buffer draws carry per second (what a ray tracing
         // acceleration structure would have to hold). Only counts; nothing is captured.
@@ -1501,9 +1519,38 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     pipeline->BindResources(set_writes, push_data);
     // bbport: jitter geometry drawn with the scene depth, not full-screen passes (a shifted
     // full-screen quad leaves an edge column unwritten).
+    // Scoped fetched depth-writing geometry is projected independently of vertex count.
+    const auto& depth_grid_fetch = pipeline->GetFetchShader();
+    const bool depth_grid_scope = NativeDepthGrid::Enabled() && db_desc.first &&
+                                  db_desc.first == fg_depth && drive_aa->Active() &&
+                                  !upscaler->Enabled();
+    bool depth_grid_native = false;
+    if (depth_grid_scope) {
+        const auto& image = texture_cache.GetImage(db_desc.first);
+        if (image.backing && state.width == image.info.size.width &&
+            state.height == image.info.size.height && state.num_layers == 1 &&
+            target_scale[0] == 1.f && target_scale[1] == 1.f)
+            for (const auto id : image.backing->image_view_ids) {
+                const auto& view = texture_cache.GetImageView(id);
+                if (NativeDepthGrid::FullDepthAttachmentView(
+                        *view.image_view == state.depth_stencil_attachment.image_view,
+                        view.info.is_storage, view.info.range.base.level,
+                        view.info.range.base.layer, view.info.range.extent.levels,
+                        view.info.range.extent.layers))
+                    depth_grid_native = true;
+            }
+    }
+    const auto* depth_grid_material_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+    const bool depth_grid_projected = NativeDepthGrid::ProjectedDepthProducer(
+        depth_grid_scope && depth_grid_native, regs.IsClipDisabled(),
+        regs.depth_control.depth_enable, regs.depth_control.depth_write_enable,
+        regs.depth_render_control.depth_clear_enable,
+        depth_grid_fetch ? depth_grid_fetch->attributes.size() : 0,
+        depth_grid_material_ps &&
+            depth_grid_material_ps->stores.GetAny(Shader::IR::Attribute::Depth));
     draw_jitter = {};
     if (drive_aa->Active() && db_desc.first && db_desc.first == fg_depth &&
-        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
+        (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || depth_grid_projected)) {
         draw_jitter = drive_aa->Jitter();
     } else if (upscaler->Active() && db_desc.first && db_desc.first == camera_motion->Depth() &&
                (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1)) {
@@ -1511,6 +1558,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
+    SunAtlasProxy::CommitAttachment(runtime, state);
+    const bool depth_grid_begins_pass = !scheduler.IsRenderingWith(state);
     scheduler.BeginRendering(state);
 
     const auto& vs_info = pipeline->GetStage(Shader::SwStage::Vertex);
@@ -1567,6 +1616,84 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         }
     }
     DebugState.IncDrawCall();
+
+    // Register only the final native attachment after the actual geometry command was queued.
+    if (db_desc.first) {
+        const auto& depth_regs = Regs();
+        const auto& image = texture_cache.GetImage(db_desc.first);
+        const auto& a = state.depth_stencil_attachment;
+        bool native_view = false;
+        if (image.backing)
+            for (const auto id : image.backing->image_view_ids) {
+                const auto& view = texture_cache.GetImageView(id);
+                if (NativeDepthGrid::FullDepthAttachmentView(
+                        *view.image_view == a.image_view, view.info.is_storage,
+                        view.info.range.base.level, view.info.range.base.layer,
+                        view.info.range.extent.levels, view.info.range.extent.layers))
+                    native_view = true;
+            }
+        const bool full_native = native_view && state.width == image.info.size.width &&
+                                 state.height == image.info.size.height && state.num_layers == 1 &&
+                                 target_scale[0] == 1.f && target_scale[1] == 1.f;
+        const bool full_zero_clear = depth_grid_begins_pass && full_native && a.has_depth &&
+                                     a.depth_clear && a.clear_value[0] == 0;
+        if (full_zero_clear)
+            NativeDepthGrid::Cleared(runtime, image);
+        const auto& vp = scheduler.GetDynamicState().viewports;
+        const auto actual =
+            vp.size() == 1
+                ? NativeDepthGrid::EffectiveJ(vp[0].x, vp[0].y, vp[0].width, vp[0].height,
+                                              image.info.size.width, image.info.size.height)
+                : std::nullopt;
+        const auto& base = depth_regs.viewports[0];
+        const bool base_full = base.xoffset - base.xscale == 0.f &&
+                               base.yoffset - base.yscale == float(image.info.size.height);
+        const bool main_scope = db_desc.first == fg_depth;
+        const auto* depth_grid_producer_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        const bool qualified = main_scope && drive_aa->Active() && !upscaler->Enabled() &&
+                               full_native && base_full && actual &&
+                               NativeDepthGrid::ProducerDepthDomain(
+                                   vp[0].minDepth, vp[0].maxDepth,
+                                   depth_grid_producer_ps && depth_grid_producer_ps->stores.GetAny(
+                                                                 Shader::IR::Attribute::Depth)) &&
+                               draw_jitter == drive_aa->Jitter() &&
+                               (image.info.pixel_format == vk::Format::eD32Sfloat ||
+                                image.info.pixel_format == vk::Format::eD32SfloatS8Uint);
+        const bool writes = a.has_depth && scheduler.GetDynamicState().depth_test_enabled &&
+                            scheduler.GetDynamicState().depth_write_enabled;
+        // Proven procedural far-plane disc writes unbiased depth0 with GE and no PS depth export.
+        // Keep it unjittered; it may only preserve an existing same-identity camera-depth
+        // generation.
+        bool depth_grid_far_no_change = false;
+        if (pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash == 0x83a2f6fdull) {
+            const auto stages = pipeline->GetStages();
+            const auto* ps = stages[u32(Shader::SwStage::Fragment)];
+            unsigned stage_count = 0;
+            for (const auto* stage : stages)
+                stage_count += stage != nullptr;
+            const auto& dynamic = scheduler.GetDynamicState();
+            const bool scope = NativeDepthGrid::Enabled() && main_scope && full_native &&
+                               base_full && drive_aa->Active() && !upscaler->Enabled();
+            const NativeDepthGrid::FarZeroGuards far_guards{
+                scope,
+                pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                ps ? ps->pgm_hash : 0,
+                stage_count == 2 && ps && stages[u32(Shader::SwStage::Vertex)],
+                !ps || ps->stores.GetAny(Shader::IR::Attribute::Depth),
+                dynamic.depth_compare_op == vk::CompareOp::eGreaterOrEqual,
+                !dynamic.depth_bias_enabled,
+                vp.size() == 1 && vp[0].minDepth == 0.f && vp[0].maxDepth == 1.f,
+                !depth_regs.IsClipDisabled() && pipeline->GetGraphicsKey().depth_clip_enable,
+                depth_regs.clipper_control.clip_space == AmdGpu::ClipSpace::ZeroToW &&
+                    pipeline->GetGraphicsKey().clip_space == AmdGpu::ClipSpace::ZeroToW,
+                dynamic.depth_test_enabled,
+                dynamic.depth_write_enabled};
+            depth_grid_far_no_change = NativeDepthGrid::FarZeroNoChange(far_guards);
+        }
+        NativeDepthGrid::NoteDraw(runtime, image, main_scope, qualified, writes, false,
+                                  actual.value_or(std::array<float, 2>{}),
+                                  depth_grid_far_no_change);
+    }
 
     ResetBindings(false);
     phase.emplace(BbStats::phase_ns[6]);
@@ -1896,10 +2023,8 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
 
     // bbport: screen-space (clip disabled) draws into the upscaler's output-size images.
-    push_data.xscale *= target_scale[0];
-    push_data.xoffset *= target_scale[0];
-    push_data.yscale *= target_scale[1];
-    push_data.yoffset *= target_scale[1];
+    SunAtlasProxy::ScaleTargetPush(push_data, target_scale,
+                                   SunAtlasProxy::ActiveScaledClipWindow(runtime));
     pipeline->BindResources(set_writes, push_data);
     draw_jitter = {};
     if (drive_aa->Active() && db_desc.first && db_desc.first == fg_depth) {
@@ -1909,6 +2034,8 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
     }
     UpdateDynamicState(pipeline, is_indexed);
     MarkPass(pipeline, state);
+    SunAtlasProxy::CommitAttachment(runtime, state);
+    const bool depth_grid_begins_pass = !scheduler.IsRenderingWith(state);
     scheduler.BeginRendering(state);
 
     ASSERT(stride == (is_indexed ? sizeof(VkDrawIndexedIndirectCommand)
@@ -1934,6 +2061,84 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
         }
     });
     DebugState.IncDrawCall();
+
+    // Register only the final native attachment after the actual geometry command was queued.
+    if (db_desc.first) {
+        const auto& depth_regs = Regs();
+        const auto& image = texture_cache.GetImage(db_desc.first);
+        const auto& a = state.depth_stencil_attachment;
+        bool native_view = false;
+        if (image.backing)
+            for (const auto id : image.backing->image_view_ids) {
+                const auto& view = texture_cache.GetImageView(id);
+                if (NativeDepthGrid::FullDepthAttachmentView(
+                        *view.image_view == a.image_view, view.info.is_storage,
+                        view.info.range.base.level, view.info.range.base.layer,
+                        view.info.range.extent.levels, view.info.range.extent.layers))
+                    native_view = true;
+            }
+        const bool full_native = native_view && state.width == image.info.size.width &&
+                                 state.height == image.info.size.height && state.num_layers == 1 &&
+                                 target_scale[0] == 1.f && target_scale[1] == 1.f;
+        const bool full_zero_clear = depth_grid_begins_pass && full_native && a.has_depth &&
+                                     a.depth_clear && a.clear_value[0] == 0;
+        if (full_zero_clear)
+            NativeDepthGrid::Cleared(runtime, image);
+        const auto& vp = scheduler.GetDynamicState().viewports;
+        const auto actual =
+            vp.size() == 1
+                ? NativeDepthGrid::EffectiveJ(vp[0].x, vp[0].y, vp[0].width, vp[0].height,
+                                              image.info.size.width, image.info.size.height)
+                : std::nullopt;
+        const auto& base = depth_regs.viewports[0];
+        const bool base_full = base.xoffset - base.xscale == 0.f &&
+                               base.yoffset - base.yscale == float(image.info.size.height);
+        const bool main_scope = db_desc.first == fg_depth;
+        const auto* depth_grid_producer_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
+        const bool qualified = main_scope && drive_aa->Active() && !upscaler->Enabled() &&
+                               full_native && base_full && actual &&
+                               NativeDepthGrid::ProducerDepthDomain(
+                                   vp[0].minDepth, vp[0].maxDepth,
+                                   depth_grid_producer_ps && depth_grid_producer_ps->stores.GetAny(
+                                                                 Shader::IR::Attribute::Depth)) &&
+                               draw_jitter == drive_aa->Jitter() &&
+                               (image.info.pixel_format == vk::Format::eD32Sfloat ||
+                                image.info.pixel_format == vk::Format::eD32SfloatS8Uint);
+        const bool writes = a.has_depth && scheduler.GetDynamicState().depth_test_enabled &&
+                            scheduler.GetDynamicState().depth_write_enabled;
+        // Proven procedural far-plane disc writes unbiased depth0 with GE and no PS depth export.
+        // Keep it unjittered; it may only preserve an existing same-identity camera-depth
+        // generation.
+        bool depth_grid_far_no_change = false;
+        if (pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash == 0x83a2f6fdull) {
+            const auto stages = pipeline->GetStages();
+            const auto* ps = stages[u32(Shader::SwStage::Fragment)];
+            unsigned stage_count = 0;
+            for (const auto* stage : stages)
+                stage_count += stage != nullptr;
+            const auto& dynamic = scheduler.GetDynamicState();
+            const bool scope = NativeDepthGrid::Enabled() && main_scope && full_native &&
+                               base_full && drive_aa->Active() && !upscaler->Enabled();
+            const NativeDepthGrid::FarZeroGuards far_guards{
+                scope,
+                pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
+                ps ? ps->pgm_hash : 0,
+                stage_count == 2 && ps && stages[u32(Shader::SwStage::Vertex)],
+                !ps || ps->stores.GetAny(Shader::IR::Attribute::Depth),
+                dynamic.depth_compare_op == vk::CompareOp::eGreaterOrEqual,
+                !dynamic.depth_bias_enabled,
+                vp.size() == 1 && vp[0].minDepth == 0.f && vp[0].maxDepth == 1.f,
+                !depth_regs.IsClipDisabled() && pipeline->GetGraphicsKey().depth_clip_enable,
+                depth_regs.clipper_control.clip_space == AmdGpu::ClipSpace::ZeroToW &&
+                    pipeline->GetGraphicsKey().clip_space == AmdGpu::ClipSpace::ZeroToW,
+                dynamic.depth_test_enabled,
+                dynamic.depth_write_enabled};
+            depth_grid_far_no_change = NativeDepthGrid::FarZeroNoChange(far_guards);
+        }
+        NativeDepthGrid::NoteDraw(runtime, image, main_scope, qualified, writes, false,
+                                  actual.value_or(std::array<float, 2>{}),
+                                  depth_grid_far_no_change);
+    }
 
     ResetBindings(false);
     scheduler.KickRecording();
@@ -2255,6 +2460,8 @@ bool Rasterizer::BindHelperWanted() {
 }
 
 bool Rasterizer::HelperEligible(const Pipeline* pipeline) const {
+    if (SunAtlasProxy::Enabled())
+        return false; // staged proxy mutations stay on recording thread
     if (pipeline->IsCompute() || !bind_helper.Available() || FrameCapture::Active() ||
         BbToggle::Disabled(BbToggle::TextureBindHelper) ||
         BbToggle::Disabled(BbToggle::TextureBindingMemo) ||
@@ -2341,6 +2548,14 @@ void Rasterizer::JoinBindHelper(void* context) {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
+    bool exact_sun_pair = false;
+    if (SunAtlasProxy::Enabled() && !pipeline->IsCompute()) {
+        const auto* g = static_cast<const GraphicsPipeline*>(pipeline);
+        exact_sun_pair = g->GetStage(Shader::SwStage::Vertex).pgm_hash == 0xcb130cbfull &&
+                         g->GetGraphicsKey().mrt_mask != 0 &&
+                         g->GetStage(Shader::SwStage::Fragment).pgm_hash == 0xc6fa7896ull;
+    }
+    SunAtlasProxy::BeginDraw(runtime, exact_sun_pair);
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
@@ -3271,7 +3486,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
         if (tsharp.Address() == 0 || data_fmt == AmdGpu::DataFormat::FormatInvalid) {
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
             image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
+            SunAtlasProxy::AppendEligibility(binding_proxy_ok, false);
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
@@ -3285,7 +3500,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                         static_cast<u32>(num_fmt));
             image_bindings.emplace_back(VideoCore::ImageId{}, &image_desc_storage.emplace_back());
             image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(false);
+            SunAtlasProxy::AppendEligibility(binding_proxy_ok, false);
             image_descriptor_array_sizes.push_back(1);
             continue;
         }
@@ -3296,9 +3511,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
                 ? static_cast<u32>(tsharp.last_level - tsharp.base_level + 1)
                 : 1u;
-        const bool proxy_candidate = (sample_proxies || drive_redirect) && num_bindings == 1 &&
-                                     !image_desc.needs_native && !image_desc.is_written &&
-                                     mip_fallback_mode == Shader::MipStorageFallbackMode::None;
+        const bool proxy_candidate = SunAtlasProxy::SemanticProxyEligible(
+            sample_proxies || drive_redirect || SunAtlasProxy::Enabled(), num_bindings,
+            image_desc.needs_native, image_desc.is_written,
+            mip_fallback_mode == Shader::MipStorageFallbackMode::None);
 
         auto& desc_entry =
             prepared ? CachedImageDescEntry(tsharp, image_desc, prepared->image_hashes[image_index])
@@ -3324,7 +3540,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                 auto& [image_id, _] =
                     image_bindings.emplace_back(desc_entry.found_id, &desc_entry.found_desc);
                 image_binding_entries.push_back(&desc_entry);
-                binding_proxy_ok.push_back(proxy_candidate);
+                SunAtlasProxy::AppendEligibility(binding_proxy_ok, proxy_candidate);
                 texture_cache.MarkFound(image_id);
                 auto* image = &texture_cache.GetImage(image_id);
                 if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
@@ -3341,7 +3557,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& desc = image_desc_storage.emplace_back(desc_entry.desc);
             auto& [image_id, _] = image_bindings.emplace_back(VideoCore::ImageId{}, &desc);
             image_binding_entries.push_back(nullptr);
-            binding_proxy_ok.push_back(proxy_candidate);
+            SunAtlasProxy::AppendEligibility(binding_proxy_ok, proxy_candidate);
 
             if (mip_fallback_mode == Shader::MipStorageFallbackMode::ConstantIndex) {
                 ASSERT(num_bindings == 1);
@@ -3577,6 +3793,26 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
+            if (SunAtlasProxy::Enabled() && !on_helper && !is_storage) {
+                SunAtlasProxy::Observe(runtime, image_id);
+                // needs_native covers instruction UNRM, queries, offsets and integer fetches.
+                // FORCE_UNNORMALIZED can also come from a paired sampler sharp.
+                bool normalized = binding_proxy_ok[binding_index];
+                for (u32 si = 0; si < stage.samplers.size(); ++si) {
+                    const auto sharp = prepared ? prepared->sampler_sharps[si]
+                                                : stage.samplers[si].GetSharp(stage);
+                    normalized &= !sharp.force_unnormalized;
+                }
+                if (normalized && !binding.force_general && !binding.is_target) {
+                    if (const auto proxy =
+                            SunAtlasProxy::Sample(runtime, image_id, desc.view_info)) {
+                        image.usage.texture = 1u;
+                        image_infos.emplace_back(VK_NULL_HANDLE, proxy->view, proxy->layout);
+                        set_ok = false;
+                        continue;
+                    }
+                }
+            }
 
             // Upscaling: the draw scaling the game's picture into the display buffer gets it
             // upscaled by FSR or DLSS (DriveAA::OnComposite) and samples that instead, below.
@@ -3609,8 +3845,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             }
             // bbport: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
-            if (binding_proxy_ok[binding_index] && !is_storage && !binding.force_general &&
-                !binding.is_target &&
+            if ((sample_proxies || drive_redirect) && binding_proxy_ok[binding_index] &&
+                !is_storage && !binding.force_general && !binding.is_target &&
                 !(upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
                 if (const auto proxy = scene_targets->SampleProxy(image, desc.view_info)) {
                     image.usage.texture = 1u;
@@ -3790,6 +4026,9 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
 bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
                                      u32 first_image_idx, bool& barrier, TextureSet*& slot) {
     const u32 count = static_cast<u32>(stage.images.size());
+    slot = nullptr;
+    if (SunAtlasProxy::Enabled() && !SunAtlasProxy::CanUseNativeMemo(runtime, {}))
+        return false;
     // bbport: without a prepared draw (draw preparation is off in DriveClub) the T# hashes are
     // computed here from the current user data, so the set memo works on its own. Opt out with
     // BB_TEXTURE_SET_LOCAL=0.
@@ -3833,6 +4072,57 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         set.generation = ~0ull;
         std::copy_n(image_hashes, count, set.hashes.begin());
         return false;
+    }
+    if (SunAtlasProxy::Enabled()) {
+        std::array<VideoCore::ImageId, TextureSet::MaxImages * 2> checked_ids{};
+        u32 checked_count = 0;
+        const auto reject = [&] {
+            slot = nullptr;
+            ++texture_set_misses;
+            return false;
+        };
+        if (BbToggle::Disabled(BbToggle::ImageDescCache) ||
+            BbToggle::Disabled(BbToggle::TextureBindingMemo))
+            return reject();
+        const auto registry = texture_cache.RegistryGeneration();
+        for (u32 i = 0; i < count; ++i) {
+            const auto& cached = set.entries[i];
+            if (!cached.id)
+                return reject(); // unknown/null descriptors conservatively use full path
+            const auto sharp =
+                prepared ? prepared->image_sharps[i] : stage.images[i].GetSharp(stage);
+            std::array<u64, 4> sharp_key;
+            std::memcpy(sharp_key.data(), &sharp, sizeof(sharp_key));
+            const auto& res = stage.images[i];
+            const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 |
+                              u32(res.is_array) << 2 | u32(res.native_cube) << 3;
+            const auto* ways =
+                &image_desc_cache[(image_hashes[i] % (image_desc_cache.size() / 2)) * 2];
+            const ImageDescCacheEntry* found = nullptr;
+            for (u32 way = 0; way < 2; ++way)
+                if (ways[way].flags == flags && ways[way].sharp == sharp_key &&
+                    ways[way].found_generation == registry) {
+                    found = &ways[way];
+                    break;
+                }
+            // Read-only lookup: CachedImageDescEntry would mutate pins/overflow before bind_epoch
+            // advances.
+            if (!found || !found->found_id)
+                return reject();
+            const auto source_id = found->found_id;
+            auto* source_image = texture_cache.TryGetImage(source_id, 0);
+            if (!source_image)
+                return reject();
+            const auto depth_id = texture_cache.GetAssociatedDepth(*source_image);
+            const auto final_id = depth_id ? depth_id : source_id;
+            if (final_id != cached.id)
+                return reject();
+            checked_ids[checked_count++] = source_id;
+            checked_ids[checked_count++] = final_id;
+        }
+        if (!SunAtlasProxy::CanUseNativeMemo(
+                runtime, std::span<const VideoCore::ImageId>{checked_ids.data(), checked_count}))
+            return reject();
     }
     // Every image still has the backing its view belongs to and needs no refresh.
     for (u32 i = 0; i < count; ++i) {
@@ -3890,7 +4180,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     // bbport: RenderStateMemo (see BeginMemo).
-    const bool memo_on = !BbToggle::Disabled(BbToggle::RenderStateMemo) && !FrameCapture::Active();
+    bool memo_on = !BbToggle::Disabled(BbToggle::RenderStateMemo) && !FrameCapture::Active();
     if (BbStats::enabled && ((begin_memo_hits + begin_memo_misses) & 0x3FFFF) == 0x3FFFF) {
         std::printf("Render state memo: %llu hits, %llu misses; texture sets: %llu hits, %llu "
                     "misses\n",
@@ -3915,6 +4205,9 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     BeginSignature signature;
     if (memo_on) {
         signature = MakeBeginSignature(pipeline);
+        memo_on = SunAtlasProxy::CanUseNativeMemo(runtime, signature.ids);
+    }
+    if (memo_on) {
         const auto& regs = Regs();
         bool usable = begin_memo.valid && scheduler.IsRenderingWith(begin_memo.state) &&
                       !regs.depth_render_control.depth_clear_enable &&
@@ -3958,6 +4251,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     using VulkanUpscalerTarget = TemporalUpscaler::Target;
     VulkanUpscalerTarget redirect{};
     bool color_redirected = false, depth_redirected = false;
+    std::optional<SunAtlasProxy::Target> sun_attachment;
+    std::pair<u32, u32> sun_native_extent{};
     std::pair<u32, u32> guest_extent{1, 1};
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
@@ -4123,6 +4418,13 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         texture_cache.TouchMeta(htile_address, slice, false);
         ASSERT(desc.view_info.range.extent.levels == 1 && !image.binding.needs_rebind);
 
+        const auto sun_target =
+            (SunAtlasProxy::Enabled() &&
+             SunAtlasProxy::AllNullColorViews(state.color_attachments.data(),
+                                              state.num_color_attachments) &&
+             key.num_samples == 1 && !image.binding.is_bound && !reduced)
+                ? SunAtlasProxy::Attachment(runtime, image_id, !regs.IsClipDisabled())
+                : std::optional<SunAtlasProxy::Target>{};
         const bool has_stencil = image.info.props.has_stencil;
         // Stencil writes can be enabled while depth writes are off.
         const bool stencil_write =
@@ -4154,13 +4456,18 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const bool depth_read_only = VideoCore::FewerBarriers() &&
                                      (new_layout == vk::ImageLayout::eDepthStencilReadOnlyOptimal ||
                                       new_layout == vk::ImageLayout::eDepthReadOnlyOptimal);
-        if (!reduced) needs_barrier |= runtime.Transit(&image, new_layout,
-                                         vk::PipelineStageFlagBits2::eEarlyFragmentTests |
-                                             vk::PipelineStageFlagBits2::eLateFragmentTests,
-                                         depth_read_only ? vk::AccessFlagBits2::eDepthStencilAttachmentRead
-                                                         : vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
-                                                               vk::AccessFlagBits2::eDepthStencilAttachmentRead,
-                                         desc.view_info.range);
+        if (!reduced && !sun_target) {
+            NativeDepthGrid::AttachmentIntent(runtime, &image);
+            needs_barrier |= runtime.Transit(
+                &image, new_layout,
+                vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                    vk::PipelineStageFlagBits2::eLateFragmentTests,
+                depth_read_only ? vk::AccessFlagBits2::eDepthStencilAttachmentRead
+                                : vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+                                      vk::AccessFlagBits2::eDepthStencilAttachmentRead,
+                desc.view_info.range);
+            NativeDepthGrid::AttachmentIntent(runtime, nullptr);
+        }
 
         state.width = std::min<u32>(state.width, image.info.size.width);
         state.height = std::min<u32>(state.height, image.info.size.height);
@@ -4187,6 +4494,14 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
             const auto target = scene_targets->Attachment(image_id, desc.view_info);
             attachment.image_view = target.view;
             attachment.image_layout = target.layout;
+        }
+        if (sun_target) {
+            sun_attachment = sun_target;
+            sun_native_extent = {image.info.size.width, image.info.size.height};
+            attachment.image_view = sun_target->view;
+            attachment.image_layout = sun_target->layout;
+            state.width = sun_target->width;
+            state.height = sun_target->height;
         }
         image.usage.depth_target = true;
         if (upscaler->Enabled()) {
@@ -4269,6 +4584,18 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         state.width = proxy.width;
         state.height = proxy.height;
         target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+    }
+    // Final override after scene/AA scaling: Sun is an all-null-color, unreduced
+    // pass and owns one complete host image. Never multiply an existing scale.
+    if (sun_attachment) {
+        SunAtlasProxy::OverrideTarget(state, target_scale,
+                                      {sun_native_extent.first, sun_native_extent.second},
+                                      {sun_attachment->width, sun_attachment->height});
+        // Keep guest pixel-coordinate addressing for every active2x Sun writer,
+        // including clipped casters. Native receivers/camera passes keep their encoding.
+        push_data.scene_size = SunAtlasProxy::LogicalFragCoordEncoding(
+            {sun_native_extent.first, sun_native_extent.second},
+            {sun_attachment->width, sun_attachment->height});
     }
     if (FrameCapture::Active()) {
         std::array<const VideoCore::ImageInfo*, AmdGpu::NUM_COLOR_BUFFERS> colors{};
@@ -4526,6 +4853,10 @@ void Rasterizer::RegisterMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
+    // The opt-in bbgpu unmap hook hands off BEFORE looking up this object.
+    // Never perform proxy retirement if a future caller bypasses that contract.
+    if (SunAtlasProxy::Enabled() && !(DrawPipe::OnStageB() || OnStageA()))
+        std::abort();
     DrainDrawPipe();
     buffer_cache.InvalidateMemory(addr, size);
     texture_cache.UnmapMemory(addr, size);
@@ -4542,6 +4873,8 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
         return !(env && env[0] == '0');
     }();
     auto& m = dyn_memo;
+    if (SunAtlasProxy::DynamicRouteChanged(runtime))
+        m.valid = false;
     const u32* reg_words = Regs().reg_array.data();
     bool same = memo_on && m.valid && m.pipeline == pipeline && m.is_indexed == is_indexed &&
                 m.feedback_loop == attachment_feedback_loop && m.jitter == draw_jitter &&
@@ -4664,6 +4997,14 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = 0.f;
             viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB));
             viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
+            if (SunAtlasProxy::ActiveScaledClipWindow(runtime)) {
+                // Attachment preflight proved the expanded window fits actual
+                // device dimensions and viewport bounds. Push transform stays native.
+                const auto window = SunAtlasProxy::ExpandedClipWindow(
+                    instance.GetMaxViewportWidth(), instance.GetMaxViewportHeight());
+                viewport.width = float(window.width);
+                viewport.height = float(window.height);
+            }
         } else {
             const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
             const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;

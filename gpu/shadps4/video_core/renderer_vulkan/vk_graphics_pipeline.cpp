@@ -14,6 +14,9 @@
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 
+#include "sun_ultra_pipeline.h"
+#include "sun_atlas_proxy.h"
+
 namespace Vulkan {
 
 using Shader::Backend::SPIRV::AuxShaderType;
@@ -242,6 +245,27 @@ GraphicsPipeline::GraphicsPipeline(
         });
     }
 
+    const auto native_shader_stages = shader_stages;
+    const auto* ultra_vs=infos[u32(Shader::SwStage::Vertex)];
+    const auto* ultra_ps=infos[u32(Shader::SwStage::Fragment)];
+    const auto precision_scope=BbSunUltra::CurrentScope(SunAtlasProxy::Scale());
+    const bool precision_candidate=ultra_vs&&ultra_ps&&BbSunUltra::Candidate(
+        true,precision_scope,ultra_vs->pgm_hash,ultra_ps->pgm_hash,shader_stages.size());
+    const auto precision_selection=BbSunUltra::Select(precision_candidate,BbSunUltra::Enabled(),precision_scope);
+    // Mutually exclusive: Ultra remains an atomic pair; High retains its native PS.
+    auto ultra_pair=BbSunUltra::ApplyPair(device,shader_stages,
+        precision_selection==BbSunUltra::Selection::UltraPair);
+    auto precision_vs=BbSunUltra::ApplyVertex(device,shader_stages,
+        precision_selection==BbSunUltra::Selection::PrecisionVS);
+    bool sun_override_applied = bool(ultra_pair[0]) && bool(ultra_pair[1]) || bool(precision_vs);
+    const char* sun_mode = precision_selection == BbSunUltra::Selection::UltraPair ? "Ultra" :
+                          precision_scope == BbSunUltra::Scope::Standard ? "Standard" : "High";
+    if (precision_candidate && !sun_override_applied) {
+        static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+        if (!reported.test_and_set())
+            LOG_WARNING(Render_Vulkan, "Sun shadows {}: native stages retained; override module identity or allocation failed", sun_mode);
+    }
+
     const vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_size_ci = {
         .requiredSubgroupSize = 64,
     };
@@ -424,6 +448,18 @@ GraphicsPipeline::GraphicsPipeline(
 
     auto [pipeline_result, pipe] =
         device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+    if (pipeline_result != vk::Result::eSuccess && (ultra_pair[0] || precision_vs)) {
+        static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+        if (!reported.test_and_set())
+            LOG_WARNING(Render_Vulkan, "Sun shadows {}: driver rejected override; restoring original native stages", sun_mode);
+        sun_override_applied = false;
+        // Replacement failure restores both original native stages atomically.
+        for (size_t i = 0; i < shader_stages.size(); ++i)
+            shader_stages[i].module = native_shader_stages[i].module;
+        auto native_result = device.createGraphicsPipelineUnique(pipeline_cache, pipeline_info);
+        pipeline_result = native_result.result;
+        pipe = std::move(native_result.value);
+    }
     for (u32 attempt = 1; pipeline_result != vk::Result::eSuccess &&
                           RetryPipelineCreation(pipeline_result, attempt, "graphics", debug_str.c_str());
          ++attempt) {
@@ -437,6 +473,12 @@ GraphicsPipeline::GraphicsPipeline(
         return;
     }
     pipeline = std::move(pipe);
+    if (sun_override_applied) {
+        static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+        if (!reported.test_and_set())
+            LOG_INFO(Render_Vulkan, "Sun shadows {}: override active ({}); native family cb130cbf/c6fa7896", sun_mode,
+                     precision_selection == BbSunUltra::Selection::UltraPair ? "vertex and fragment" : "vertex precision, native fragment");
+    }
     SetObjectName(device, *pipeline, "Graphics Pipeline {}", debug_str);
 }
 

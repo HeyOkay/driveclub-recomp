@@ -1,3 +1,4 @@
+#include "video_core/renderer_vulkan/sun_atlas_proxy.h"
 #include <algorithm>
 #include <map>
 #include <tuple>
@@ -409,6 +410,7 @@ bool SameDepthForm(const ImageInfo& a, const ImageInfo& b) {
 } // namespace
 
 void TextureCache::SwapDepthForm(ImageId image_id, const ImageInfo& new_info) {
+    Vulkan::SunAtlasProxy::Retire(runtime, slot_images[image_id]);
     ImageId twin_id{};
     if (const auto it = depth_twins.find(image_id.index); it != depth_twins.end()) {
         twin_id = it->second;
@@ -1531,6 +1533,7 @@ void TextureCache::TouchImage(const Image& image) {
 }
 
 void TextureCache::DeleteImage(ImageId image_id) {
+    Vulkan::SunAtlasProxy::Retire(runtime, slot_images[image_id]);
     BbStats::NoteImageFree(reinterpret_cast<std::uint64_t>(__builtin_return_address(0)));
     {
         const auto& freed = slot_images[image_id].info;
