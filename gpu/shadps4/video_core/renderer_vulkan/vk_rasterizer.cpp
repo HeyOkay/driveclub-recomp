@@ -54,6 +54,27 @@ extern "C" int runtime_motion_blur_clock(float*, uint64_t*);
 namespace Vulkan {
 
 namespace {
+bool AuditedProjectedDepthExport(const GraphicsPipeline* pipeline) {
+    const auto stages=pipeline->GetStages();
+    const auto* vs=stages[u32(Shader::SwStage::Vertex)];
+    const auto* ps=stages[u32(Shader::SwStage::Fragment)];
+    if (!vs || !ps || !ps->stores.GetAny(Shader::IR::Attribute::Depth)) return false;
+    unsigned stage_count=0; for (const auto* stage:stages) stage_count+=stage!=nullptr;
+    const auto& fetch=pipeline->GetFetchShader();
+    if (!NativeDepthGrid::AuditedDepthExport(vs->pgm_hash,ps->pgm_hash,stage_count,
+        fetch ? fetch->attributes.size() : 0,ps->loads.GetAny(Shader::IR::Attribute::FragCoord),true)) return false;
+    // Instruction/resource shape is an additional fail-closed check, not proof
+    // that an arbitrary sampled texture cannot contain scene depth. The native
+    // program identities above fix the audited material-coordinate formula.
+    bool material=ps->images.size()==4 && ps->samplers.size()==4;
+    for (const auto& image:ps->images)
+        material &= !image.is_depth && !image.is_written && !image.is_atomic &&
+                    !image.needs_native && !image.native_cube;
+    for (const auto& sampler:ps->samplers)
+        material &= !sampler.is_depth && !sampler.GetSharp(*ps).force_unnormalized;
+    return NativeDepthGrid::AuditedDepthExport(vs->pgm_hash,ps->pgm_hash,stage_count,
+        fetch ? fetch->attributes.size() : 0,ps->loads.GetAny(Shader::IR::Attribute::FragCoord),material);
+}
 DriveMotion* g_drive_motion = nullptr;
 bool g_taa_noted = false; ///< BindBuffers noted the anti-aliasing camera last time (its threads, one at a time)
 // The game's anti-aliasing pass carries its camera matrices: frame generation takes its motion
@@ -1523,8 +1544,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     // Scoped fetched depth-writing geometry is projected independently of vertex count.
     const auto& depth_grid_fetch = pipeline->GetFetchShader();
     const bool depth_grid_scope = NativeDepthGrid::Enabled() && db_desc.first &&
-                                  db_desc.first == fg_depth && drive_aa->Active() &&
-                                  !upscaler->Enabled();
+                                  NativeDepthGrid::DriveAaProducerScope(bool(db_desc.first == fg_depth),
+                                  drive_aa->Active());
     bool depth_grid_native = false;
     if (depth_grid_scope) {
         const auto& image = texture_cache.GetImage(db_desc.first);
@@ -1548,7 +1569,8 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         regs.depth_render_control.depth_clear_enable,
         depth_grid_fetch ? depth_grid_fetch->attributes.size() : 0,
         depth_grid_material_ps &&
-            depth_grid_material_ps->stores.GetAny(Shader::IR::Attribute::Depth));
+            depth_grid_material_ps->stores.GetAny(Shader::IR::Attribute::Depth),
+        AuditedProjectedDepthExport(pipeline));
     draw_jitter = {};
     if (drive_aa->Active() && db_desc.first && db_desc.first == fg_depth &&
         (regs.num_indices > 6 || regs.num_instances.NumInstances() > 1 || depth_grid_projected)) {
@@ -1651,12 +1673,13 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                                base.yoffset - base.yscale == float(image.info.size.height);
         const bool main_scope = db_desc.first == fg_depth;
         const auto* depth_grid_producer_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        const bool qualified = main_scope && drive_aa->Active() && !upscaler->Enabled() &&
+        const bool qualified = NativeDepthGrid::DriveAaProducerScope(main_scope, drive_aa->Active()) &&
                                full_native && base_full && actual &&
-                               NativeDepthGrid::ProducerDepthDomain(
-                                   vp[0].minDepth, vp[0].maxDepth,
+                               NativeDepthGrid::ProducerDepthDomain(vp[0].minDepth, vp[0].maxDepth) &&
+                               NativeDepthGrid::DepthExportEligible(
                                    depth_grid_producer_ps && depth_grid_producer_ps->stores.GetAny(
-                                                                 Shader::IR::Attribute::Depth)) &&
+                                       Shader::IR::Attribute::Depth),
+                                   AuditedProjectedDepthExport(pipeline)) &&
                                draw_jitter == drive_aa->Jitter() &&
                                (image.info.pixel_format == vk::Format::eD32Sfloat ||
                                 image.info.pixel_format == vk::Format::eD32SfloatS8Uint);
@@ -1674,7 +1697,7 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
                 stage_count += stage != nullptr;
             const auto& dynamic = scheduler.GetDynamicState();
             const bool scope = NativeDepthGrid::Enabled() && main_scope && full_native &&
-                               base_full && drive_aa->Active() && !upscaler->Enabled();
+                               base_full && NativeDepthGrid::DriveAaProducerScope(main_scope, drive_aa->Active());
             const NativeDepthGrid::FarZeroGuards far_guards{
                 scope,
                 pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,
@@ -2096,12 +2119,13 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                                base.yoffset - base.yscale == float(image.info.size.height);
         const bool main_scope = db_desc.first == fg_depth;
         const auto* depth_grid_producer_ps = pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-        const bool qualified = main_scope && drive_aa->Active() && !upscaler->Enabled() &&
+        const bool qualified = NativeDepthGrid::DriveAaProducerScope(main_scope, drive_aa->Active()) &&
                                full_native && base_full && actual &&
-                               NativeDepthGrid::ProducerDepthDomain(
-                                   vp[0].minDepth, vp[0].maxDepth,
+                               NativeDepthGrid::ProducerDepthDomain(vp[0].minDepth, vp[0].maxDepth) &&
+                               NativeDepthGrid::DepthExportEligible(
                                    depth_grid_producer_ps && depth_grid_producer_ps->stores.GetAny(
-                                                                 Shader::IR::Attribute::Depth)) &&
+                                       Shader::IR::Attribute::Depth),
+                                   AuditedProjectedDepthExport(pipeline)) &&
                                draw_jitter == drive_aa->Jitter() &&
                                (image.info.pixel_format == vk::Format::eD32Sfloat ||
                                 image.info.pixel_format == vk::Format::eD32SfloatS8Uint);
@@ -2119,7 +2143,7 @@ void Rasterizer::DrawIndirectRecord(const GraphicsPipeline* pipeline, bool is_in
                 stage_count += stage != nullptr;
             const auto& dynamic = scheduler.GetDynamicState();
             const bool scope = NativeDepthGrid::Enabled() && main_scope && full_native &&
-                               base_full && drive_aa->Active() && !upscaler->Enabled();
+                               base_full && NativeDepthGrid::DriveAaProducerScope(main_scope, drive_aa->Active());
             const NativeDepthGrid::FarZeroGuards far_guards{
                 scope,
                 pipeline->GetStage(Shader::SwStage::Vertex).pgm_hash,

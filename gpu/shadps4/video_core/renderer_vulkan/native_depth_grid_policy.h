@@ -4,6 +4,12 @@
 #include <cstdint>
 #include <optional>
 namespace Vulkan::NativeDepthGrid {
+// Provider availability (BB_UPSCALER) does not identify the active reconstruction
+// path. DriveAA owns its scene depth; callers additionally prove the final selected
+// native view, full extent and unit target scale, excluding redirected attachments.
+inline bool DriveAaProducerScope(bool main_depth, bool drive_aa_active) {
+    return main_depth && drive_aa_active;
+}
 struct Key {
     std::uint64_t uid{};
     std::uintptr_t native{}, backing{};
@@ -38,14 +44,27 @@ inline bool FullDepthAttachmentView(bool selected_native, bool depth_write_marke
     (void)depth_write_marker;
     return selected_native && base_level == 0 && base_layer == 0 && levels == 1 && layers == 1;
 }
+// This native pair exports projected depth for a material-displaced impostor.
+// Audited depth and discard depend only on interpolants, material samples and
+// uniform projection coefficients; translating the viewport translates that field.
+// Other depth-export programs remain unproven and must invalidate provenance.
+inline bool AuditedDepthExport(std::uint64_t vertex, std::uint64_t fragment,
+                              unsigned stage_count, unsigned attributes,
+                              bool reads_frag_coord, bool material_resources) {
+    return vertex == 0x44e6c5edull && fragment == 0x11af4feaull &&
+           stage_count == 2 && attributes == 3 && !reads_frag_coord && material_resources;
+}
+inline bool DepthExportEligible(bool exports_depth, bool audited_export = false) {
+    return !exports_depth || audited_export;
+}
 inline bool ProjectedDepthProducer(bool scope, bool clip_disabled, bool depth_test,
                                    bool depth_write, bool clear_mode, unsigned attributes,
-                                   bool fragment_depth_export) {
+                                   bool fragment_depth_export, bool audited_export = false) {
     return scope && !clip_disabled && depth_test && depth_write && !clear_mode && attributes > 0 &&
-           !fragment_depth_export;
+           DepthExportEligible(fragment_depth_export, audited_export);
 }
-inline bool ProducerDepthDomain(float minimum, float maximum, bool fragment_depth_export) {
-    return minimum == 0.f && maximum == 1.f && !fragment_depth_export;
+inline bool ProducerDepthDomain(float minimum, float maximum) {
+    return minimum == 0.f && maximum == 1.f;
 }
 struct FarZeroGuards {
     bool scope{};

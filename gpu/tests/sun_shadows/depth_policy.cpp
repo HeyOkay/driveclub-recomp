@@ -5,6 +5,53 @@
 #include <limits>
 using namespace Vulkan::NativeDepthGrid;
 int main() {
+    const auto proof=AuditedDepthExport(0x44e6c5ed,0x11af4fea,2,3,false,true);
+    assert(proof);
+    assert(!AuditedDepthExport(0,0x11af4fea,2,3,false,true));
+    assert(!AuditedDepthExport(0x44e6c5ed,0,2,3,false,true));
+    assert(!AuditedDepthExport(0x44e6c5ed,0x11af4fea,3,3,false,true));
+    assert(!AuditedDepthExport(0x44e6c5ed,0x11af4fea,2,2,false,true));
+    assert(!AuditedDepthExport(0x44e6c5ed,0x11af4fea,2,3,true,true));
+    assert(!AuditedDepthExport(0x44e6c5ed,0x11af4fea,2,3,false,false));
+    assert(ProjectedDepthProducer(true,false,true,true,false,3,true,proof));
+    assert(!ProjectedDepthProducer(true,false,true,true,false,3,true,false));
+    assert(!ProjectedDepthProducer(true,true,true,true,false,3,true,proof));
+    assert(!ProjectedDepthProducer(true,false,true,true,true,3,true,proof));
+    assert(ProducerDepthDomain(0.f,1.f) && DepthExportEligible(true,proof));
+    assert(!ProducerDepthDomain(-1.f,1.f));
+    assert(!ProducerDepthDomain(std::numeric_limits<float>::quiet_NaN(),1.f));
+    for (const auto size : {std::array<unsigned,2>{1920,1080},{2560,1440},{3840,2160}}) {
+        Tracking tracked; tracked.runtime=1; tracked.session=1;
+        Key key{1,2,3,size[0],size[1]};const std::array<float,2> j{.125f,-.194458008f};
+        tracked.Clear(key);tracked.Draw(key,true,true,true,false,j);
+        tracked.Draw(key,true,DepthExportEligible(true,proof),true,false,j);
+        assert(tracked.Query(1,key,true));
+        tracked.Draw(key,true,DepthExportEligible(true,false),true,false,j);
+        assert(!tracked.Query(1,key,true) && tracked.blocked);
+    }
+
+    assert(DriveAaProducerScope(true, true));
+    assert(!DriveAaProducerScope(false, true));
+    assert(!DriveAaProducerScope(true, false));
+    assert(!DriveAaProducerScope(false, false));
+    // Same native producer/copy contract at each input size, with measured
+    // subpixel jitter; the provider's output resolution is irrelevant here.
+    for (const auto size : {std::array<unsigned,2>{1920,1080}, {2560,1440}, {3840,2160}}) {
+        Tracking depth; depth.runtime=11; depth.session=1;
+        const Key native{1,2,3,size[0],size[1]};
+        const auto jitter=EffectiveJ(.125f,float(size[1])-.2037f,float(size[0]),-float(size[1]),size[0],size[1]);
+        assert(jitter);
+        depth.Clear(native);
+        depth.Draw(native,true,DriveAaProducerScope(true,true),true,false,*jitter);
+        assert(depth.Query(11,native,true)==jitter);
+        // A selected proxy or scaled viewport cannot satisfy native-view proof.
+        assert(!FullDepthAttachmentView(false,true,0,0,1,1));
+        assert(!EffectiveJ(.125f,float(size[1]),float(size[0])/2,-float(size[1])/2,size[0],size[1]));
+        // Unknown unjittered small writers must revoke, never silently mix grids.
+        depth.Draw(native,true,false,true,false,{});
+        assert(!depth.Query(11,native,true));
+    }
+
     for (const auto& fixture : projected_fixtures) {
         assert(fixture.count <= 6);
         assert(ProjectedDepthProducer(true, false, true, true, false, fixture.attributes,
@@ -27,11 +74,13 @@ int main() {
     assert(!FullDepthAttachmentView(true, true, 0, 1, 1, 1));
     assert(!FullDepthAttachmentView(true, true, 0, 0, 2, 1));
     assert(!FullDepthAttachmentView(true, true, 0, 0, 1, 2));
-    assert(ProducerDepthDomain(0.f, 1.f, false));
-    assert(!ProducerDepthDomain(0.f, 1.f, true));
-    assert(!ProducerDepthDomain(-1.f, 1.f, false));
-    assert(!ProducerDepthDomain(0.f, 2.f, false));
-    assert(!ProducerDepthDomain(std::numeric_limits<float>::quiet_NaN(), 1.f, false));
+    assert(ProducerDepthDomain(0.f, 1.f));
+    assert(!DepthExportEligible(true));
+    assert(DepthExportEligible(false));
+    assert(DepthExportEligible(true,true));
+    assert(!ProducerDepthDomain(-1.f, 1.f));
+    assert(!ProducerDepthDomain(0.f, 2.f));
+    assert(!ProducerDepthDomain(std::numeric_limits<float>::quiet_NaN(), 1.f));
     FarZeroGuards far{true, 0x83a2f6fd, 0x8612c289, true, false, true,
                       true, true,       true,       true, true,  true};
     assert(FarZeroNoChange(far));
