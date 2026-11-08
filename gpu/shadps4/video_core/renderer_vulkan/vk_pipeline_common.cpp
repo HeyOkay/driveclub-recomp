@@ -1,3 +1,5 @@
+#include "bbport_settings.h"
+#include "shader_recompiler/draw_control.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -48,8 +50,11 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     const vk::PipelineLayout layout = *pipeline_layout;
-    scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
-        cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
+    auto draw_data = push_data;
+    draw_data.motion_param = Shader::DrawControl::Pack(
+        draw_data.motion_param, BbSettings::Get().texture_repetition.load());
+    scheduler.Record([layout, stage_flags, draw_data](vk::CommandBuffer cmdbuf) {
+        cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(draw_data), &draw_data);
     });
 
     // Bind descriptor set.

@@ -1,3 +1,4 @@
+#include "shader_recompiler/draw_control.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -76,7 +77,8 @@ static void EmitVertexMotion(EmitContext& ctx) {
     const Id param_ptr = ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, u32_type),
                                            ctx.push_data_block,
                                            ctx.ConstU32(PushData::MotionParamIndex));
-    const Id param_index = ctx.OpLoad(u32_type, param_ptr);
+    const Id param_index = ctx.OpBitwiseAnd(u32_type, ctx.OpLoad(u32_type, param_ptr),
+        ctx.ConstU32(DrawControl::MotionIndexMask));
     const auto address = [&](u64 base, Id index, u32 stride) {
         return ctx.OpIAdd(ctx.U64, ctx.Constant(ctx.U64, base),
                           ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, index),

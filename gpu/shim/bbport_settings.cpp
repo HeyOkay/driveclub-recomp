@@ -26,6 +26,7 @@ std::string NextToConfig(const char* name) {
     return (slash == std::string::npos ? std::string() : config.substr(0, slash + 1)) + name;
 }
 // hdr.ini: the HDR brightness set while playing; picture.ini: the SDR picture (launcher sliders, F4).
+std::string TextureIniPath() { return NextToConfig("texture_repetition.ini"); }
 std::string HdrIniPath() { return NextToConfig("hdr.ini"); }
 std::string PictureIniPath() { return NextToConfig("picture.ini"); }
 
@@ -120,6 +121,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.playstation_buttons = value == "ps5" ? 1 : 0;
     } else if (key == "show_fps") {
         v.show_fps = i != 0;
+    } else if (key == "texture_repetition") {
+        v.texture_repetition = i != 0;
     } else if (key == "show_pedals") {
         v.show_pedals = i != 0;
     } else if (key == "fsr4_auto_exposure") {
@@ -181,6 +184,14 @@ void Load() {
         std::printf("Settings: %s\n", Path());
     }
     BbNeural::Load(Path());
+    // In-game hotkey choices, before explicit environment overrides.
+    if (FILE* file = std::fopen(TextureIniPath().c_str(), "r")) {
+        char line[128];
+        while (std::fgets(line, sizeof line, file))
+            if (std::strncmp(line, "enabled=", 8) == 0) v.texture_repetition = std::atoi(line + 8) != 0;
+        std::fclose(file);
+    }
+
     if (const char* pacing = std::getenv("BB_FG_PACING"); pacing && std::strcmp(pacing, "gpu") == 0) {
         v.fg_pacing_gpu = true;
     }
@@ -225,6 +236,7 @@ void Load() {
         {"BB_AA", "aa"},                            {"BB_AA_SCALE", "aa_scale"},                            {"BB_FRAME_GEN", "frame_gen"},              {"BB_FRAME_GEN_MULTIPLIER", "frame_gen_multiplier"},
         {"BB_FRAME_GEN_FIT_DISPLAY", "frame_gen_fit_display"}, {"BB_FRAME_GEN_AUTO", "frame_gen_auto"}, {"BB_DLSS_MODEL", "dlss_model"},
         {"BB_MOTION_BLUR_REFERENCE", "motion_blur_reference"},
+        {"BB_TEXTURE_REPETITION", "texture_repetition"},
         {"BB_HDR_PAPER", "hdr_paper"},                {"BB_HDR_PEAK", "hdr_peak"},
         {"BB_BRIGHTNESS", "brightness"},              {"BB_CONTRAST", "contrast"},
         {"BB_GAMMA", "gamma"},
@@ -234,6 +246,7 @@ void Load() {
             Set(v, key, value);
         }
     }
+    v.startup_texture_repetition = v.texture_repetition;
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;
@@ -286,10 +299,10 @@ int RenderPreset() {
 bool ResolutionNeedsRestart() {
     const auto& v = Get();
     // TAA needs the live path (native guest targets): run.sh selects it on restart.
-    return FixedRenderSession() &&
+    return (FixedRenderSession() &&
         (v.preset != v.startup_preset || v.output_res != v.startup_output_res ||
          (v.upscaler == UpscalerOff) != (v.startup_upscaler == UpscalerOff) ||
-         (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa));
+         (v.upscaler == UpscalerTaa) != (v.startup_upscaler == UpscalerTaa)));
 }
 
 void Save() {
@@ -316,6 +329,7 @@ void Save() {
                  v.playstation_buttons ? "ps5" : "ps4");
     std::fprintf(file, "motion_blur_reference=%d\n", v.motion_blur_reference.load());
     std::fprintf(file, "show_pedals=%d\n", int(v.show_pedals.load()));
+    std::fprintf(file, "texture_repetition=%d\n", int(v.texture_repetition.load()));
     std::fprintf(file, "aa_scale=%s", AaScaleName(v.aa_scale));
     std::fputc(10, file);
     std::fprintf(file, "aa=%s", AaName(v.aa_mode));
@@ -361,6 +375,14 @@ void SaveHdrBrightness(int nits) {
         std::fprintf(file, "paper=%d\n", nits);
         std::fclose(file);
     }
+}
+
+bool SaveTextureRepetition(bool enabled) {
+    if (FILE* file = std::fopen(TextureIniPath().c_str(), "w")) {
+        const bool written = std::fprintf(file, "enabled=%d\n", int(enabled)) > 0;
+        return std::fclose(file) == 0 && written;
+    }
+    return false;
 }
 
 void SavePicture() {

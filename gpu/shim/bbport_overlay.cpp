@@ -243,6 +243,17 @@ void PollHotkeys() {
         std::printf("MotionBlur: F3 %s\n", reference == 30 ? "Slow" : "Fast");
         std::fflush(stdout);
     }
+    static bool texture_f4_down = false;
+    if (edge(VK_F4, texture_f4_down) && SDL_GetKeyboardFocus() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
+        !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+        const bool enabled = !s.texture_repetition.load();
+        s.texture_repetition = enabled;
+        const bool saved = BbSettings::SaveTextureRepetition(enabled);
+        Note(std::string("Texture repetition reduction: ") + (enabled ? "on" : "off") +
+             "  (Shift+F4: toggle)" + (saved ? "" : "  [not saved]"));
+        std::printf("TextureRepetition: Shift+F4 %s saved=%d\n", enabled ? "on" : "off", int(saved));
+        std::fflush(stdout);
+    }
     // F2: the pedal inputs (PedalPanel) on and off.
     static bool f2_down = false;
     if (edge(VK_F2, f2_down) && SDL_GetKeyboardFocus()) {
@@ -294,7 +305,7 @@ void PollHotkeys() {
     f10_down = f10;
     // F4: the picture (PicturePanel): brightness, contrast, gamma in turn, then closed. SDR only.
     static bool f4_down = false;
-    if (edge(VK_F4, f4_down) && SDL_GetKeyboardFocus() && !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+    if (edge(VK_F4, f4_down) && SDL_GetKeyboardFocus() && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
         if (s.hdr_output) {
             Note("Brightness, contrast and gamma are for SDR   (HDR: Page Up / Page Down)");
         } else {
