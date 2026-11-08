@@ -5,6 +5,10 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <array>
+#include <map>
+#include <set>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,7 +26,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "graphics-2";
+constexpr const char* kVersion = "graphics-3-sun-v1";
 
 std::wstring Widen(const std::string& s) {
   if (s.empty()) return L"";
@@ -203,6 +207,80 @@ std::string ReplaceDocument(std::vector<uint8_t>& pack, const std::string& root,
 
 // The values: between the race camera's and photo mode's; the developers' own pre/post-race camera values for the
 // scenery (their comment: "relaxed cull thresholds so we see less popping"). Tested on an RTX 3070 Laptop.
+using Fields = std::map<std::string,std::string>;
+Fields ReadAttrs(const std::string& s) {
+  Fields fields; const std::regex re("([A-Za-z0-9_]+)=\"([^\"]*)\"");
+  for(std::sregex_iterator i(s.begin(),s.end(),re),end;i!=end;++i) fields[(*i)[1]]=(*i)[2];
+  return fields;
+}
+struct NativeView { int count=3; std::array<std::string,4> distances={"4","16","64","256"}; };
+using Views=std::map<std::string,NativeView>;
+bool ResolveNative(const std::string& xml,Views& views,std::vector<std::string>& order) {
+  views.clear();order.clear();
+  const std::regex conf("<Configuration ([^>]+)>([\\s\\S]*?)</Configuration>");
+  const std::regex tags("<(Shadows|ShadowSplit) ([^>]+)/>");
+  for(std::sregex_iterator i(xml.begin(),xml.end(),conf),end;i!=end;++i) {
+    const auto a=ReadAttrs((*i)[1]);if(!a.count("name"))return false;
+    NativeView view;
+    if(a.count("parent")) { auto parent=views.find(a.at("parent"));if(parent==views.end())return false;view=parent->second; }
+    const std::string body=(*i)[2];
+    for(std::sregex_iterator j(body.begin(),body.end(),tags),e;j!=e;++j) {
+      const auto f=ReadAttrs((*j)[2]);
+      if((*j)[1]=="Shadows") {
+        if(f.count("numShadowSplits"))view.count=std::stoi(f.at("numShadowSplits"));
+      } else if(f.count("split")&&f.count("distance")) {
+        const int s=std::stoi(f.at("split"));if(s<0||s>3)return false;view.distances[s]=f.at("distance");
+      }
+    }
+    // Intentionally ignore legacy Shadows.splitDistanceN fields: native1.28
+    // parser was disassembled and consumes modern ShadowSplit records only.
+    if(view.count<1||view.count>4)return false;
+    const std::string name=a.at("name");if(views.count(name))return false;
+    views[name]=view;order.push_back(name);
+  }
+  return !views.empty();
+}
+bool SetFar(std::string& xml,const std::string& name,const std::string& distance) {
+  const std::string start="<Configuration name=\""+name+"\"";
+  const auto at=xml.find(start);if(at==std::string::npos)return false;
+  const auto end=xml.find("</Configuration>",at);if(end==std::string::npos)return false;
+  std::string block=xml.substr(at,end-at);
+  const std::regex split("<ShadowSplit ([^>]+)/>");
+  for(std::sregex_iterator i(block.begin(),block.end(),split),e;i!=e;++i) {
+    const auto attrs=ReadAttrs((*i)[1]);
+    if(attrs.count("split")&&attrs.at("split")=="3") {
+      block.replace(i->position(),i->length(),SetAttrs(i->str(),{{"distance",distance.c_str()}}));
+      xml.replace(at,end-at,block);return true;
+    }
+  }
+  block+="<ShadowSplit split=\"3\" distance=\""+distance+"\" />\n";
+  xml.replace(at,end-at,block);return true;
+}
+const std::set<std::string> kExtendedViews={
+  "OnePlayer2D","OnePlayer2DHQ","OnePlayer2DHQPhoto","OnePlayer2DInCar",
+  "PhotoMode","PhotoModeInCar","PrePostRaceCamsNight","PrePostRaceCamsDay",
+  "FlyCameraView","ReplayCamera","ReplayCameraHQ"
+};
+bool ApplySunShadowCoverage(std::string& xml) {
+  Views before;std::vector<std::string> order;if(!ResolveNative(xml,before,order))return false;
+  for(const auto& name:kExtendedViews)if(!before.count(name)||before.at(name).count!=4)return false;
+  for(const auto& name:order) {
+    Views current;std::vector<std::string> ignored;if(!ResolveNative(xml,current,ignored))return false;
+    const auto& old=before.at(name);const auto& now=current.at(name);
+    const auto desired=kExtendedViews.count(name)?std::string("512"):old.distances[3];
+    // Preserve excluded descendants that copied an extended main view, including
+    // WholeWorldShadows,TDAO,3D legacy and all mirror/probe/spotlight paths.
+    if(now.distances[3]!=desired&&!SetFar(xml,name,desired))return false;
+  }
+  Views after;std::vector<std::string> ignored;if(!ResolveNative(xml,after,ignored))return false;
+  for(const auto& [name,old]:before) {
+    const auto& now=after.at(name);if(old.count!=now.count)return false;
+    for(int i=0;i<3;++i)if(old.distances[i]!=now.distances[i])return false;
+    if(now.distances[3]!=(kExtendedViews.count(name)?"512":old.distances[3]))return false;
+  }
+  return true;
+}
+
 std::vector<Edit> Edits(const GraphicsChoice& c) {
   std::vector<Edit> e;
   if (c.own_car) {
@@ -260,9 +338,9 @@ std::string Describe(const GraphicsChoice& c) {
   char s[200];
   // The runtime's benchmark report reads the first five (runtime_benchmark.c).
   snprintf(s, sizeof s,
-           "car %d opponents %d scenery %d reflections %d dynres %d shadows %d particles %d blur %d dust %d haze %d fxaa %d",
+           "car %d opponents %d scenery %d reflections %d dynres %d shadows %d particles %d blur %d dust %d haze %d fxaa %d sun_shadows %d",
            c.own_car, c.opponents, c.scenery, c.reflections, c.dynamic_res, c.shadows, c.particles, c.motion_blur,
-           c.lens_dust, c.heat_haze, c.fxaa);
+           c.lens_dust, c.heat_haze, c.fxaa, c.sun_shadows);
   return s;
 }
 
@@ -271,6 +349,7 @@ std::string Describe(const GraphicsChoice& c) {
 std::wstring BuildGraphics(const std::wstring& update_dir, const std::wstring& base_dir, const std::wstring& out_dir,
                            const GraphicsChoice& choice, bool& active) {
   active = false;
+  if (choice.sun_shadows < 0 || choice.sun_shadows > 3) return L"Invalid sun shadow quality.";
   const std::wstring pack_path = out_dir + L"\\global.rpk", stamp_path = out_dir + L"\\stamp.txt";
   if (choice.Default()) {
     DeleteFileW(pack_path.c_str());
@@ -292,6 +371,7 @@ std::wstring BuildGraphics(const std::wstring& update_dir, const std::wstring& b
   if (!err.empty()) return Widen("global.rpk: " + err);
   const std::vector<Edit> edits = Edits(choice);
   err = ReplaceDocument(pack, "ViewportQuality", [&](std::string& xml) {
+    if (choice.sun_shadows >= 2 && !ApplySunShadowCoverage(xml)) return false;
     for (const Edit& e : edits) {
       if (!ApplyEdit(xml, e)) return false;
     }

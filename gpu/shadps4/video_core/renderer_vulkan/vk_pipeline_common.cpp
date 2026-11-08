@@ -1,3 +1,5 @@
+#include "bbport_settings.h"
+#include "shader_recompiler/draw_control.h"
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -11,8 +13,6 @@
 #include <boost/container/static_vector.hpp>
 
 #include "shader_recompiler/resource.h"
-#include "shader_recompiler/draw_control.h"
-#include "bbport_settings.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_common.h"

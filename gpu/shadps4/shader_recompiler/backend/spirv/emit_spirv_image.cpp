@@ -83,8 +83,8 @@ Id EmitImageSampleRaw(EmitContext& ctx, IR::Inst* inst, u32 handle, Id address1,
     UNREACHABLE_MSG("Unreachable instruction");
 }
 
-// Emit both paths once. A uniform draw flag switches sampling without changing
-// pipeline keys, recompiling shaders, or evaluating the extra samples when off.
+// Emit eligible sampling paths once; a draw-uniform flag selects them live.
+
 void PrepareWorldRepeat(const IR::Program& program) {
     WorldRepeat::selected.clear();
     WorldRepeat::Prepare(program);
@@ -120,16 +120,6 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
     const Id uv = ctx.OpVectorShuffle(V, coords, coords, 0, 1);
     Id dx = Sirit::ValidId(provided_dx) ? provided_dx : ctx.OpDPdx(V, uv);
     Id dy = Sirit::ValidId(provided_dy) ? provided_dy : ctx.OpDPdy(V, uv);
-    // Derivatives remain outside the branch; the condition is uniform per draw.
-    const Id flag_ptr = ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, U),
-        ctx.push_data_block, ctx.ConstU32(PushData::MotionParamIndex));
-    const Id enabled = ctx.OpINotEqual(ctx.U1[1],
-        ctx.OpBitwiseAnd(U, ctx.OpLoad(U, flag_ptr), ctx.ConstU32(DrawControl::TextureRepeatBit)),
-        ctx.ConstU32(0u));
-    const Id before = ctx.OpLabel(), apply = ctx.OpLabel(), merge = ctx.OpLabel();
-    ctx.OpBranch(before); ctx.AddLabel(before);
-    ctx.OpSelectionMerge(merge, spv::SelectionControlMask::DontFlatten);
-    ctx.OpBranchConditional(enabled, apply, merge); ctx.AddLabel(apply);
     const Id footprint = ctx.OpFMax(F, ctx.OpLength(F, dx), ctx.OpLength(F, dy));
     Id amount = ctx.OpFClamp(
         F,
@@ -144,6 +134,20 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
         dx = ctx.OpVectorTimesScalar(V, dx, scale);
         dy = ctx.OpVectorTimesScalar(V, dy, scale);
     }
+    // Keep the original sample and derivatives in the caller's block. Only the
+    // explicit-gradient/LOD reads below may execute under this per-fragment branch.
+    const Id before = ctx.last_label;
+    const Id repeat_label = ctx.OpLabel(), merge = ctx.OpLabel();
+    const Id flag_ptr = ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, U),
+        ctx.push_data_block, ctx.ConstU32(PushData::MotionParamIndex));
+    const Id enabled = ctx.OpINotEqual(ctx.U1[1],
+        ctx.OpBitwiseAnd(U, ctx.OpLoad(U, flag_ptr), ctx.ConstU32(DrawControl::TextureRepeatBit)),
+        ctx.ConstU32(0u));
+    const Id apply_repeat = ctx.OpLogicalAnd(ctx.U1[1], enabled,
+        ctx.OpFOrdGreaterThan(ctx.U1[1], amount, f(0)));
+    ctx.OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(apply_repeat, repeat_label, merge);
+    ctx.AddLabel(repeat_label);
     const Id cell = ctx.OpFloor(V, uv), frac = ctx.OpFSub(V, uv, cell);
     const auto component = [&](Id x, u32 i) { return ctx.OpCompositeExtract(F, x, i); };
     const auto smooth = [&](Id x) {
@@ -162,7 +166,7 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
     const Id image = ctx.OpLoad(tex.image_type, tex.id);
     const Id sampler = ctx.OpLoad(ctx.sampler_type, ctx.samplers[handle >> 16]);
     const Id combined = ctx.OpSampledImage(tex.sampled_type, image, sampler);
-    Id blended = ctx.ConstantNull(C), square_sum = f(0);
+    Id blended = ctx.ConstantNull(C);
     for (u32 i = 0; i < 4; ++i) {
         const Id cx = rx ? ctx.OpFAdd(F, component(cell, 0), f(float(i & 1))) : f(0);
         const Id cy = ry ? ctx.OpFAdd(F, component(cell, 1), f(float(i >> 1))) : f(0);
@@ -199,25 +203,13 @@ static Id ApplyGlobalRepeat(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coo
                                                        spv::ImageOperandsMask::Grad, dx, dy);
         const Id weight = ctx.OpFDiv(F, weights[i], sum);
         blended = ctx.OpFAdd(C, blended, ctx.OpVectorTimesScalar(C, sample, weight));
-        square_sum = ctx.OpFAdd(F, square_sum, ctx.OpFMul(F, weight, weight));
     }
-    ctx.AddCapability(spv::Capability::ImageQuery);
-    const Id levels = ctx.OpImageQueryLevels(U, image);
-    const Id lod = ctx.OpConvertUToF(F, ctx.OpISub(U, levels, ctx.ConstU32(1u)));
-    const Id centre = tex.view_type == AmdGpu::ImageType::Color2DArray
-                          ? ctx.OpCompositeConstruct(ctx.F32[3], f(.5f), f(.5f),
-                                                     ctx.OpCompositeExtract(F, coords, 2))
-                          : v(f(.5f), f(.5f));
-    const Id mean =
-        ctx.OpImageSampleExplicitLod(C, combined, centre, spv::ImageOperandsMask::Lod, lod);
-    const Id altered = ctx.OpFAdd(
-        C, mean,
-        ctx.OpVectorTimesScalar(C, ctx.OpFSub(C, blended, mean), ctx.OpInverseSqrt(F, square_sum)));
-    Id result = ctx.OpFMix(C, original, altered, splat(amount));
+    Id result = ctx.OpFMix(C, original, blended, splat(amount));
     // Never alter opacity/cutout semantics through the generic colour hook.
     result = ctx.OpCompositeInsert(C, ctx.OpCompositeExtract(F, original, 3), result, 3);
-    ctx.OpBranch(merge); ctx.AddLabel(merge);
-    return ctx.OpPhi(C, result, apply, original, before);
+    ctx.OpBranch(merge);
+    ctx.AddLabel(merge);
+    return ctx.OpPhi(C, result, repeat_label, original, before);
 }
 
 Id EmitImageSampleImplicitLod(EmitContext &ctx, IR::Inst *inst, u32 handle,

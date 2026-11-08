@@ -45,6 +45,7 @@
 #include "scene_track_names.h"
 #include "gpu_check.h"
 #include "graphics.h"
+#include "sun_shadows.h"
 #include "prepare.h"
 #include "unlock.h"
 #include "carswitch.h"
@@ -399,10 +400,11 @@ int g_fsrver = -1, fsrver_saved = 0;  // "FSR version" row (BB_UPSCALER fsr3 / f
 int g_fgpace = -1, fgpace_saved = 0;  // "Frame generation pacing" row (BB_FG_PACING=gpu); launcher.ini fgpace=
 int g_reflex = -1, reflex_saved = 0;  // "NVIDIA Reflex" row (BB_REFLEX); launcher.ini reflex=
 int g_inres = -1, g_wide = -1, g_aspect = -1, g_outres = -1, g_preset = -1, g_mirror = -1, g_aniso = -1, g_fps = -1, g_fgen = -1, g_aa = -1, g_up = -1, g_lang = -1;
+
 // Graphics detail rows (graphics.cpp): the control of each, and its choice from launcher.ini (-1 = not saved yet).
 enum GfxRow { kGfxCar, kGfxOpp, kGfxScenery, kGfxSsr, kGfxShadows, kGfxParticles, kGfxDynres, kGfxBlur, kGfxDust,
-              kGfxHaze, kGfxFxaa, kGfxRows };
-int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+              kGfxHaze, kGfxFxaa, kGfxSunShadows, kGfxRows };
+int g_gfx[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 int g_motion_blur = -1;
 int g_prompts = -1, g_xbox_buttons = -1, g_ps_buttons = -1;
 int prompts_saved = 0, xbox_buttons_saved = 0, ps_buttons_saved = 0;
@@ -412,6 +414,7 @@ int g_timelapse_rate = 500;
 int g_camera_patch_row = -1;
 bool g_camera_patch = true;
 bool g_camera_patch_saved = false;
+int motion_blur_saved = -1;  // Dev default: Fast outside PS4; explicit saved choices win.
 const wchar_t* MotionBlurHint(int choice) {
   return choice == 1
       ? L"Fast: shorter motion blur, matching the game's 60 FPS exposure."
@@ -423,10 +426,10 @@ const wchar_t* MotionBlurReference() {
 HWND g_motion_blur_tooltip = nullptr;
 
 int g_blur_patch = -1;  // the "Disable motion blur and depth of field" patch row
-int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
+int gfx_saved[kGfxRows] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 const char* const kGfxKey[kGfxRows] = {"gfx_car=", "gfx_opponents=", "gfx_scenery=", "gfx_reflections=", "gfx_shadows=",
                                        "gfx_particles=", "gfx_dynres=", "gfx_motion_blur=", "gfx_lens_dust=",
-                                       "gfx_heat_haze=", "gfx_fxaa="};
+                                       "gfx_heat_haze=", "gfx_fxaa=", "gfx_sun_shadows="};
 int unlocked_saved = 0;  // "Unlocked" frame rate choice, from launcher.ini: 1 VRR, 2 no V-Sync  // indices of the render resolution and widescreen choices
 
 // ------------------------------------------------------------------------------------------
@@ -549,12 +552,25 @@ std::vector<std::wstring> g_bench_ran_lines;  // every setting the game reported
 // overrides (BB_FPS_LIMIT=40, ...). Only these are left alone; the launcher's own values are replaced each time.
 std::vector<std::wstring> g_user_env;
 void SnapshotUserEnv() {
-  for (const wchar_t* name : {L"BB_FPS_LIMIT", L"BB_PRESENT_MODE", L"BB_LANGUAGE", L"BB_AA_SCALE", L"BB_AA", L"BB_FRAME_GEN", L"BB_FRAME_GEN_MULTIPLIER", L"BB_FRAME_GEN_AUTO",
+  for (const wchar_t* name : {L"BB_FPS_LIMIT", L"BB_PRESENT_MODE", L"BB_LANGUAGE", L"BB_AA_SCALE", L"BB_AA", L"BB_AA_JITTER", L"BB_FRAME_GEN", L"BB_FRAME_GEN_MULTIPLIER", L"BB_FRAME_GEN_AUTO",
                              L"BB_TEXTURE_REPETITION", L"BB_GEARBOX", L"BB_BRAKE_ASSIST", L"BB_HARDCORE", L"BB_WHEEL_ASSIST"}) {
+
     if (GetEnvironmentVariableW(name, nullptr, 0) != 0) g_user_env.push_back(name);
   }
 }
 bool UserEnv(const wchar_t* name) { return std::find(g_user_env.begin(), g_user_env.end(), name) != g_user_env.end(); }
+// Local preference: native DLAA uses the previously confirmed zero-jitter setting.
+// Derive it from the final environment so explicit AA/scale overrides win.
+void SetNativeDlaaJitterEnvironment() {
+  if (UserEnv(L"BB_AA_JITTER")) return;
+  wchar_t aa[16] = {}, scale[16] = {};
+  const bool native_dlaa = GetEnvironmentVariableW(L"BB_AA", aa, 16) == 4 &&
+      std::wcscmp(aa, L"dlss") == 0 &&
+      GetEnvironmentVariableW(L"BB_AA_SCALE", scale, 16) == 6 &&
+      std::wcscmp(scale, L"native") == 0;
+  SetEnvironmentVariableW(L"BB_AA_JITTER", native_dlaa ? L"0" : nullptr);
+}
+
 void SetTextureRepetitionEnvironment() {
   if (!UserEnv(L"BB_TEXTURE_REPETITION"))
     SetEnvironmentVariableW(L"BB_TEXTURE_REPETITION", g_c[g_texture_repetition].sel ? L"1" : L"0");
@@ -1543,9 +1559,9 @@ void BuildModel() {
                             L"\x2022 Built from your own game files; your game folders are not changed.",
                             "@unlock", false);
   g_texture_repetition = toggle(L"Reduce texture repetition",
-      L"Breaks up repeating patterns on compatible ground, road and building surfaces while retaining nearby detail. "
-      L"Uses extra texture samples. Enabled by default for PC presets; PS4 keeps the original sampling. Shift+F4 toggles it while playing and keeps the choice.",
-      "@texture_repetition", true);
+      L"Breaks up repeated detail on compatible terrain, roads, walls and opaque cabin materials, including eligible textured plastic, leather and fabric. Vegetation, glass and stitch patterns are excluded. "
+      L"Uses extra texture samples. Enabled by default for High and Ultra; other presets keep the original sampling. Takes effect on the next game start.",
+      "@texture_repetition", false);
   const int unlock_all = toggle(L"Unlock every car and bike",
                                 L"Every car and bike is free from the start, with no driver or club level needed. It includes the add-on content, so Unlock DLC content is not needed with it. Cars you earn by winning an event stay as the game has them. Off by default.",
                                 "@unlockall", false);
@@ -1568,6 +1584,7 @@ void BuildModel() {
   g_save_restore_row = int(g_c.size());
   g_c.push_back(Ctl{L"Restore saves", L"Puts back this profile's newest backup. The current saves are backed up first.",
                     Kind::Button, {L"Restore the latest backup"}, {"@saverestore"}, 0, 0});
+
   // Graphics detail the PS4 version keeps low and the game's camera effects, from the game's own quality file
   // (graphics.cpp).
   g_gfx[kGfxCar] = toggle(L"Your car: full detail",
@@ -1593,6 +1610,13 @@ void BuildModel() {
                            L"\x2022 Game: 32 samples near the car, 8 for shadows further than 4 m.\n"
                            L"\x2022 High: 16 samples for those further shadows. Ultra: 32.",
                            {L"Game", L"High", L"Ultra"}, {"@gfx", "", ""}, 0);
+  g_gfx[kGfxSunShadows] = seg(L"Sun shadows",
+      L"Standard increases the sunlight shadow atlas. High increases atlas resolution and range. "
+      L"Ultra extends near shadow softness through 50 metres when Shadow edges is set to Ultra (32 samples). "
+      L"Select Shadow edges Ultra separately to enable that softness; this choice does not change it. "
+      L"Higher settings require a runtime with full Sun shadow support and use more GPU memory. "
+      L"Game keeps the original atlas. Applies to sunlight shadows.",
+      {L"Game", L"Standard", L"High", L"Ultra"}, {"@gfx", "", "", ""}, 0);
   g_gfx[kGfxParticles] = toggle(L"More particles",
                                 L"Keeps the distant spray, smoke and dust that races normally drop (replays keep them).\n"
                                 L"\x2022 Also allows 1.5 times as many particles.",
@@ -1609,7 +1633,7 @@ void BuildModel() {
       L"\x2022 Slow: the original 30 FPS exposure, the most cinematic.\n"
       L"\x2022 Fast: a shorter 60 FPS exposure.\n"
       L"In game: F3 switches between them.",
-      {L"Slow", L"Fast"}, {"@motion_blur", ""}, 1);
+      {L"Slow", L"Fast"}, {"@motion_blur", ""}, 0);
   g_gfx[kGfxDust] = toggle(L"Lens dust", L"Dirt on the camera lens when you face the sun.", "@gfx", true);
   g_gfx[kGfxHaze] = toggle(L"Heat haze", L"The shimmer over hot roads in the distance.", "@gfx", true);
   g_gfx[kGfxFxaa] = toggle(L"FXAA pass",
@@ -1803,7 +1827,7 @@ void BuildModel() {
   g_cards.push_back({L"PICTURE", {g_picture[0], g_picture[1], g_picture[2]}, 0, kTabGraphics,
                      L"For SDR. With HDR on, use HDR brightness.\nIn game: Page Up / Page Down change the brightness; F4 picks contrast or gamma."});
   g_cards.push_back({L"SCENE DETAIL", {g_gfx[kGfxCar], g_gfx[kGfxOpp], g_gfx[kGfxScenery],
-                                      g_gfx[kGfxShadows], g_gfx[kGfxParticles], g_texture_repetition}, 0, kTabDetail});
+                                      g_gfx[kGfxShadows], g_gfx[kGfxSunShadows], g_gfx[kGfxParticles], g_texture_repetition}, 0, kTabDetail});
   g_cards.push_back({L"REFLECTIONS", {g_gfx[kGfxSsr], g_mirror}, 0, kTabDetail});
   g_cards.push_back({L"CAMERA EFFECTS", {g_gfx[kGfxBlur], g_motion_blur, g_gfx[kGfxDust], g_gfx[kGfxHaze], g_gfx[kGfxFxaa]}, 0, kTabDetail});
   g_cards.push_back({L"NEURAL RENDERING", {g_neural, g_nr_sub[0], g_nr_sub[1], g_nr_sub[2], g_nr_sub[3], g_nr_sub[4]}, 0, kTabDetail,
@@ -1818,7 +1842,6 @@ void BuildModel() {
                      L"Keys while playing:\n"
                      L"F2   pedal inputs\n"
                      L"F4   picture: brightness, contrast or gamma\n"
-                     L"Shift+F4   texture repetition reduction\n"
                      L"F5 / F6   narrower / wider view\n"
                      L"F7   mouse look on or off\n"
                      L"F9 / F10   anti-aliasing\n"
@@ -1932,7 +1955,6 @@ bool ReadOptimizationMask(uint64_t& mask) {
   in>>std::ws; return in.eof();
 }
 void LoadSettings() {
-  int motion_blur_saved = -1;
   int texture_repetition_saved = -1;
   g_two_thread = !PrimaryGpuIsAmd();  // the saved choice (draw_threads=) replaces it below
   for (const auto& line : ReadLines(IniPath())) {
@@ -2049,7 +2071,7 @@ void LoadSettings() {
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@texture_repetition") {
-      c.sel = texture_repetition_saved < 0 ? 1 : texture_repetition_saved;
+      c.sel = texture_repetition_saved < 0 ? 0 : texture_repetition_saved;
       continue;
     }
     if (c.kind == Kind::Toggle && c.patches[0] == "@pedals") {
@@ -2181,7 +2203,6 @@ void LoadSettings() {
     const int choices = c.kind == Kind::Toggle ? 2 : int(c.items.size());
     c.sel = gfx_saved[k] >= 0 && gfx_saved[k] < choices ? gfx_saved[k] : c.def;
   }
-  // Use native exposure while recognizing legacy PS4 profiles below.
   if (g_motion_blur >= 0) g_c[g_motion_blur].sel = motion_blur_saved < 0 ? 0 : motion_blur_saved;
   if (g_prompts >= 0) g_c[g_prompts].sel = (std::clamp)(prompts_saved, 0, 2);
   if (g_xbox_buttons >= 0) g_c[g_xbox_buttons].sel = (std::clamp)(xbox_buttons_saved, 0, 1);
@@ -2204,11 +2225,12 @@ void LoadSettings() {
       texture_repetition_saved = line.substr(8) == "0" ? 0 : 1;
       if (g_texture_repetition >= 0) g_c[g_texture_repetition].sel = texture_repetition_saved;
     }
-  // Older PS4 profiles have no setting key. Preserve their original sampling;
-  // other legacy profiles inherit the PC default. Explicit saved opt-outs win.
+  // Legacy profiles without the key inherit their performance preset default.
+  // Explicit saved choices, including Custom opt-ins, always win.
   if (texture_repetition_saved < 0 && g_texture_repetition >= 0) {
     g_c[g_texture_repetition].sel = 0;
-    g_c[g_texture_repetition].sel = IsPs4Profile() ? 0 : 1;
+    DerivePreset();
+    g_c[g_texture_repetition].sel = g_c[g_preset].sel == 4 || g_c[g_preset].sel == 5;
   }
   if (motion_blur_saved < 0 && g_motion_blur >= 0)
     g_c[g_motion_blur].sel = IsPs4Profile() ? 0 : 1;
@@ -2265,7 +2287,10 @@ int RenderMemoryTier() {
   return tier;
 }
 
-int MemoryTier() { return (std::max)(RenderMemoryTier(), OutputMemoryTier()); }
+int MemoryTier() {
+  const bool sun = g_gfx[kGfxSunShadows] >= 0 && g_c[g_gfx[kGfxSunShadows]].sel > 0;
+  return (std::max)((std::max)(RenderMemoryTier(), OutputMemoryTier()), sun ? 1 : 0);
+}
 
 // Output / render choices per preset: indices into the "Output resolution" and "Render resolution" rows.
 void ApplyPreset(int preset) {
@@ -2274,8 +2299,7 @@ void ApplyPreset(int preset) {
     NameNativeUpscale(); return;
   }
   if (preset < 0 || preset > 5) return;
-  if (g_motion_blur >= 0) g_c[g_motion_blur].sel = 1;
-  if (g_texture_repetition >= 0) g_c[g_texture_repetition].sel = 1;
+  if (g_texture_repetition >= 0) g_c[g_texture_repetition].sel = preset == 4 || preset == 5;
   if (preset == 0 || g_outres < 0 || g_inres < 0) return;
   g_c[g_outres].sel = kPresetOut[preset];
   g_c[g_inres].sel = kPresetIn[preset];
@@ -2356,6 +2380,7 @@ bool SaveSettings() {
     ini << "playstation_buttons=" << (g_ps_buttons >= 0 && g_c[g_ps_buttons].sel == 1 ? "ps5" : "ps4") << "\r\n";
     ini << "timelapse=" << (g_c[g_timelapse_row].sel?1:0) << "\r\n";
     ini << "timelapse_rate=" << g_c[g_timelapse_rate_row].sel << "\r\n";
+
     ini << "camera_patch=" << (g_c[g_camera_patch_row].sel ? 1 : 0) << "\r\n";
     ini << "lock_horizon=" << g_lock_horizon << "\r\n";
     ini << "camera_shake=" << (g_camera_shake >= 0 ? g_c[g_camera_shake].sel : 100) << "\r\n";
@@ -2406,6 +2431,7 @@ bool SaveSettings() {
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","button_prompts",g_prompts >= 0 && g_c[g_prompts].sel == 1 ? "playstation" : g_prompts >= 0 && g_c[g_prompts].sel == 2 ? "xbox" : "auto")) return false;
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","xbox_buttons",g_xbox_buttons >= 0 && g_c[g_xbox_buttons].sel == 1 ? "360" : "one")) return false;
     if(!SaveIniValue(g_data+L"\\user\\driveclub.ini","playstation_buttons",g_ps_buttons >= 0 && g_c[g_ps_buttons].sel == 1 ? "ps5" : "ps4")) return false;
+
   }
   std::ostringstream out;
   for (const auto& c : g_c) {
@@ -3593,6 +3619,9 @@ void SetLockHorizonEnvironment() {
 // Starts the game. With `process` the caller gets the game's process handle (and closes it).
 std::wstring StartGame(HANDLE* process = nullptr) {
   const std::wstring exe = GameExe();
+  SetEnvironmentVariableW(L"BB_SUN_SHADOW_PROFILE", nullptr);
+  SetEnvironmentVariableW(L"BB_SUN_NEAR_FILTER_RANGE", nullptr);
+  SetEnvironmentVariableW(L"BB_SUN_ATLAS_PROXY_SCALE", nullptr);
   if (!Exists(exe)) return L"The game program (DriveClubGame.exe) was not found.";
   MakeDirs(g_home + L"\\logs");
   SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -3601,6 +3630,10 @@ std::wstring StartGame(HANDLE* process = nullptr) {
                            &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   MakeDirs(g_home + L"\\mods");
   const std::wstring prep = g_data + L"\\prep", user = g_data + L"\\user";
+  std::wstring boot_path = prep + L"\\boot-linked.bin", patches_path = prep + L"\\patches.bin";
+  bool sun_prepared = false;
+  int sun_profile = 0, sun_proxy_scale = 0;
+  bool sun_near_filter_range = false;
   MakeDirs(user);
   const std::wstring track_names = user + L"\\scene_tracks.tsv";
   const bool have_track_names = SceneTrackNames::Write(g_folder[0].path, g_folder[1].path, track_names);
@@ -3637,6 +3670,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     gc.scenery = sel(kGfxScenery, 0);
     gc.reflections = sel(kGfxSsr, 0);
     gc.shadows = sel(kGfxShadows, 0);
+    gc.sun_shadows = sel(kGfxSunShadows, 0);
     gc.particles = sel(kGfxParticles, 0);
     gc.motion_blur = BlurLocked() ? 1 : sel(kGfxBlur, 1);
     gc.lens_dust = sel(kGfxDust, 1);
@@ -3645,11 +3679,29 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     gc.dynamic_res = sel(kGfxDynres, 1);
     const std::wstring graphics_dir = g_data + L"\\graphics";
     bool active = false;
-    const std::wstring problem = BuildGraphics(g_folder[0].path, g_folder[1].path, graphics_dir, gc, active);
+    SunShadowBundle sun;
+    const std::wstring problem = gc.sun_shadows ?
+        PrepareSunShadows(prep, g_data + L"\\sun-shadows", g_folder[0].path, g_folder[1].path, exe, gc, sun) :
+        BuildGraphics(g_folder[0].path, g_folder[1].path, graphics_dir, gc, active);
+    if (gc.sun_shadows) {
+      if (!problem.empty()) {
+        LauncherLog("sun shadows: " + Narrow(problem));
+        if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+        return problem;
+      }
+      boot_path = sun.boot; patches_path = sun.patches;
+      graphics_arg = L" --mods \"" + sun.graphics + L"\"";
+      sun_prepared = true;
+      sun_profile = gc.sun_shadows == 3 ? 2 : gc.sun_shadows;
+      sun_near_filter_range = gc.sun_shadows == 3;
+      sun_proxy_scale = sun.proxy_scale;
+      active = true;
+      LauncherLog(gc.sun_shadows == 3 ? "sun shadows: Ultra near softness range4, native filtering" : gc.sun_shadows == 2 ? "sun shadows: High atlas, original filtering" : "sun shadows: Standard atlas, original filtering");
+    }
     LauncherLog(!problem.empty() ? "graphics detail: " + Narrow(problem)
                 : active        ? std::string("graphics detail: ok")
                                 : std::string("graphics detail: game defaults"));
-    if (problem.empty() && active) graphics_arg = L" --mods \"" + graphics_dir + L"\"";
+    if (problem.empty() && active && !sun_prepared) graphics_arg = L" --mods \"" + graphics_dir + L"\"";
     else if (!problem.empty())
       MessageBoxW(nullptr, (L"The graphics detail settings could not be applied (" + problem + L"). The game starts with its own.").c_str(),
                   L"DriveClub", MB_OK | MB_ICONWARNING);
@@ -3677,10 +3729,13 @@ std::wstring StartGame(HANDLE* process = nullptr) {
       return online_problem;
     }
   }
-  std::wstring cmd = L"\"" + exe + L"\" \"" + prep + L"\\boot-linked.bin\" --content-profile \"" + prep +
-                     L"\\content.bin\" --patches \"" + prep + L"\\patches.bin\" --app0 \"" + g_folder[0].path +
+  std::wstring cmd = L"\"" + exe + L"\" \"" + boot_path + L"\" --content-profile \"" + prep +
+                     L"\\content.bin\" --patches \"" + patches_path + L"\" --app0 \"" + g_folder[0].path +
                      L"\" --app0-base \"" + g_folder[1].path + L"\" --user \"" + user + L"\" --mods \"" + g_home + L"\\mods\"" +
                      unlock_arg + graphics_arg + L" --stub-unresolved";
+  SetEnvironmentVariableW(L"BB_SUN_SHADOW_PROFILE", std::to_wstring(sun_profile).c_str());
+  SetEnvironmentVariableW(L"BB_SUN_ATLAS_PROXY_SCALE", sun_prepared && sun_proxy_scale == 2 ? L"2" : nullptr);
+  SetEnvironmentVariableW(L"BB_SUN_NEAR_FILTER_RANGE", sun_prepared && sun_near_filter_range ? L"4" : nullptr);
   SetEnvironmentVariableW(L"BB_BUTTON_PROMPTS", g_prompts >= 0 && g_c[g_prompts].sel == 1 ? L"playstation" : g_prompts >= 0 && g_c[g_prompts].sel == 2 ? L"xbox" : L"auto");
   SetEnvironmentVariableW(L"BB_XBOX_BUTTONS", g_xbox_buttons >= 0 && g_c[g_xbox_buttons].sel == 1 ? L"360" : L"one");
   SetEnvironmentVariableW(L"BB_PLAYSTATION_BUTTONS", g_ps_buttons >= 0 && g_c[g_ps_buttons].sel == 1 ? L"ps5" : L"ps4");
@@ -3768,6 +3823,7 @@ std::wstring StartGame(HANDLE* process = nullptr) {
     const int a = g_c[g_aa].sel;
     SetEnvironmentVariableW(L"BB_AA", a == 0 ? L"off" : a == 1 ? L"fsr3" : L"dlss");
   }
+  SetNativeDlaaJitterEnvironment();
   if (g_fgen < 0 && !UserEnv(L"BB_FRAME_GEN")) SetEnvironmentVariableW(L"BB_FRAME_GEN", L"off");
   if (g_telemetry >= 0 && !UserEnv(L"BB_TELEMETRY") && g_c[g_telemetry].sel == 1) SetEnvironmentVariableW(L"BB_TELEMETRY", L"1");
   if (g_triggers >= 0 && g_c[g_triggers].sel == 1) {

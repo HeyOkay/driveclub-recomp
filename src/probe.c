@@ -1655,7 +1655,6 @@ int main(int argc, char **argv) {
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
     if (!cpu_only) env_timelapse_install();
     if (!cpu_only) scene_debug_install();
-    if (!cpu_only) env_timelapse_install();
     if (!cpu_only) apply_upscale_render_size(image, size);
     if (!cpu_only) apply_ui_resolution(image, size);
     if (!cpu_only) apply_cull_scale(image, size);

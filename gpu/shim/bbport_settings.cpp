@@ -26,8 +26,8 @@ std::string NextToConfig(const char* name) {
     return (slash == std::string::npos ? std::string() : config.substr(0, slash + 1)) + name;
 }
 // hdr.ini: the HDR brightness set while playing; picture.ini: the SDR picture (launcher sliders, F4).
-std::string HdrIniPath() { return NextToConfig("hdr.ini"); }
 std::string TextureIniPath() { return NextToConfig("texture_repetition.ini"); }
+std::string HdrIniPath() { return NextToConfig("hdr.ini"); }
 std::string PictureIniPath() { return NextToConfig("picture.ini"); }
 
 float Clamp(float v, float lo, float hi) {
@@ -191,6 +191,7 @@ void Load() {
             if (std::strncmp(line, "enabled=", 8) == 0) v.texture_repetition = std::atoi(line + 8) != 0;
         std::fclose(file);
     }
+
     if (const char* pacing = std::getenv("BB_FG_PACING"); pacing && std::strcmp(pacing, "gpu") == 0) {
         v.fg_pacing_gpu = true;
     }
@@ -245,6 +246,7 @@ void Load() {
             Set(v, key, value);
         }
     }
+    v.startup_texture_repetition = v.texture_repetition;
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;
@@ -368,19 +370,19 @@ const char* AaName(int aa) {
     return names[std::clamp(aa, 0, AaCount - 1)];
 }
 
+void SaveHdrBrightness(int nits) {
+    if (FILE* file = std::fopen(HdrIniPath().c_str(), "w")) {
+        std::fprintf(file, "paper=%d\n", nits);
+        std::fclose(file);
+    }
+}
+
 bool SaveTextureRepetition(bool enabled) {
     if (FILE* file = std::fopen(TextureIniPath().c_str(), "w")) {
         const bool written = std::fprintf(file, "enabled=%d\n", int(enabled)) > 0;
         return std::fclose(file) == 0 && written;
     }
     return false;
-}
-
-void SaveHdrBrightness(int nits) {
-    if (FILE* file = std::fopen(HdrIniPath().c_str(), "w")) {
-        std::fprintf(file, "paper=%d\n", nits);
-        std::fclose(file);
-    }
 }
 
 void SavePicture() {

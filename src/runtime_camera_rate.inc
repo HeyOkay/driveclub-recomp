@@ -56,7 +56,52 @@ static ABI float camera_rate_impulse(void *self, float magnitude) {
         velocity=camera_rate_impulse_original(self,magnitude);
     return velocity;
 }
-#include "runtime_camera_noise_reference.inc"
+typedef struct {
+    void *self;
+    double credit;
+    ULONGLONG last;
+    float previous[16], current[16];
+} CameraNoisePose;
+static ABI void camera_noise_update(void *self, float dt) {
+    if (!(dt>0) || dt>0.25f) { camera_noise_update_original(self,dt); return; }
+    static _Thread_local CameraNoisePose poses[64];
+    CameraNoisePose *p=NULL;
+    for (unsigned i=0;i<64;++i) {
+        if (!poses[i].self) {
+            poses[i].self=self;
+            memcpy(poses[i].current,(unsigned char *)self+0x160,64);
+            memcpy(poses[i].previous,poses[i].current,64);
+        }
+        if (poses[i].self==self) { p=&poses[i]; break; }
+    }
+    if (!p) { camera_noise_update_original(self,dt); return; }
+    ULONGLONG now=GetTickCount64();
+    if (now-p->last>250) {
+        p->credit=0;
+        memcpy(p->current,(unsigned char *)self+0x160,64);
+        memcpy(p->previous,p->current,64);
+    }
+    p->last=now;
+    unsigned ticks=camera_noise_ticks(&p->credit,dt);
+    unsigned previous_fixed_step=camera_noise_fixed_step;
+    camera_noise_fixed_step=1;
+    for (unsigned i=0;i<ticks;++i) {
+        /* Restore the actual simulation output before advancing it; the matrix
+           shown between ticks must never feed back into the noise simulation. */
+        memcpy((unsigned char *)self+0x160,p->current,64);
+        memcpy(p->previous,p->current,64);
+        camera_noise_update_original(self,1.0f/30.0f);
+        memcpy(p->current,(unsigned char *)self+0x160,64);
+    }
+    camera_noise_fixed_step=previous_fixed_step;
+    float alpha=(float)(p->credit*30.0);
+    if (alpha>1) alpha=1;
+    float interpolated[16];
+    /* This effect contains small shake rotations, not the world camera pose. */
+    for (unsigned i=0;i<16;++i)
+        interpolated[i]=p->previous[i]+(p->current[i]-p->previous[i])*alpha;
+    memcpy((unsigned char *)self+0x160,interpolated,64);
+}
 static void *camera_rate_hook(size_t offset, const unsigned char *expected, size_t count, uintptr_t target) {
     if (runtime_image_size<offset+count || memcmp(image+offset,expected,count)) return NULL;
     unsigned char *code=VirtualAlloc(NULL,4096,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE);

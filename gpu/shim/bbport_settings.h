@@ -187,8 +187,9 @@ struct Values {
     int startup_model_lod = 0;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;
-    /// Live world-layer sampling, toggled by Shift+F4 without replacing pipelines.
-    std::atomic<bool> texture_repetition{true};
+    /// Draw-uniform world-layer sampling switch; changes take effect immediately.
+    std::atomic<bool> texture_repetition{false};
+    bool startup_texture_repetition = false;
 };
 
 Values& Get();
@@ -216,9 +217,9 @@ const char* AaScaleName(int scale);
 /// HDR brightness changed while playing (Page Up / Page Down): hdr.ini next to the settings file
 /// (the launcher shows it on its slider; read at start when BB_HDR_PAPER is not set).
 void SaveHdrBrightness(int nits);
-/// Persist only this hotkey choice; preserve all unrelated user settings.
-bool SaveTextureRepetition(bool enabled);
 /// The picture changed while playing (F4): picture.ini next to the settings file, which the launcher's sliders show.
+/// Persist only the live texture choice beside the config.
+bool SaveTextureRepetition(bool enabled);
 void SavePicture();
 float AaScaleFactor(int scale);
 } // namespace BbSettings

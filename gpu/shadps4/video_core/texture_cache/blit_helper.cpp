@@ -1,3 +1,8 @@
+#include "video_core/renderer_vulkan/native_depth_grid.h"
+#include "video_core/host_shaders/native_depth_align_frag.h"
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
@@ -39,6 +44,7 @@ BlitHelper::BlitHelper(const Vulkan::Instance& instance_, Vulkan::Scheduler& sch
 }
 
 BlitHelper::~BlitHelper() {
+    Vulkan::NativeDepthGrid::ReleaseHelper(this);
     const auto device = instance.GetDevice();
     device.destroy(fs_tri_vertex);
     device.destroy(color_to_ms_depth_frag);
@@ -676,3 +682,231 @@ void BlitHelper::CreateMsCopyPipeline(const MsPipelineKey& key) {
 }
 
 } // namespace VideoCore
+
+namespace Vulkan::NativeDepthGrid {
+namespace {
+struct AlignedPipeline {
+    vk::Device device;
+    vk::ShaderModule vertex{}, fragment{};
+    vk::UniqueDescriptorSetLayout descriptor;
+    vk::UniquePipelineLayout layout;
+    vk::UniquePipeline pipeline;
+    ~AlignedPipeline() {
+        device.destroy(vertex);
+        device.destroy(fragment);
+    }
+};
+std::mutex pipeline_mutex;
+std::unordered_map<const VideoCore::BlitHelper*, std::shared_ptr<AlignedPipeline>> pipelines;
+std::shared_ptr<AlignedPipeline> MakePipeline(const Instance& instance, vk::Format format) {
+    const auto device = instance.GetDevice();
+    auto result = std::make_shared<AlignedPipeline>();
+    result->device = device;
+    result->vertex = CompileSPV(FS_TRI_VERT, device);
+    result->fragment = CompileSPV(NATIVE_DEPTH_ALIGN_FRAG, device);
+    const vk::DescriptorSetLayoutBinding binding{.binding = 0,
+                                                 .descriptorType =
+                                                     vk::DescriptorType::eSampledImage,
+                                                 .descriptorCount = 1,
+                                                 .stageFlags = vk::ShaderStageFlagBits::eFragment};
+    const vk::DescriptorSetLayoutCreateInfo dci{
+        .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
+        .bindingCount = 1,
+        .pBindings = &binding};
+    auto [dr, descriptor] = device.createDescriptorSetLayoutUnique(dci);
+    if (dr != vk::Result::eSuccess)
+        return {};
+    result->descriptor = std::move(descriptor);
+    const vk::DescriptorSetLayout set = *result->descriptor;
+    const vk::PushConstantRange push{vk::ShaderStageFlagBits::eFragment, 0, 8};
+    const vk::PipelineLayoutCreateInfo lci{.setLayoutCount = 1,
+                                           .pSetLayouts = &set,
+                                           .pushConstantRangeCount = 1,
+                                           .pPushConstantRanges = &push};
+    auto [lr, layout] = device.createPipelineLayoutUnique(lci);
+    if (lr != vk::Result::eSuccess)
+        return {};
+    result->layout = std::move(layout);
+    const vk::PipelineInputAssemblyStateCreateInfo input_assembly = {
+        .topology = vk::PrimitiveTopology::eTriangleList,
+    };
+    const vk::PipelineMultisampleStateCreateInfo multisampling = {
+        .rasterizationSamples = vk::SampleCountFlagBits::e1,
+    };
+    const vk::PipelineDepthStencilStateCreateInfo depth_state = {
+        .depthTestEnable = false,
+        .depthWriteEnable = false,
+        .depthCompareOp = vk::CompareOp::eAlways,
+    };
+    const std::array dynamic_states = {vk::DynamicState::eViewportWithCount,
+                                       vk::DynamicState::eScissorWithCount};
+    const vk::PipelineDynamicStateCreateInfo dynamic_info = {
+        .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
+        .pDynamicStates = dynamic_states.data(),
+    };
+
+    std::array<vk::PipelineShaderStageCreateInfo, 2> shader_stages;
+    shader_stages[0] = {
+        .stage = vk::ShaderStageFlagBits::eVertex,
+        .module = result->vertex,
+        .pName = "main",
+    };
+    shader_stages[1] = {
+        .stage = vk::ShaderStageFlagBits::eFragment,
+        .module = result->fragment,
+        .pName = "main",
+    };
+
+    const vk::PipelineRenderingCreateInfo pipeline_rendering_ci = {
+        .colorAttachmentCount = 1u,
+        .pColorAttachmentFormats = &format,
+        .depthAttachmentFormat = vk::Format::eUndefined,
+        .stencilAttachmentFormat = vk::Format::eUndefined,
+    };
+
+    const vk::PipelineColorBlendAttachmentState attachment = {
+        .blendEnable = false,
+        .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                          vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
+    };
+
+    const vk::PipelineColorBlendStateCreateInfo color_blending = {
+        .logicOpEnable = false,
+        .logicOp = vk::LogicOp::eCopy,
+        .attachmentCount = 1u,
+        .pAttachments = &attachment,
+    };
+    const vk::PipelineViewportStateCreateInfo viewport_info{};
+    const vk::PipelineVertexInputStateCreateInfo vertex_input_info{};
+    const vk::PipelineRasterizationStateCreateInfo raster_state{.lineWidth = 1.f};
+
+    const vk::GraphicsPipelineCreateInfo pipeline_info = {
+        .pNext = &pipeline_rendering_ci,
+        .stageCount = static_cast<u32>(shader_stages.size()),
+        .pStages = shader_stages.data(),
+        .pVertexInputState = &vertex_input_info,
+        .pInputAssemblyState = &input_assembly,
+        .pViewportState = &viewport_info,
+        .pRasterizationState = &raster_state,
+        .pMultisampleState = &multisampling,
+        .pDepthStencilState = &depth_state,
+        .pColorBlendState = &color_blending,
+        .pDynamicState = &dynamic_info,
+        .layout = *result->layout,
+    };
+
+    auto [pipeline_result, pipeline] =
+        instance.GetDevice().createGraphicsPipelineUnique(VK_NULL_HANDLE, pipeline_info);
+    if (pipeline_result != vk::Result::eSuccess)
+        return {};
+    result->pipeline = std::move(pipeline);
+    return result;
+}
+std::shared_ptr<AlignedPipeline>
+GetPipeline(const Instance& instance, const VideoCore::BlitHelper* owner, vk::Format format) {
+    {
+        std::lock_guard lock(pipeline_mutex);
+        const auto it = pipelines.find(owner);
+        if (it != pipelines.end())
+            return it->second;
+    }
+    auto made = MakePipeline(instance, format);
+    if (!made)
+        return {};
+    std::shared_ptr<AlignedPipeline> result;
+    {
+        std::lock_guard lock(pipeline_mutex);
+        result = pipelines.emplace(owner, made).first->second;
+    }
+    return result;
+}
+} // namespace
+void ReleaseHelper(const VideoCore::BlitHelper* owner) {
+    std::shared_ptr<AlignedPipeline> retired;
+    {
+        std::lock_guard lock(pipeline_mutex);
+        auto it = pipelines.find(owner);
+        if (it != pipelines.end()) {
+            retired = std::move(it->second);
+            pipelines.erase(it);
+        }
+    }
+    // Any in-flight use also owns this pipeline in the scheduler completion queue.
+}
+bool TryAlignedDepthCopy(const Instance& instance, Scheduler& scheduler,
+                         const VideoCore::BlitHelper* owner, u32 width, u32 height,
+                         vk::Format depth_format, vk::Format color_format, vk::Image source,
+                         vk::Image dest, std::array<float, 2> jitter) {
+    if (!owner || !width || !height || !source || !dest || source == dest ||
+        (depth_format != vk::Format::eD32Sfloat && depth_format != vk::Format::eD32SfloatS8Uint) ||
+        !Supported(jitter) || (jitter[0] == 0.f && jitter[1] == 0.f) ||
+        color_format != vk::Format::eR32Sfloat)
+        return false;
+    auto keep = GetPipeline(instance, owner, color_format);
+    if (!keep)
+        return false;
+    const auto device = instance.GetDevice();
+    const vk::ImageViewUsageCreateInfo src_usage_ci{.usage = vk::ImageUsageFlagBits::eSampled};
+    const auto [src_view_result, src_view] = device.createImageView({
+        .pNext = &src_usage_ci,
+        .image = source,
+        .viewType = vk::ImageViewType::e2D,
+        .format = depth_format,
+        .subresourceRange{vk::ImageAspectFlagBits::eDepth, 0U, 1U, 0U, 1U},
+    });
+    if (src_view_result != vk::Result::eSuccess)
+        return false;
+    const vk::ImageViewUsageCreateInfo dst_usage_ci{.usage =
+                                                        vk::ImageUsageFlagBits::eColorAttachment};
+    const auto [dst_view_result, dst_view] = device.createImageView({
+        .pNext = &dst_usage_ci,
+        .image = dest,
+        .viewType = vk::ImageViewType::e2D,
+        .format = color_format,
+        .subresourceRange{vk::ImageAspectFlagBits::eColor, 0U, 1U, 0U, 1U},
+    });
+    if (dst_view_result != vk::Result::eSuccess) {
+        device.destroyImageView(src_view);
+        return false;
+    }
+    scheduler.DeferOperation([device, src_view, dst_view, keep] {
+        device.destroyImageView(src_view);
+        device.destroyImageView(dst_view);
+    });
+
+    Vulkan::RenderState state{};
+    state.width = width;
+    state.height = height;
+    state.num_layers = 1;
+    state.num_color_attachments = 1;
+    state.color_attachments[0].image_view = dst_view;
+    state.color_attachments[0].image_layout = vk::ImageLayout::eColorAttachmentOptimal;
+    state.color_attachments[0].is_clear = true;
+    scheduler.BeginRendering(state);
+
+    const auto cmdbuf = scheduler.CommandBuffer();
+    const vk::DescriptorImageInfo image_info = {
+        .sampler = VK_NULL_HANDLE,
+        .imageView = src_view,
+        .imageLayout = vk::ImageLayout::eDepthStencilReadOnlyOptimal,
+    };
+    const vk::WriteDescriptorSet texture_write = {
+        .dstSet = VK_NULL_HANDLE,
+        .dstBinding = 0U,
+        .dstArrayElement = 0U,
+        .descriptorCount = 1U,
+        .descriptorType = vk::DescriptorType::eSampledImage,
+        .pImageInfo = &image_info,
+    };
+    cmdbuf.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, *keep->layout, 0U, texture_write);
+    cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, *keep->pipeline);
+    cmdbuf.pushConstants(*keep->layout, vk::ShaderStageFlagBits::eFragment, 0, 8, jitter.data());
+    cmdbuf.setViewportWithCount(vk::Viewport{0.f, 0.f, float(width), float(height), 0.f, 1.f});
+    cmdbuf.setScissorWithCount(vk::Rect2D{{0, 0}, {width, height}});
+    cmdbuf.draw(3, 1, 0, 0);
+
+    scheduler.EndRendering();
+    scheduler.GetDynamicState().Invalidate();
+    return true;
+}
+} // namespace Vulkan::NativeDepthGrid

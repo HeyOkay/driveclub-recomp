@@ -9,6 +9,7 @@ struct GraphicsChoice {
   int scenery = 0;            // 0 game, 1 more detail further away (less pop-in), 2 photo mode's detail
   bool reflections = false;   // the higher-quality screen-space reflections of photo mode
   int shadows = 0;            // shadow edge filtering beyond 4 m: 0 game (8 samples), 1 16 samples, 2 32 samples
+  int sun_shadows = 0;        // 0 Game; 1 Standard; 2 High; 3 Ultra near softness range
   bool particles = false;     // distant spray, smoke and dust kept, more particles
   bool dynamic_res = true;    // the game's dynamic resolution scaling (on in the game)
   bool motion_blur = true;    // the game's motion blur
@@ -16,7 +17,7 @@ struct GraphicsChoice {
   bool heat_haze = true;      // heat shimmer over hot roads
   bool fxaa = true;           // the FXAA pass after the game's own anti-aliasing
   bool Default() const {
-    return !own_car && !opponents && !scenery && !reflections && !shadows && !particles && dynamic_res &&
+    return !own_car && !opponents && !scenery && !reflections && !shadows && !sun_shadows && !particles && dynamic_res &&
            motion_blur && lens_dust && heat_haze && fxaa;
   }
 };

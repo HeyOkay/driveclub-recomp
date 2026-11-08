@@ -1,3 +1,9 @@
+#include "native_depth_grid.h"
+#include <atomic>
+#include <cstdio>
+#include <memory>
+#include "sun_atlas_proxy.h"
+#include "sun_ultra_policy.h"
 #include "../../../shim/bbport_diagnostics.h"
 // SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
@@ -223,7 +229,9 @@ bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
                       std::optional<VideoCore::SubresourceRange> subres_range) {
     BeforeImageAccess();
+    NativeDepthGrid::NativeWrite(*this, *image, dst_access, dst_layout);
     if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    SunAtlasProxy::NativeAccess(*this, *image, dst_access);
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
     return image_barriers.size() != prev_num_barriers;
@@ -807,6 +815,8 @@ void Runtime::VerifyFormCopy(VideoCore::Image* src, VideoCore::Image* dst) {
 
 bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     const TransferMark mark{*this, "depth/color form copy", *dst};
+    NativeDepthGrid::NativeWrite(*this, *dst, vk::AccessFlagBits2::eTransferWrite,
+                                 vk::ImageLayout::eTransferDstOptimal);
     // bbport: two depth images of different formats (DriveClub reuses a D32 with stencil's memory for a
     // D32 when it leaves a race): a direct copy needs the exact same depth format
     // (VUID-vkCmdCopyImage-srcImage-01548), and NVIDIA wrote outside the destination (device lost,
@@ -857,9 +867,19 @@ bool Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
         if (needs_flush) {
             FlushBarriers();
         }
-        blit_helper->CopyDepthToColor(dst->info.size.width, dst->info.size.height, src->backing->image.image_ci.format,
-                                      dst->backing->image.image_ci.format, src->GetImage(), dst->GetImage());
-        VerifyFormCopy(src, dst);
+        const auto alignment = NativeDepthGrid::ForCopy(*this, *src, *dst);
+        const bool aligned =
+            alignment &&
+            NativeDepthGrid::TryAlignedDepthCopy(
+                instance, scheduler, blit_helper.get(), dst->info.size.width, dst->info.size.height,
+                src->backing->image.image_ci.format, dst->backing->image.image_ci.format,
+                src->GetImage(), dst->GetImage(), *alignment);
+        if (!aligned) {
+            blit_helper->CopyDepthToColor(
+                dst->info.size.width, dst->info.size.height, src->backing->image.image_ci.format,
+                dst->backing->image.image_ci.format, src->GetImage(), dst->GetImage());
+            VerifyFormCopy(src, dst);
+        }
         dst->flags |= (src->flags & VideoCore::ImageFlagBits::GpuModified);
         dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
         return true;
@@ -1066,6 +1086,10 @@ void Runtime::ClearDepth(VideoCore::Image* dst, const VideoCore::SubresourceRang
         cmd.clearDepthStencilImage(image, vk::ImageLayout::eTransferDstOptimal,
                                    vk::ClearDepthStencilValue{depth, 0}, vk_range);
     });
+    if (depth == 0.f && range.base.level == 0 && range.base.layer == 0 &&
+        range.extent.levels == dst->info.resources.levels &&
+        range.extent.layers == dst->info.resources.layers)
+        NativeDepthGrid::Cleared(*this, *dst);
     dst->flags |= VideoCore::ImageFlagBits::GpuModified;
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
 }
@@ -1375,3 +1399,152 @@ void DumpVertexTexture(const Instance& instance, Scheduler& scheduler, Runtime& 
 
 
 } // namespace Vulkan
+
+// Provenance for the consumer depth copy. All mutable tracking belongs to the
+// recording owner; foreign writers revoke the published generation atomically.
+namespace Vulkan::NativeDepthGrid {
+namespace {
+struct State {
+    Tracking tracking;
+    std::function<bool()> owner;
+    std::atomic<std::uint64_t> epoch{0};
+    std::uint64_t observed = 0;
+    std::shared_ptr<const Tracking> snapshot;
+};
+State state;
+std::atomic<Runtime*> active{};
+std::uint64_t session_counter = 0;
+thread_local Key intent{};
+thread_local Runtime* intent_runtime{};
+Key Identity(const VideoCore::Image& i) {
+    return {i.image_uid,
+            i.backing ? reinterpret_cast<std::uintptr_t>(static_cast<VkImage>(i.GetImage())) : 0,
+            reinterpret_cast<std::uintptr_t>(i.backing), i.info.size.width, i.info.size.height};
+}
+bool Shape(const VideoCore::Image& i) {
+    if (!i.backing)
+        return false;
+    const auto& c = i.backing->image.image_ci;
+    return i.info.num_samples == 1 && c.samples == vk::SampleCountFlagBits::e1 &&
+           i.info.resources.levels == 1 && i.info.resources.layers == 1 && c.mipLevels == 1 &&
+           c.arrayLayers == 1 && c.imageType == vk::ImageType::e2D &&
+           c.extent.width == i.info.size.width && c.extent.height == i.info.size.height &&
+           c.extent.depth == 1;
+}
+bool Writer(Runtime& r) {
+    if (active.load(std::memory_order_acquire) != &r)
+        return false;
+    if (!state.owner || !state.owner()) {
+        state.epoch.fetch_add(1, std::memory_order_acq_rel);
+        std::atomic_store_explicit(&state.snapshot, std::shared_ptr<const Tracking>{},
+                                   std::memory_order_release);
+        return false;
+    }
+    const auto epoch = state.epoch.load(std::memory_order_acquire);
+    if (epoch != state.observed) {
+        state.tracking.NextFrame();
+        state.observed = epoch;
+        std::atomic_store_explicit(&state.snapshot, std::shared_ptr<const Tracking>{},
+                                   std::memory_order_release);
+    }
+    return true;
+}
+void Publish(const Tracking& before) {
+    if (state.epoch.load(std::memory_order_acquire) != state.observed) {
+        std::atomic_store_explicit(&state.snapshot, std::shared_ptr<const Tracking>{},
+                                   std::memory_order_release);
+        return;
+    }
+    if (before != state.tracking)
+        std::atomic_store_explicit(&state.snapshot,
+                                   std::make_shared<const Tracking>(state.tracking),
+                                   std::memory_order_release);
+}
+} // namespace
+bool Enabled() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("BB_NATIVE_DEPTH_GRID");
+        return (!e || e[0] != '0') &&
+               (SunAtlasProxy::Scale() == 2 ||
+                BbSunUltra::CurrentScope(SunAtlasProxy::Scale()) == BbSunUltra::Scope::Standard);
+    }();
+    return enabled;
+}
+void Start(Runtime& r, std::function<bool()> owner) {
+    state.tracking = {};
+    state.tracking.runtime = reinterpret_cast<std::uintptr_t>(&r);
+    state.tracking.session = ++session_counter;
+    state.owner = std::move(owner);
+    state.observed = state.epoch.load();
+    std::atomic_store(&state.snapshot, std::make_shared<const Tracking>(state.tracking));
+    active.store(&r, std::memory_order_release);
+}
+void Stop(Runtime& r) {
+    if (active.load() != &r)
+        return;
+    active.store(nullptr, std::memory_order_release);
+    std::atomic_store(&state.snapshot, std::shared_ptr<const Tracking>{});
+}
+void NextFrame(Runtime& r) {
+    if (!Enabled() || !Writer(r))
+        return;
+    const auto before = state.tracking;
+    state.tracking.NextFrame();
+    Publish(before);
+}
+void AttachmentIntent(Runtime& r, const VideoCore::Image* i) {
+    intent_runtime = i ? &r : nullptr;
+    intent = i ? Identity(*i) : Key{};
+}
+void NativeWrite(Runtime& r, const VideoCore::Image& i, vk::AccessFlags2 access, vk::ImageLayout) {
+    constexpr auto writes =
+        vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
+        vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
+        vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eMemoryWrite;
+    if (!Enabled() || !(access & writes))
+        return;
+    const auto key = Identity(i);
+    const bool expected = intent_runtime == &r && intent == key &&
+                          bool(access & vk::AccessFlagBits2::eDepthStencilAttachmentWrite) &&
+                          !(access & (writes & ~vk::AccessFlagBits2::eDepthStencilAttachmentWrite));
+    intent_runtime = nullptr;
+    intent = {};
+    if (!Writer(r))
+        return;
+    const auto before = state.tracking;
+    state.tracking.Write(key, expected);
+    Publish(before);
+}
+void Cleared(Runtime& r, const VideoCore::Image& i) {
+    if (!Enabled() || !Writer(r) || !Shape(i))
+        return;
+    const auto before = state.tracking;
+    state.tracking.Clear(Identity(i));
+    Publish(before);
+}
+void NoteDraw(Runtime& r, const VideoCore::Image& i, bool main_scope, bool qualified, bool writes,
+              bool clear, std::array<float, 2> jitter, bool far_no_change) {
+    if (!Enabled() || !Writer(r))
+        return;
+    const auto before = state.tracking;
+    const bool preserved = writes && !clear && main_scope && Shape(i) &&
+                           before.CanPreserveFar(Identity(i), far_no_change);
+    state.tracking.Draw(Identity(i), main_scope, qualified && Shape(i), writes, clear, jitter,
+                        preserved);
+    Publish(before);
+}
+std::optional<std::array<float, 2>> ForCopy(Runtime& r, const VideoCore::Image& src,
+                                            const VideoCore::Image& dst) {
+    if (!Enabled() || !Writer(r))
+        return {};
+    const auto snapshot = std::atomic_load_explicit(&state.snapshot, std::memory_order_acquire);
+    const auto jitter =
+        snapshot && Shape(src) && Shape(dst) && src.info.props.is_depth &&
+                !dst.info.props.is_depth && dst.info.pixel_format == vk::Format::eR32Sfloat
+            ? snapshot->Query(reinterpret_cast<std::uintptr_t>(&r), Identity(src), Enabled())
+            : std::nullopt;
+    if (state.epoch.load(std::memory_order_acquire) != state.observed)
+        return {};
+    return jitter;
+}
+} // namespace Vulkan::NativeDepthGrid

@@ -1,3 +1,4 @@
+#include "video_core/renderer_vulkan/sun_atlas_proxy.h"
 #include "bbport_diagnostics.h"
 #include "bbport_recent.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
@@ -62,6 +63,22 @@ void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, Ru
 Frontend::WindowSDL* g_window = nullptr;
 static std::atomic<bool> g_gpu_shutdown_complete{false};
 
+// The launcher selects prepared bundles only when the matching feature is in
+// this runtime. Exporting the function retains the marker in optimized builds.
+extern "C"
+#ifdef _WIN32
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
+const char* bbgpu_sun_shadow_capability_v1() {
+#ifdef BB_SUN_NATIVE_PAYLOADS
+    return "BB_SUN_SHADOWS_FULL_V1";
+#else
+    return "BB_SUN_SHADOWS_CORE_V1";
+#endif
+}
+
 namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
 namespace Libraries::VideoOut {
@@ -119,7 +136,16 @@ void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
             r->RegisterMemory(address, size);
             r->MapMemory(address, size);
         },
-        [](uintptr_t address, uint64_t size) { Memory::Instance()->GetRasterizer()->UnmapMemory(address, size); },
+        [](uintptr_t address, uint64_t size) {
+            if(Vulkan::SunAtlasProxy::Enabled()) {
+                // Pin dispatcher AND Rasterizer lifetime before either pointer is
+                // looked up. flush_hooks/direct_unmap hold no runtime-memory lock here.
+                Vulkan::SunAtlasProxy::UnmapOnOwner(
+                    []{return liverpool.get();},Vulkan::DrawPipe::OnStageB(),
+                    []{auto* r=Memory::Instance()->GetRasterizer();return r && r->IsGpuSideThread();},
+                    [address,size]{if(auto* r=Memory::Instance()->GetRasterizer())r->UnmapMemory(address,size);});
+            } else Memory::Instance()->GetRasterizer()->UnmapMemory(address,size);
+        },
         [](uintptr_t address, uint64_t size) {
             Memory::Instance()->GetRasterizer()->InvalidateMemory(address, size);
         });
@@ -340,6 +366,8 @@ extern "C" void bbgpu_shutdown(void) {
         Libraries::VideoOut::StopPresenting();
         // Liverpool references both the port and the presenter's rasterizer;
         // join it before destroying either of those owners.
+        Vulkan::SunAtlasProxy::BeginOwnerShutdown(liverpool.get());
+        if (!liverpool) Vulkan::SunAtlasProxy::CompleteOwnerShutdown();
         liverpool.reset();
         Libraries::VideoOut::Shutdown();
         presenter.reset();
