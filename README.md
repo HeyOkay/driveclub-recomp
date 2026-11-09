@@ -187,6 +187,9 @@ A second line, `Benchmark: ran render=... output=... fps_limit=... aa=...`, list
 - Requires Windows 10/11 64-bit, a processor from Intel Haswell (2013) or AMD Excavator or Ryzen onward, and a graphics card with a Vulkan 1.3 driver. About 40 GB of free space is needed for the game dumps.
 
 ## Building from source
+
+For this fork's Windows working build, including the updated Sun shadows, use the [working-main build profile](WORKING_MAIN_BUILD.md).
+
 See [BUILDING.md](BUILDING.md). The Linux build produces a native AppImage (`packaging/appimage/build-appimage.sh`);
 the same document lists its dependencies.
 

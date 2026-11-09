@@ -1,0 +1,520 @@
+#include "sun_atlas_proxy.h"
+#include "bbport_diagnostics.h"
+#include "bbport_recent.h"
+#include "video_core/renderer_vulkan/vk_frame_capture.h"
+#include "bbport_write_log.h"
+// bbport: glue between the C loader and the vendored shadPS4 video core.
+#include "bbport_overlay.h"
+#include "bbport_settings.h"
+#include "bbport_copy.h"
+#ifndef _WIN32
+#include <sys/resource.h>
+#endif
+#include "bbport_toggles.h"
+#include <exception>
+#include <algorithm>
+#include <atomic>
+namespace BbOverlay::SceneDebug { extern std::atomic<bool> expanded; }
+#include <condition_variable>
+#include <boost/asio/io_context.hpp>
+#include "common/polyfill_thread.h"
+#include "video_core/renderdoc.h"
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <chrono>
+#include <thread>
+#include <vector>
+#include <SDL3/SDL.h>
+#include "../../../../../host/gpu/bbgpu.h"
+#include "common/elf_info.h"
+#include "common/logging/log.h"
+#include "common/rdtsc.h"
+#include "core/libraries/kernel/orbis_error.h"
+#include "core/libraries/libs.h"
+#include "core/memory.h"
+#include "core/signals.h"
+#include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/amdgpu/liverpool.h"
+#include "video_core/buffer_cache/buffer.h"
+
+extern "C" {
+// runtime_memory.c
+void BbStartSampler();
+int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+int runtime_memory_write_backing(uintptr_t address, const void* data, uint64_t size);
+int runtime_memory_read_backing(uintptr_t address, void* data, uint64_t size);
+void runtime_memory_read_sparse(uintptr_t address, void* data, uint64_t size);
+uint64_t runtime_memory_clamp(uintptr_t address, uint64_t size);
+int runtime_memory_region(uintptr_t address, uintptr_t* start, uintptr_t* end, int* mapped);
+void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int write);
+typedef void (*RuntimeGpuRange)(uintptr_t address, uint64_t size);
+// runtime_kernel.c: one clock for guest and GPU timestamps
+uint64_t runtime_process_time_us(void);
+uint64_t runtime_process_time_counter(void);
+uint64_t runtime_tsc_frequency(void);
+int32_t* runtime_errno(void);
+void runtime_memory_set_gpu_hooks(RuntimeGpuRange map, RuntimeGpuRange unmap, RuntimeGpuRange invalidate);
+}
+
+Frontend::WindowSDL* g_window = nullptr;
+static std::atomic<bool> g_gpu_shutdown_complete{false};
+
+namespace Libraries::GnmDriver { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::AvPlayer { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::VideoOut {
+void RegisterLib(Core::Loader::SymbolsResolver* sym);
+void StopPresenting();
+void Shutdown();
+}
+extern std::unique_ptr<Vulkan::Presenter> presenter;
+extern std::unique_ptr<AmdGpu::Liverpool> liverpool;
+namespace Libraries::Kernel { void RegisterEventQueue(Core::Loader::SymbolsResolver* sym); }
+namespace Libraries::Kernel { void StopKernelService(); }
+
+namespace {
+struct Symbol {
+    std::string nid, library, module;
+    u64 address;
+};
+std::vector<Symbol> g_symbols;
+u32 g_sdk_version;
+} // namespace
+
+namespace Core::Loader {
+void SymbolsResolver::AddSymbol(const char* nid, const char* library, const char* module, SymbolType,
+                                u64 address) {
+    g_symbols.push_back({nid, library, module, address});
+}
+} // namespace Core::Loader
+
+// ElfInfo's fields are private to Core::Emulator; the port fills them here.
+namespace Core {
+class Emulator {
+public:
+    static void FillElfInfo(const BbGpuConfig& config) {
+        auto& info = Common::ElfInfo::Instance();
+        info.initialized = true;
+        info.game_serial = config.serial ? config.serial : "UNKNOWN";
+        info.title = config.title ? config.title : "";
+        info.sdk_ver = config.sdk_version;
+        info.psf_attributes.raw = config.psf_attributes;
+    }
+};
+
+void MemoryManager::SetRasterizer(Vulkan::Rasterizer* rasterizer_) {
+    if (!rasterizer_) {
+        runtime_memory_set_gpu_hooks(nullptr,nullptr,nullptr);
+        rasterizer=nullptr;
+        return;
+    }
+    BbStartSampler();
+    rasterizer = rasterizer_;
+    // Existing guest mappings are replayed by the runtime when hooks are installed.
+    runtime_memory_set_gpu_hooks(
+        [](uintptr_t address, uint64_t size) {
+            auto* r = Memory::Instance()->GetRasterizer();
+            r->RegisterMemory(address, size);
+            r->MapMemory(address, size);
+        },
+        [](uintptr_t address, uint64_t size) {
+            if(Vulkan::SunAtlasProxy::Enabled()) {
+                // Pin dispatcher AND Rasterizer lifetime before either pointer is
+                // looked up. flush_hooks/direct_unmap hold no runtime-memory lock here.
+                Vulkan::SunAtlasProxy::UnmapOnOwner(
+                    []{return liverpool.get();},Vulkan::DrawPipe::OnStageB(),
+                    []{auto* r=Memory::Instance()->GetRasterizer();return r && r->IsGpuSideThread();},
+                    [address,size]{if(auto* r=Memory::Instance()->GetRasterizer())r->UnmapMemory(address,size);});
+            } else Memory::Instance()->GetRasterizer()->UnmapMemory(address,size);
+        },
+        [](uintptr_t address, uint64_t size) {
+            Memory::Instance()->GetRasterizer()->InvalidateMemory(address, size);
+        });
+}
+void MemoryManager::InvalidateMemory(VAddr address, u64 size) {
+    if (rasterizer) rasterizer->InvalidateMemory(address, size);
+}
+u64 MemoryManager::ClampRangeSize(VAddr virtual_addr, u64 size) {
+    return runtime_memory_clamp(virtual_addr, size);
+}
+static void CopySparseSerial(VAddr source, u8* dest, u64 size) {
+    // bbport: one region lookup per part, in the runtime. BB_SPARSE_COPY=0: the region lookup here, then the
+    // backing copy's own lookup of the same region.
+    static const bool one_lookup = [] {
+        const char* env = std::getenv("BB_SPARSE_COPY");
+        return !(env && env[0] == '0');
+    }();
+    if (one_lookup) {
+        runtime_memory_read_sparse(source, dest, size);
+        return;
+    }
+    while (size) {
+        uintptr_t start = 0, end = 0;
+        int mapped = 0;
+        if (!runtime_memory_region(source, &start, &end, &mapped)) {
+            end = source + size;
+        }
+        const u64 n = std::min<u64>(size, end - source);
+        if (mapped) {
+            // The backing view is not protected for GPU tracking, so a copy never faults.
+            if (!runtime_memory_read_backing(source, dest, n)) std::memcpy(dest, reinterpret_cast<const void*>(source), n);
+        }
+        else std::memset(dest, 0, n);
+        source += n; dest += n; size -= n;
+    }
+}
+void MemoryManager::CopySparseMemory(VAddr source, u8* dest, u64 size) {
+    // bbport: large uploads (streaming) are split across the copy threads.
+    constexpr u64 Chunk = 512 * 1024;
+    if (size < 4 * Chunk || !BbCopy::Enabled()) {
+        return CopySparseSerial(source, dest, size);
+    }
+    BbCopy::ParallelFor((size + Chunk - 1) / Chunk, [&](std::size_t i) {
+        const u64 offset = i * Chunk;
+        CopySparseSerial(source + offset, dest + offset, std::min(Chunk, size - offset));
+    });
+}
+bool MemoryManager::TryWriteBacking(void* address, const void* data, u64 size) {
+    BbWriteLog::Note(reinterpret_cast<uintptr_t>(address), data, size, BbWriteLog::Backing);
+    return runtime_memory_write_backing(reinterpret_cast<uintptr_t>(address), data, size) != 0;
+}
+void AddressSpace::Protect(VAddr virtual_addr, u64 size, MemoryPermission perms) {
+    BbStats::Timer timer{BbStats::t_protect};
+    const u64 pages = (size + 4095) / 4096;
+    if constexpr (BB_DIAGNOSTICS) BbStats::protect_calls.fetch_add(1, std::memory_order_relaxed);
+    if constexpr (BB_DIAGNOSTICS) BbStats::protect_pages.fetch_add(pages, std::memory_order_relaxed);
+    if (!True(perms & MemoryPermission::Write)) {
+        if constexpr (BB_DIAGNOSTICS) BbStats::protect_revoke_calls.fetch_add(1, std::memory_order_relaxed);
+        if constexpr (BB_DIAGNOSTICS) BbStats::protect_revoke_pages.fetch_add(pages, std::memory_order_relaxed);
+    }
+    runtime_memory_gpu_protect(virtual_addr, size, True(perms & MemoryPermission::Read),
+                               True(perms & MemoryPermission::Write));
+}
+boost::icl::interval_set<VAddr> AddressSpace::GetUsableRegions() {
+    boost::icl::interval_set<VAddr> set;
+    set += boost::icl::interval<VAddr>::right_open(0x10'0000'0000ULL, 0xfc'0000'0000ULL);
+    return set;
+}
+} // namespace Core
+
+// Kernel services the vendored libraries call directly.
+namespace Libraries::Kernel {
+u64 PS4_SYSV_ABI sceKernelGetTscFrequency() { return runtime_tsc_frequency(); }
+u64 PS4_SYSV_ABI sceKernelReadTsc() { return Common::FencedRDTSC(); }
+u64 PS4_SYSV_ABI sceKernelGetProcessTime() { return runtime_process_time_us(); }
+u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounter() { return runtime_process_time_counter(); }
+u64 PS4_SYSV_ABI sceKernelGetProcessTimeCounterFrequency() { return 1'000'000'000; }
+s32 PS4_SYSV_ABI sceKernelIsNeoMode() { return 0; } // base PS4
+s32 PS4_SYSV_ABI sceKernelGetCompiledSdkVersion(s32* ver) {
+    if (!ver) return ORBIS_KERNEL_ERROR_EINVAL;
+    *ver = s32(g_sdk_version);
+    return ORBIS_OK;
+}
+s32 PS4_SYSV_ABI sceKernelUsleep(u32 microseconds) {
+    std::this_thread::sleep_for(std::chrono::microseconds(microseconds));
+    return ORBIS_OK;
+}
+} // namespace Libraries::Kernel
+
+namespace {
+// SDL video must be driven from one thread: the window lives on its own host thread.
+std::thread g_window_thread;
+std::mutex g_window_mutex;
+std::condition_variable g_window_cv;
+bool g_window_ready;
+std::atomic<bool> g_window_shutdown{false};
+} // namespace
+
+u32 BbDisplayRefreshHz() {
+    static const u32 hz = [] {
+        const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
+        const u32 rate = mode && mode->refresh_rate > 0 ? u32(mode->refresh_rate + 0.5f) : 60;
+        std::printf("GPU: vblank follows the display refresh rate, %u Hz\n", rate);
+        return std::max<u32>(rate, 60);
+    }();
+    return hz;
+}
+
+extern "C" void runtime_ffb_release(const char* why); // src/runtime_logiwheel.inc: the wheel's forces off
+
+#ifdef BB_PGO_GENERATE
+extern "C" int __llvm_profile_write_file(void);
+extern "C" void __llvm_profile_reset_counters(void);
+// Instrumented build (BB_PGO=generate): the game often ends through _exit (watchdog, guest
+// exit), which skips the profile write at exit. Write every 30 s and reset: the files sum the
+// intervals.
+static void StartProfileWriter() {
+    std::thread([] {
+        Common::SetCurrentThreadName("bb:pgo");
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            // Clang's profile runtime merges each write into the same file (%m), so the counters restart at zero.
+            const int status = __llvm_profile_write_file();
+            __llvm_profile_reset_counters();
+            std::printf("PGO: profile %s\n", status == 0 ? "written" : "write failed");
+            std::fflush(stdout);
+        }
+    }).detach();
+}
+#endif
+
+extern "C" int bbgpu_init(const BbGpuConfig* config) {
+    // An uncaught C++ exception (a Vulkan error such as a lost device, a failed allocation) says what it was.
+    std::set_terminate([] {
+        std::fputs("Fatal: unhandled C++ exception: ", stdout);
+        try {
+            if (auto error = std::current_exception()) {
+                std::rethrow_exception(error);
+            }
+        } catch (const std::exception& e) {
+            std::fputs(e.what(), stdout);
+        } catch (...) {
+            std::fputs("unknown", stdout);
+        }
+        std::fputc(10, stdout);
+        bbgpu_print_recent_passes();
+        runtime_ffb_release("a fatal GPU error");
+        std::fflush(nullptr);
+        _exit(21);
+    });
+    VideoCore::LoadRenderDoc();
+    BbSettings::Load();
+    BbOverlay::SceneDebug::expanded.store(true, std::memory_order_relaxed);
+#ifdef BB_PGO_GENERATE
+    StartProfileWriter();
+#endif
+    g_sdk_version = config->sdk_version;
+    VideoCore::SetStreamPlacementRenderHeight(config->render_height);
+#ifdef _WIN32
+    if (config->user_dir && !std::getenv("BB_GPU_USER_DIR")) _putenv_s("BB_GPU_USER_DIR", config->user_dir);
+#else
+    if (config->user_dir) setenv("BB_GPU_USER_DIR", config->user_dir, 0);
+#endif
+    Core::Emulator::FillElfInfo(*config);
+    const std::string title = config->title ? config->title : "Bloodborne";
+    const s32 width = config->width, height = config->height;
+    g_window_thread = std::thread([title, width, height] {
+        Common::SetCurrentThreadName("bb:window");
+        auto* window = new Frontend::WindowSDL(width, height, title.c_str());
+        {
+            std::scoped_lock lock{g_window_mutex};
+            g_window = window;
+            g_window_ready = true;
+        }
+        g_window_cv.notify_all();
+        while (!g_window_shutdown && window->PollEvents()) {
+            SDL_Delay(2);
+        }
+        if (g_window_shutdown) {
+            delete window;
+            g_window=nullptr;
+            return;
+        }
+        LOG_INFO(Frontend, "Window closed by user");
+        runtime_ffb_release("the window closed");
+        std::fflush(stdout);
+        std::_Exit(0);
+    });
+    std::atexit(bbgpu_shutdown);
+    {
+        std::unique_lock lock{g_window_mutex};
+        g_window_cv.wait(lock, [] { return g_window_ready; });
+    }
+    Core::Loader::SymbolsResolver resolver;
+    // GnmDriver creates the presenter that the VideoOut present thread uses.
+    Libraries::GnmDriver::RegisterLib(&resolver);
+    Libraries::VideoOut::RegisterLib(&resolver);
+    return 0;
+}
+
+extern "C" void bbgpu_shutdown(void) {
+    static std::once_flag stopped;
+    std::call_once(stopped,[] {
+        std::puts("GPU: stopping presentation threads");
+        Libraries::VideoOut::StopPresenting();
+        // Liverpool references both the port and the presenter's rasterizer;
+        // join it before destroying either of those owners.
+        Vulkan::SunAtlasProxy::BeginOwnerShutdown(liverpool.get());
+        if(!liverpool) Vulkan::SunAtlasProxy::CompleteOwnerShutdown();
+        liverpool.reset();
+        Libraries::VideoOut::Shutdown();
+        presenter.reset();
+        Core::Memory::Instance()->SetRasterizer(nullptr);
+        Core::Signals::Instance()->RemoveHandlers();
+        Libraries::Kernel::StopKernelService();
+        g_window_shutdown=true;
+        if(g_window_thread.joinable()) g_window_thread.join();
+        runtime_ffb_release("the game exited");
+        g_gpu_shutdown_complete=true;
+        std::puts("GPU: shutdown complete");
+    });
+}
+
+namespace Libraries::Kernel { void StartKernelService(); }
+namespace Libraries::Videodec { void RegisterLib(Core::Loader::SymbolsResolver* sym); }
+extern "C" void bbnet_register(void); // bbnet/bbnet_glue.cpp: network and PSN (co-op)
+extern "C" void bbgpu_register_kernel(void) {
+    Libraries::Kernel::StartKernelService();
+    Core::Loader::SymbolsResolver resolver;
+    Libraries::Kernel::RegisterEventQueue(&resolver);
+    Libraries::AvPlayer::RegisterLib(&resolver);
+    // inFAMOUS Second Son plays its .bsf movies through libSceVideodec (FFmpeg-backed).
+    Libraries::Videodec::RegisterLib(&resolver);
+    bbnet_register();
+}
+
+extern "C" uintptr_t bbgpu_resolve(const char* scoped_nid) {
+    const char* hash = std::strchr(scoped_nid, '#');
+    const size_t length = hash ? size_t(hash - scoped_nid) : std::strlen(scoped_nid);
+    for (const auto& symbol : g_symbols) {
+        if (symbol.nid.size() == length && !std::memcmp(symbol.nid.data(), scoped_nid, length)) {
+            return uintptr_t(symbol.address);
+        }
+    }
+    return 0;
+}
+
+extern "C" int bbgpu_handle_fault(void* ucontext, void* address) {
+    if(g_gpu_shutdown_complete) return 0;
+    return Core::Signals::Instance()->DispatchAccessViolation(ucontext, address) ? 1 : 0;
+}
+
+extern "C" void bbgpu_print_recent_passes(void) {
+    if (BbRecent::crumb) {
+        // The GPU's own count of the work its command processor reached: the faulting draw is this one or
+        // one of the few before it, not the last that was recorded.
+        const u32 reached = *BbRecent::crumb;
+        const u32 recorded = BbRecent::next.load(std::memory_order_relaxed);
+        std::printf("GPU: the command processor had reached draw or dispatch #%u of %u recorded", reached, recorded);
+        if (reached == 0 || recorded - reached >= BbRecent::Size) {
+            std::fputs(" (no entry kept for it)\n", stdout);
+        } else {
+            std::fputs(", around it:", stdout);
+            const u32 from = reached > 12 ? reached - 12 : 0;
+            for (u32 i = from; i < std::min<u32>(recorded, reached + 3); ++i) {
+                const auto& e = BbRecent::entries[i & (BbRecent::Size - 1)];
+                const char* mark = i + 1 == reached ? "*" : "";
+                if (e.kind == 'D') {
+                    std::printf(" [%sdraw vs %08x ps %08x idx %u inst %u]", mark, u32(e.a), u32(e.b), e.x, e.y);
+                } else if (e.kind == 'C') {
+                    std::printf(" [%scompute %08x %ux%ux%u]", mark, u32(e.a), e.x, e.y, e.z);
+                }
+            }
+            std::fputc(10, stdout);
+        }
+    }
+    const u32 end = BbRecent::next.load(std::memory_order_relaxed);
+    const u32 count = std::min<u32>(end, 48);
+    if (!count) {
+        return;
+    }
+    std::fputs("Recent GPU work, oldest first:", stdout);
+    for (u32 i = end - count; i != end; ++i) {
+        const auto& e = BbRecent::entries[i & (BbRecent::Size - 1)];
+        if (e.kind == 'D') {
+            std::printf(" [draw vs %08x ps %08x idx %u inst %u]", u32(e.a), u32(e.b), e.x, e.y);
+        } else if (e.kind == 'C') {
+            std::printf(" [compute %08x %ux%ux%u]", u32(e.a), e.x, e.y, e.z);
+        }
+    }
+    std::fputc(10, stdout);
+    std::fflush(stdout);
+}
+
+extern "C" const char* bbgpu_sibling_path(const char* name) {
+    static thread_local std::string path;
+    path = BbQuarantine::Sibling(name);
+    return path.c_str();
+}
+
+extern "C" void bbgpu_note_device_lost(void) {
+    BbQuarantine::NoteDeviceLost();
+}
+
+extern "C" unsigned long long bbgpu_flip_count(void) {
+    return Vulkan::FrameCapture::Flips();
+}
+
+extern "C" unsigned bbgpu_symbol_count(void) {
+    return unsigned(g_symbols.size());
+}
+
+// Kernel service thread: runs boost::asio timers for equeue timer events.
+namespace Libraries::Kernel {
+boost::asio::io_context io_context;
+static std::mutex m_asio_req;
+static std::condition_variable_any cv_asio_req;
+static std::atomic<u32> asio_requests;
+static std::jthread service_thread;
+
+void KernelSignalRequest() {
+    std::unique_lock lock{m_asio_req};
+    ++asio_requests;
+    cv_asio_req.notify_one();
+}
+
+static void KernelServiceThread(std::stop_token stoken) {
+    Common::SetCurrentThreadName("bb:kernel_service");
+    while (!stoken.stop_requested()) {
+        {
+            std::unique_lock lock{m_asio_req};
+            cv_asio_req.wait(lock, stoken, [] { return asio_requests != 0; });
+        }
+        if (stoken.stop_requested()) break;
+        io_context.run();
+        io_context.restart();
+        asio_requests = 0;
+    }
+}
+
+void StartKernelService() {
+    service_thread = std::jthread{KernelServiceThread};
+}
+void StopKernelService() {
+    if(service_thread.joinable()) {
+        service_thread.request_stop();
+        io_context.stop();
+        cv_asio_req.notify_all();
+        service_thread.join();
+    }
+}
+
+int* PS4_SYSV_ABI __Error() {
+    return runtime_errno();
+}
+} // namespace Libraries::Kernel
+
+#include "bbport_renderdoc_f1.inc"
+
+extern "C" int bbgpu_overlay_captures_input(void) {
+    return BbOverlay::CapturesInput() ? 1 : 0;
+}
+extern "C" int bbgpu_exit_dialog_available(void) { return BbOverlay::ExitDialogAvailable(); }
+extern "C" void bbgpu_mouse_stick_capture(int capture) { BbOverlay::RequestMouseCapture(capture!=0); }
+
+extern "C" void bbgpu_overlay_trophy(int id, int grade, const char* title_utf8, const char* description_utf8) {
+    BbOverlay::Trophy(id, grade, title_utf8 ? title_utf8 : "", description_utf8 ? description_utf8 : "");
+}
+extern "C" void bbgpu_overlay_note(const char* text_utf8) {
+    BbOverlay::Note(text_utf8 ? text_utf8 : "");
+}
+
+extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
+    if (!g_window) return 0;
+    g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");
+    return 1;
+}
+
+extern "C" int bbgpu_text_input_poll(char* out, uint64_t size) {
+    if (!g_window) return 2;
+    std::string text;
+    const int state = g_window->PollTextInput(text);
+    if (size) {
+        const size_t n = std::min<size_t>(text.size(), size - 1);
+        std::memcpy(out, text.data(), n);
+        out[n] = 0;
+    }
+    return state;
+}
