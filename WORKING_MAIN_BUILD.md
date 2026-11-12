@@ -10,3 +10,5 @@ profiles/working-main/package.ps1 -SourceDirectory D:/Builds/driveclub-working-m
 ```
 
 Use new output directories. The scripts build a separate package; settings and saves can then be copied into it. See [requirements and build options](profiles/working-main/README.md). User-owned game files are prepared at launch through the existing flow.
+
+High and Ultra Sun shadows accept the verified US (CUSA00093) and European (CUSA00003) 1.28 prepared images. Each preparation stage checks an exact whole-image hash; modified or other regional images remain unsupported. Runtime identity, patch-site and allocation checks still apply. Game data and generated preparation files are supplied locally and are not included in the repository.

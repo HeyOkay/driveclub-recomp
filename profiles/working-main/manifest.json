@@ -14748,8 +14748,8 @@
     },
     {
       "destination": "host/launcher/sun_shadows.cpp",
-      "sha256": "d53305b1c7589a2b9d06c026ebc6f95888347c22800461a861f8d14b85a2bb2f",
-      "size": 19257,
+      "sha256": "92f96a18fcd4388e46409bbf41b2b91d729c17506ecfeb3d939d130a510b74dd",
+      "size": 20116,
       "text_newlines": "LF when valid UTF8 without NUL",
       "overlay_source": "overlay/host/launcher/sun_shadows.cpp"
     },

@@ -74,9 +74,15 @@ bool SupportsRuntime(const fs::path& path) {
     tail=part.substr(part.size()>(sizeof kRuntimeMarker)?part.size()-sizeof kRuntimeMarker:0);
   }return false;
 }
+// The verified EU1.28 image differs from US1.28 only in53 regional-label bytes.
+// Keep exact whole-image identities at every stage; unknown or modified images
+// must still fail before any patch is applied. Cache hashes remain unmodified.
+bool MatchesBootHash(const Bytes& boot,const char* us,const char* eu) {
+  const auto digest=Hash(boot);return digest==us || digest==eu;
+}
 void PatchBoot(Bytes& boot) {
-  if(Hash(boot)!="839d2995699c9179d6510ba773702b47a44eac8196038f23c27abe2ce3cbb971")
-    Fail("Sun shadows require the supported original 1.28 prepared image. Select Standard or prepare that build again.");
+  if(!MatchesBootHash(boot,"839d2995699c9179d6510ba773702b47a44eac8196038f23c27abe2ce3cbb971","cb2ae1d90e240bde81ff2bea048c4eb16a9287185afd05fa36fb32e4e7c88156"))
+    Fail("Sun shadows require a verified US or European 1.28 prepared image. Select Standard or prepare the supported build again.");
   Expect(boot,0,Text("BBPROBE6"));const auto size=Get<uint64_t>(boot,8);
   if(size>boot.size())Fail("Invalid prepared image size.");const auto image=boot.size()-size;
   if(image!=0x348180)Fail("Unsupported prepared image layout.");
@@ -99,7 +105,7 @@ void PatchBoot(Bytes& boot) {
 // Apply only after existing budget/rear guards have accepted the old packed atlas.
 // All ten sanctioned edits are checked before committing the complete boot image.
 void PatchUniform2xHighBoot(Bytes& boot) {
-  if(Hash(boot)!="5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734")
+  if(!MatchesBootHash(boot,"5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734","a2f9463f2ebd3fc9c04e8b8a87a9ebfae4c0ce22c28ffde21b47c2ec18e3b943"))
     Fail("High sun shadows require the supported prepared game image.");
   Expect(boot,0,Text("BBPROBE6"));const auto size=Get<uint64_t>(boot,8);
   if(size>boot.size()||boot.size()-size!=0x348180)Fail("Unsupported High sun shadow image layout.");
@@ -120,7 +126,7 @@ void PatchUniform2xHighBoot(Bytes& boot) {
   for(const auto& e:edits)Expect(boot,prefix+e.address,Hex(e.before));
   auto candidate=boot;
   for(const auto& e:edits){auto bytes=Hex(e.after);std::copy(bytes.begin(),bytes.end(),candidate.begin()+prefix+e.address);}
-  if(Hash(candidate)!="afbcf9a092038ac6bded8a8e905a87de8dfa20dda6f4edc90d95cca525b8f0a0")
+  if(!MatchesBootHash(candidate,"afbcf9a092038ac6bded8a8e905a87de8dfa20dda6f4edc90d95cca525b8f0a0","6dc230d449e539771d813aa6fc8e7172dc2a398727679d5b7f7daa8fddfd3dfd"))
     Fail("High sun shadow preparation failed verification.");
   boot.swap(candidate);
 }
@@ -128,7 +134,7 @@ void PatchUniform2xHighBoot(Bytes& boot) {
 // Intermediate High is a native, unproxied packing. Validate every sanctioned
 // allocation/rectangle site before committing. Standard and Ultra stay unchanged.
 void PatchIntermediateHighBoot(Bytes& boot) {
-  if(Hash(boot)!="5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734")
+  if(!MatchesBootHash(boot,"5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734","a2f9463f2ebd3fc9c04e8b8a87a9ebfae4c0ce22c28ffde21b47c2ec18e3b943"))
     Fail("Intermediate High sun shadows require the supported prepared game image.");
   Expect(boot,0,Text("BBPROBE6"));const auto size=Get<uint64_t>(boot,8);
   if(size>boot.size()||boot.size()-size!=0x348180)Fail("Unsupported intermediate High image layout.");
@@ -149,7 +155,7 @@ void PatchIntermediateHighBoot(Bytes& boot) {
   for(const auto& e:edits)Expect(boot,prefix+e.address,Hex(e.before));
   auto candidate=boot;
   for(const auto& e:edits){auto bytes=Hex(e.after);std::copy(bytes.begin(),bytes.end(),candidate.begin()+prefix+e.address);}
-  if(Hash(candidate)!="1d85d86cd627e407992ef21780a65ac570bbe87a04b93721b81a1cfb82318e64")Fail("Intermediate High sun shadow preparation failed verification.");
+  if(!MatchesBootHash(candidate,"1d85d86cd627e407992ef21780a65ac570bbe87a04b93721b81a1cfb82318e64","a4baf7a7e8f2fbf2cecf18c775b161d45e394b71783eacc76c7c757878dfa3a6"))Fail("Intermediate High sun shadow preparation failed verification.");
   boot.swap(candidate);
 }
 
@@ -158,7 +164,7 @@ void AppendRearNativeRecords(Bytes& patches,const Bytes& boot,const RearNativePa
   // This gate stays closed until the independently audited binary is embedded.
   if(!payload.approved||!payload.data||!payload.size)
     Fail("The approved rear-view shadow allocation payload is unavailable.");
-  if(Hash(boot)!="5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734")
+  if(!MatchesBootHash(boot,"5b6b564a0ef22c1bca789a6add1fa2a47a7c1b63c354417815134597b0565734","a2f9463f2ebd3fc9c04e8b8a87a9ebfae4c0ce22c28ffde21b47c2ec18e3b943"))
     Fail("Unsupported atlas image for the rear-view allocation patch.");
   Bytes stub(payload.data,payload.data+payload.size);
   if(Hash(stub)!=payload.sha256)Fail("The rear-view allocation payload failed verification.");
